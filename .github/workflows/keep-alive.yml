@@ -1,0 +1,21 @@
+name: Keep-alive ping
+
+# Render's free tier spins the service down after 15 idle minutes, which would
+# stall the in-process publish scheduler between requests. This ping every 10
+# minutes keeps it warm. GHA schedule crons auto-disable after 60 days without
+# a commit to the repo — re-enable from the Actions tab if that happens.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping the workbench
+        run: curl -fsS -o /dev/null --max-time 30 "${KEEP_ALIVE_URL:-https://ph-news-workbench.onrender.com}/login"
+        env:
+          KEEP_ALIVE_URL: ${{ vars.KEEP_ALIVE_URL }}
