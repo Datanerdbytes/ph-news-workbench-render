@@ -225,13 +225,24 @@ jobs:
     # Pull requests only. A push to main would sit waiting for that approval,
     # and the pull request run already tested the exact merge commit that
     # lands, so main loses no coverage.
-    if: github.event_name == 'pull_request'
+    #
+    # Same-repository pull requests only. A fork gets neither the E2E secrets
+    # nor an image in GHCR — the docker job builds a fork's image locally
+    # instead of publishing it — so the job could only fail there. A job that
+    # is skipped by its condition reports "Success", so the required check
+    # still passes for a fork; the maintainer runs the suite locally instead.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     environment: e2e
     # One Neon branch, one suite at a time: two runs seeding and cleaning the
-    # same database at once would delete each other's fixtures.
+    # same database at once would delete each other's fixtures. `queue: max`
+    # keeps several pull requests waiting instead of cancelling the pending
+    # one when a third arrives.
     concurrency:
       group: ${{ github.workflow }}-e2e-database
       cancel-in-progress: false
+      queue: max
     permissions:
       contents: read
       # The image under test was pushed to GHCR by the docker job. The
