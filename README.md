@@ -1,5 +1,7 @@
 # PH News Workbench — self-hosted Docker deployment
 
+[![CI](https://github.com/Datanerdbytes/ph-news-workbench-render/actions/workflows/ci.yml/badge.svg)](https://github.com/Datanerdbytes/ph-news-workbench-render/actions/workflows/ci.yml)
+
 An isolated, Vercel-independent deployment of the newsroom workbench: the full
 Next.js 16 App Router app (pages **and** API Route Handlers — the backend lives
 in the same process) running as one container. Built as a copy of

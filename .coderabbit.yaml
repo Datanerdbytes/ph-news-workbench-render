@@ -18,6 +18,8 @@ reviews:
   # Skip generated dependency churn.
   path_filters:
     - "!**/package-lock.json"
+    - "!**/.next/**"
+    - "!**/tsconfig.tsbuildinfo"
   path_instructions:
     - path: "app/api/**"
       instructions: >-
@@ -36,5 +38,11 @@ reviews:
         Follow the Ink & White theme and existing component patterns. Brand
         marks must use components/platform-mark.tsx (this lucide version has
         no brand icons). cn() silently drops unknown text-* class names.
+    - path: ".github/workflows/**"
+      instructions: >-
+        Workflow changes are security-sensitive: flag anything that executes
+        PR-controlled input, widens `permissions:` beyond least privilege, or
+        can leak secrets (CRON_SECRET, KEEP_ALIVE_URL) into logs or curl
+        output.
 chat:
   auto_reply: true
