@@ -1,0 +1,200 @@
+'use client';
+
+import { useState } from 'react';
+import { Link2, PenLine, SendHorizontal } from 'lucide-react';
+import { toast } from 'sonner';
+import { AssistantChat } from '@/components/assistant-chat';
+import { FacebookPreview } from '@/components/facebook-preview';
+import { useFacebookConnection } from '@/components/facebook-connection';
+import { Button } from '@/components/ui/button';
+import {
+  ComposerCard,
+  FieldLabel,
+  PageSelector,
+  PublishPage,
+  ResultList,
+  ScheduleField,
+  defaultScheduleValue,
+  resolveScheduledFor,
+  inputClass,
+  textareaClass,
+  useManagedPages,
+  type PublishResult,
+} from '@/components/publishing/publish-page';
+
+const MAX_MESSAGE_LENGTH = 5000;
+
+export default function PostPage() {
+  const pages = useManagedPages();
+  const connection = useFacebookConnection();
+  const [message, setMessage] = useState('');
+  const [link, setLink] = useState('');
+  const [scheduleOn, setScheduleOn] = useState(false);
+  const [scheduledFor, setScheduledFor] = useState(defaultScheduleValue);
+  const [scheduleError, setScheduleError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [results, setResults] = useState<PublishResult[] | null>(null);
+
+  const selectedPage = pages.pages.find((page) => page.id === pages.selected[0]);
+  const canPublish = message.trim().length > 0;
+
+  async function post() {
+    if (!canPublish) return;
+    let scheduledForIso: string | null = null;
+    if (scheduleOn) {
+      scheduledForIso = resolveScheduledFor(scheduledFor);
+      if (!scheduledForIso) {
+        setScheduleError(
+          'Pick a time between 10 minutes and 75 days from now.'
+        );
+        return;
+      }
+      setScheduleError('');
+    }
+    setBusy(true);
+    setResults(null);
+    try {
+      const res = await fetch('/api/posts', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          message,
+          link: link.trim(),
+          pageIds: pages.selected,
+          ...(scheduledForIso
+            ? { scheduledFor: scheduledForIso }
+            : {}),
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error ?? 'The post could not be published.');
+      setResults(data.results ?? []);
+      toast.success(scheduleOn ? 'Post scheduled' : 'Post published', {
+        description: data.warning,
+      });
+      setMessage('');
+      setLink('');
+      // The next post publishes now unless scheduling is deliberately re-enabled.
+      setScheduleOn(false);
+      setScheduleError('');
+    } catch (error) {
+      toast.error('Post failed', {
+        description:
+          error instanceof Error ? error.message : 'The post could not be published.',
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <PublishPage eyebrow="Publishing" title="Post">
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="min-w-0">
+      <ComposerCard
+        icon={<PenLine className="size-4" />}
+        title="New post"
+        badge="Text post"
+        aside={
+          <>
+            <p className="font-semibold text-secondary-foreground">How a post publishes</p>
+            <p>
+              Text posts publish straight to the Page&apos;s feed. A link turns
+              the post into a link share with Facebook&apos;s own preview card.
+            </p>
+            <p>Scheduled posts are queued by Facebook and appear once published.</p>
+          </>
+        }
+      >
+        <div>
+          <FieldLabel htmlFor="post-message" hint={`${message.length}/${MAX_MESSAGE_LENGTH}`}>
+            Message
+          </FieldLabel>
+          <textarea
+            id="post-message"
+            value={message}
+            onChange={(event) => setMessage(event.target.value)}
+            rows={8}
+            maxLength={MAX_MESSAGE_LENGTH}
+            placeholder="Write the post…"
+            className={textareaClass}
+          />
+        </div>
+
+        <div>
+          <FieldLabel htmlFor="post-link" hint="Optional">
+            Link
+          </FieldLabel>
+          <div className="relative">
+            <Link2
+              className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-faint"
+              aria-hidden
+            />
+            <input
+              id="post-link"
+              value={link}
+              onChange={(event) => setLink(event.target.value)}
+              placeholder="https://…"
+              className={`${inputClass} pl-8`}
+              type="url"
+            />
+          </div>
+        </div>
+
+        <PageSelector
+          pages={pages.pages}
+          selected={pages.selected}
+          onSelect={pages.selectOne}
+          loading={pages.loading}
+        />
+
+        <ScheduleField
+          enabled={scheduleOn}
+          onEnabled={setScheduleOn}
+          value={scheduledFor}
+          onChange={(next) => {
+            setScheduledFor(next);
+            setScheduleError('');
+          }}
+          error={scheduleError}
+        />
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="brand"
+            size="sm"
+            onClick={post}
+            disabled={!canPublish || busy || !pages.selected.length}
+          >
+            <SendHorizontal className="size-3.5" aria-hidden />
+            {busy ? 'Publishing…' : scheduleOn ? 'Schedule post' : 'Publish post'}
+          </Button>
+          <span className="text-[10px] text-muted-foreground">
+            {scheduleOn
+              ? 'Facebook queues the post and publishes it at the chosen time.'
+              : 'Publishes straight to the selected Page(s).'}
+          </span>
+        </div>
+
+        <ResultList results={results ?? []} />
+      </ComposerCard>
+        </div>
+
+        <div className="self-start xl:sticky xl:top-[70px]">
+          <FacebookPreview
+            text={message}
+            link={link.trim() || undefined}
+            connected={connection.connected}
+            pageName={selectedPage?.name}
+            pagePicture={selectedPage?.picture}
+          />
+        </div>
+      </div>
+      <AssistantChat
+        draft={message}
+        onDraftChange={setMessage}
+        contextLabel="post message (5,000 character limit)"
+      />
+    </PublishPage>
+  );
+}

@@ -1,0 +1,397 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  --font-sans: var(--font-manrope), ui-sans-serif, system-ui, sans-serif;
+  --font-heading: var(--font-manrope), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-brand: var(--brand);
+  --color-brand-strong: var(--brand-strong);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-brand-soft: var(--brand-soft);
+  --color-brand-accent: var(--brand-accent);
+  --color-brand-accent-soft: var(--brand-accent-soft);
+  --color-ink: var(--ink);
+  --color-paper: var(--paper);
+  --color-facebook: var(--facebook);
+  --color-facebook-strong: var(--facebook-strong);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-success-bright: var(--success-bright);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger-soft: var(--danger-soft);
+  --color-faint: var(--faint);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-line-strong: var(--line-strong);
+  --color-instagram: var(--instagram);
+  --color-youtube: var(--youtube);
+  --color-tiktok: var(--tiktok);
+  --color-linkedin: var(--linkedin);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}
+
+:root {
+  --background: #ffffff;
+  --foreground: #161b23;
+  --card: #ffffff;
+  --card-foreground: #161b23;
+  --popover: #ffffff;
+  --popover-foreground: #161b23;
+  --primary: #161b23;
+  --primary-foreground: #ffffff;
+  --secondary: #f4f5f6;
+  --secondary-foreground: #39424f;
+  --muted: #f4f5f6;
+  --muted-foreground: #6b7482;
+  --accent: #f4f5f6;
+  --accent-foreground: #161b23;
+  --destructive: #b3261e;
+  --border: #e6e8ea;
+  --input: #ccd0d6;
+  --ring: #1a1d23;
+
+  --brand: #1a1d23;
+  --brand-strong: #0d1015;
+  --brand-foreground: #ffffff;
+  --brand-soft: #eef0f2;
+  --brand-accent: #1a1d23;
+  --brand-accent-soft: #eef0f2;
+  --ink: #161b23;
+  --paper: #ffffff;
+  --facebook: #1877f2;
+  /* AA-safe text variant of the Facebook blue (~5.5:1 on white) for small
+     status text that the raw brand color can't carry at 10px. */
+  --facebook-strong: #0d63d8;
+
+  --success: #0d7355;
+  --success-soft: #e7f5ef;
+  /* Bright mint for success marks sitting on dark preview panels, where
+     the AA-on-white --success is too dim. */
+  --success-bright: #79d2ae;
+  --info: #1f5fbf;
+  --info-soft: #eaf1fc;
+  --warning: #9a5a00;
+  --warning-soft: #fdf3e0;
+  --danger-soft: #fceceb;
+  --faint: #98a1ae;
+  --surface-2: #fafbfc;
+  --surface-3: #f4f5f6;
+  --line-strong: #ccd0d6;
+  --instagram: #d62976;
+  --youtube: #d93025;
+  --tiktok: #14181d;
+  --linkedin: #0a66c2;
+
+  --chart-1: #1a1d23;
+  --chart-2: #1877f2;
+  --chart-3: #39424f;
+  --chart-4: #9aa1ab;
+  --chart-5: #98a1ae;
+
+  --radius: 0.625rem;
+
+  --sidebar: #ffffff;
+  --sidebar-foreground: #161b23;
+  --sidebar-primary: #161b23;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #f4f5f6;
+  --sidebar-accent-foreground: #161b23;
+  --sidebar-border: #e6e8ea;
+  --sidebar-ring: #1a1d23;
+}
+
+/* Per-account theme overrides — values mirror lib/themes.ts */
+html[data-theme="ink-emerald"] {
+  --brand-accent: #047857;
+  --brand-accent-soft: #e5f3ee;
+}
+
+html[data-theme="navy-champagne"] {
+  --background: #f7f8fa;
+  --foreground: #17202e;
+  --secondary: #f0f2f5;
+  --muted: #f0f2f5;
+  --muted-foreground: #64708a;
+  --accent: #f0f2f5;
+  --accent-foreground: #17202e;
+  --border: #e4e8ee;
+  --input: #cfd6e0;
+  --ring: #1e3a5f;
+  --brand: #1e3a5f;
+  --brand-strong: #14283f;
+  --brand-soft: #f6eedd;
+  --brand-accent: #b7791f;
+  --brand-accent-soft: #f6eedd;
+  --ink: #17202e;
+  --surface-2: #fafbfc;
+  --surface-3: #f0f2f5;
+  --line-strong: #cfd6e0;
+  --sidebar-accent: #f0f2f5;
+  --sidebar-border: #e4e8ee;
+  --sidebar-ring: #1e3a5f;
+  --chart-1: #1e3a5f;
+}
+
+html[data-theme="plum-rose"] {
+  --background: #faf9fc;
+  --foreground: #221a29;
+  --secondary: #f4f1f8;
+  --muted: #f4f1f8;
+  --muted-foreground: #736a80;
+  --accent: #f4f1f8;
+  --accent-foreground: #221a29;
+  --border: #e9e4f0;
+  --input: #d6cddd;
+  --ring: #6b21a8;
+  --brand: #6b21a8;
+  --brand-strong: #571a89;
+  --brand-soft: #fbe9f1;
+  --brand-accent: #be185d;
+  --brand-accent-soft: #fbe9f1;
+  --ink: #221a29;
+  --surface-2: #fbfafd;
+  --surface-3: #f4f1f8;
+  --line-strong: #d6cddd;
+  --sidebar-accent: #f4f1f8;
+  --sidebar-border: #e9e4f0;
+  --sidebar-ring: #6b21a8;
+  --chart-1: #6b21a8;
+}
+
+html[data-theme="slate-sky"] {
+  --background: #f6f8fa;
+  --foreground: #1c2532;
+  --secondary: #eff2f6;
+  --muted: #eff2f6;
+  --muted-foreground: #68758a;
+  --accent: #eff2f6;
+  --accent-foreground: #1c2532;
+  --border: #e3e8ee;
+  --input: #cdd5de;
+  --ring: #334155;
+  --brand: #334155;
+  --brand-strong: #223046;
+  --brand-soft: #e5f2fa;
+  --brand-accent: #0284c7;
+  --brand-accent-soft: #e5f2fa;
+  --ink: #1c2532;
+  --surface-2: #f9fafc;
+  --surface-3: #eff2f6;
+  --line-strong: #cdd5de;
+  --sidebar-accent: #eff2f6;
+  --sidebar-border: #e3e8ee;
+  --sidebar-ring: #334155;
+  --chart-1: #334155;
+}
+
+html[data-theme="forest-amber"] {
+  --background: #f6f8f6;
+  --foreground: #1a231b;
+  --secondary: #eff3ef;
+  --muted: #eff3ef;
+  --muted-foreground: #61705f;
+  --accent: #eff3ef;
+  --accent-foreground: #1a231b;
+  --border: #e2e8e2;
+  --input: #ccd6cc;
+  --ring: #14532d;
+  --brand: #14532d;
+  --brand-strong: #0e3b21;
+  --brand-soft: #fbeed9;
+  --brand-accent: #d97706;
+  --brand-accent-soft: #fbeed9;
+  --ink: #1a231b;
+  --surface-2: #f9fbf9;
+  --surface-3: #eff3ef;
+  --line-strong: #ccd6cc;
+  --sidebar-accent: #eff3ef;
+  --sidebar-border: #e2e8e2;
+  --sidebar-ring: #14532d;
+  --chart-1: #14532d;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    min-height: 100dvh;
+    background-color: var(--background);
+    color: var(--foreground);
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--brand) 24%, transparent);
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklab, var(--foreground) 18%, transparent)
+      transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: color-mix(in oklab, var(--foreground) 16%, transparent);
+    border: 3px solid transparent;
+    border-radius: 9999px;
+    background-clip: padding-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklab, var(--foreground) 28%, transparent);
+    border: 3px solid transparent;
+    background-clip: padding-box;
+  }
+}
+
+@layer components {
+  .eyebrow {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    line-height: 1;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  /*
+   * Invisible hit-area extension for small icon-only controls: the
+   * ::after box participates in hit testing, so the effective target
+   * reaches ~40px without changing the visible footprint. Only safe on
+   * controls whose neighbors are at least 12px away (or that are
+   * isolated / absolutely positioned); use tap-target-tight for
+   * controls 8px apart. Positioning: Tailwind's `absolute` (utilities
+   * layer) overrides the relative below, so absolutely-positioned
+   * controls keep their placement and still anchor the pseudo box.
+   */
+  .tap-target {
+    position: relative;
+  }
+
+  .tap-target::after {
+    content: "";
+    position: absolute;
+    inset: -6px;
+    border-radius: inherit;
+  }
+
+  .tap-target-tight {
+    position: relative;
+  }
+
+  .tap-target-tight::after {
+    content: "";
+    position: absolute;
+    inset: -4px;
+    border-radius: inherit;
+  }
+
+  .paper-shadow {
+    box-shadow:
+      0 1px 2px rgba(16, 24, 40, 0.05),
+      0 18px 40px -24px rgba(16, 24, 40, 0.28);
+  }
+
+  .paper-shadow-sm {
+    box-shadow:
+      0 1px 2px rgba(16, 24, 40, 0.05),
+      0 2px 6px -2px rgba(16, 24, 40, 0.08);
+  }
+
+  .panel {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+    box-shadow:
+      0 1px 2px rgba(16, 24, 40, 0.05),
+      0 2px 6px -2px rgba(16, 24, 40, 0.08);
+  }
+
+  .page-title {
+    font-family: var(--font-heading);
+    font-size: 1.9375rem;
+    font-weight: 500;
+    line-height: 1.08;
+    letter-spacing: -0.018em;
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .text-pretty {
+    text-wrap: pretty;
+  }
+}
+
+@keyframes download-sweep {
+  from {
+    transform: translateX(-120%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+/*
+ * Users who ask the OS for reduced motion get a still UI: every CSS
+ * animation (spinners, pulses, the download sweep) and transition is
+ * collapsed. GSAP-driven reel previews are output content, not UI motion,
+ * and gate themselves separately (presets.preview.ts).
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
