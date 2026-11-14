@@ -10,8 +10,9 @@ node_modules
 tsconfig.tsbuildinfo
 
 # test & scratch material that never reaches the image
+# NOTE: e2e/ stays IN the context — playwright.config.ts imports from it and
+# next build type-checks the whole project, so excluding it breaks the build.
 coverage
-e2e
 test-results
 playwright-report
 design
