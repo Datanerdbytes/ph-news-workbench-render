@@ -174,11 +174,10 @@ jobs:
     needs: docker
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    # The suite needs a database of its own — a Neon branch of prod — and that
-    # branch is not provisioned yet, so the job reports its failure without
-    # failing the workflow. Drop this once E2E_DATABASE_URL points at a
-    # throwaway database and the job goes green.
-    continue-on-error: true
+    # The suite runs against the `ci-e2e` Neon branch — a throwaway copy of
+    # the production schema, seeded fresh by the job below. That branch
+    # auto-deletes seven days after it was created, so E2E_DATABASE_URL has to
+    # be repointed when it disappears.
     permissions:
       contents: read
       # The image under test was pushed to GHCR by the docker job. The
@@ -256,6 +255,7 @@ jobs:
             -e BETTER_AUTH_TRUSTED_ORIGINS="http://localhost:${{ env.APP_PORT }}" \
             -e SIGNUP_INVITE_CODE="${{ secrets.E2E_SIGNUP_INVITE_CODE }}" \
             -e DISABLE_LOCAL_SCHEDULER=1 \
+            -e DISABLE_AUTH_RATE_LIMIT=1 \
             ${{ env.IMAGE }}:${{ github.sha }}
 
       - name: Wait for the app to answer

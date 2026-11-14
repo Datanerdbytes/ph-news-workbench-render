@@ -13,11 +13,14 @@
 //   4. migrate-*.mjs   — the incremental migrations.
 //   5. the workspace   — the app creates it lazily on first sign-in, but the
 //                        suite seeds notifications before it loads a page.
+//   6. the Facebook connection — the publish pages render their composer
+//                        only when the workspace has a connected Page.
 //
 // The migrations are not transactional and a couple of them swallow their
 // errors, so the end state is verified instead of trusted.
 import { readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createCipheriv, hkdfSync, randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { neon } from "@neondatabase/serverless";
@@ -46,6 +49,35 @@ function run(script) {
     stdio: "inherit",
     env: process.env,
   });
+}
+
+/**
+ * The same envelope lib/facebook-token.ts writes: AES-256-GCM under an
+ * HKDF-derived key, tagged with the secret name. A seeded Page token has to
+ * be readable by the container, which runs with the same BETTER_AUTH_SECRET.
+ */
+function encryptSecret(secret, info) {
+  const master = process.env.BETTER_AUTH_SECRET;
+  if (!master) {
+    throw new Error(
+      "BETTER_AUTH_SECRET is required — the container has to read the seeded token",
+    );
+  }
+  const key = Buffer.from(
+    hkdfSync("sha256", master, "ph-news-workbench", info, 32),
+  );
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([
+    cipher.update(secret, "utf8"),
+    cipher.final(),
+  ]);
+  return [
+    "v1",
+    iv.toString("base64url"),
+    cipher.getAuthTag().toString("base64url"),
+    ciphertext.toString("base64url"),
+  ].join(".");
 }
 
 run("migrate-auth.js");
@@ -92,6 +124,19 @@ await sql`
   VALUES (${workspaceId}, ${owner.id}, 'owner')
   ON CONFLICT DO NOTHING`;
 console.log(`→ workspace ${workspaceId}`);
+
+// The publish pages (and the composer they wrap) only render when the
+// workspace has a connected Facebook Page — /api/facebook/status reports
+// "connected" from this row alone. The token is a dummy: the suite never
+// publishes, it only needs the composer on screen.
+const pageToken = encryptSecret("e2e-dummy-page-token", "facebook-page-token");
+await sql`
+  INSERT INTO facebook_connections
+    (workspace_id, user_id, page_id, page_name, access_token, scopes, connected_at, updated_at)
+  VALUES (${workspaceId}, ${owner.id}, 'e2e-page-id', 'E2E Test Page', ${pageToken},
+          'pages_show_list,pages_manage_posts', now(), now())
+  ON CONFLICT (workspace_id) DO NOTHING`;
+console.log("→ facebook connection");
 
 const requiredTables = [
   "user",

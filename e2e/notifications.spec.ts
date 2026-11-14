@@ -21,7 +21,7 @@ test("shows the unread badge, lists rows, and marks all read", async ({
   await expect(page.getByText("Regression seed 1")).toBeVisible();
   await expect(page.getByText("Regression seed 2")).toBeVisible();
 
-  await page.getByRole("menuitem", { name: "Mark all read" }).click();
+  await page.getByRole("button", { name: "Mark all read" }).click();
   await expect(
     page.getByRole("button", { name: "Notifications", exact: true })
   ).toBeVisible();
@@ -33,7 +33,7 @@ test("marks a row read and follows its link", async ({ page }) => {
   await page
     .getByRole("button", { name: "Notifications, 2 unread" })
     .click();
-  await page.getByRole("menuitem", { name: /Regression seed 1/ }).click();
+  await page.getByRole("button", { name: /Regression seed 1/ }).click();
 
   await expect(page).toHaveURL(/\/calendar/);
 });

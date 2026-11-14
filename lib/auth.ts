@@ -35,6 +35,13 @@ export const auth = betterAuth({
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean),
+  // better-auth's default sign-in limit is 3 requests per 10 seconds per IP.
+  // The E2E lockout spec sends six sign-ins in a row on purpose and every
+  // spec shares one IP, so the limit would answer 429 instead of the app's
+  // own lockout message. Only the throwaway E2E container turns it off.
+  rateLimit: {
+    enabled: process.env.DISABLE_AUTH_RATE_LIMIT !== "1",
+  },
   emailAndPassword: {
     enabled: true,
     // Sign-in is refused with 403 EMAIL_NOT_VERIFIED until the user opens the
