@@ -34,6 +34,8 @@ export const config = {
   // large multipart hf-driver uploads, so both stay out of the proxy; both
   // routes authenticate the request themselves.
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|api/reels/prepare|api/stage).*)",
+    // tiktok1evuq…txt: TikTok's site-verification signature file must be
+    // publicly fetchable or URL-prefix verification fails.
+    "/((?!_next/static|_next/image|favicon.ico|api/reels/prepare|api/stage|tiktok1evuqUunyZ47vScjZKHVD3zQksvJdTCA\\.txt).*)",
   ],
 };
