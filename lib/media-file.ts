@@ -139,6 +139,7 @@ export async function parseMultipartToDisk(
       });
 
       let settled = false;
+      let source: Readable | null = null;
       const fields: Record<string, string> = {};
       const files: Record<string, ParsedUploadFile> = {};
       // Write-completion promises for spooled parts — 'close' must not
@@ -153,11 +154,19 @@ export async function parseMultipartToDisk(
       };
 
       const abort = (error: Error) => {
-        // Stop the pump and unwind: destroy everything, then surface the
-        // error. Late stream errors after settle are harmless.
-        bb.removeAllListeners('close');
-        bb.destroy(error);
-        finish(error);
+        if (settled) return;
+        settled = true;
+        // Surface the error first, then unwind the streams on the next tick.
+        // Destroying synchronously from inside a data/limit callback tears
+        // busboy's boundary scanner down mid-write and leaves an unhandled
+        // TypeError behind (null part in its streamsearch callback) — the
+        // parser must finish its current write before it dies. Late stream
+        // errors after settle are harmless: every listener below no-ops.
+        setImmediate(() => {
+          source?.destroy();
+          bb.destroy();
+        });
+        fail(error);
       };
 
       bb.on('field', (name, value) => {
@@ -246,7 +255,7 @@ export async function parseMultipartToDisk(
           });
       });
 
-      const source = Readable.fromWeb(
+      source = Readable.fromWeb(
         request.body as unknown as import('node:stream/web').ReadableStream
       );
       source.on('error', abort);
