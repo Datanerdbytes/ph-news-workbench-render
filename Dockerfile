@@ -33,14 +33,20 @@ ENV NODE_ENV=production \
 # ffmpeg powers /api/reels/prepare (reel normalization) when
 # ENABLE_LOCAL_VIDEO_PROCESSING=1 — remove this line for a ~200MB slimmer
 # image that falls back to using the original video untouched.
+#
+# The apt versions are not pinned: the image is rebuilt on every deploy and a
+# pinned version disappears from the mirror as soon as Debian publishes a new
+# revision, which breaks the build rather than hardening it.
+# hadolint ignore=DL3008
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 # Hugging Face Spaces require the container to run as uid 1000; the base
-# image's `node` user is exactly that, so reuse it.
+# image's `node` user is exactly that, so reuse it. The numeric form is what
+# the runtime resolves to anyway, and hadolint cannot look a name up.
 COPY --from=builder --chown=node:node /app/.next/standalone ./
 COPY --from=builder --chown=node:node /app/.next/static ./.next/static
 COPY --from=builder --chown=node:node /app/public ./public
-USER node
+USER 1000:1000
 EXPOSE 7860
 CMD ["node", "server.js"]
