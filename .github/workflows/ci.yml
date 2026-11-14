@@ -1,9 +1,10 @@
 name: CI
 
 # Verification gate for every PR and every push to main: types, lint, unit
-# tests, a production Docker build, a container vulnerability scan, and the
-# Playwright suite against that container. The app builds env-free (no DB or
-# secrets are touched at build time — routes are force-dynamic and queries
+# tests, a production Docker build and a container vulnerability scan on both;
+# the Playwright suite against that container on pull requests, where the
+# protected `e2e` environment holds its secrets. The app builds env-free (no DB
+# or secrets are touched at build time — routes are force-dynamic and queries
 # only run per request), so the build job needs no environment setup. The real
 # deploy build happens in Render's Docker build; this catches breakage before
 # it gets there.
@@ -38,6 +39,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `npm ci` runs the pull request's own lifecycle scripts, so the
+          # checkout must not leave its token in .git/config.
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -83,6 +88,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `npm ci` runs the pull request's own lifecycle scripts, so the
+          # checkout must not leave its token in .git/config.
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -113,6 +122,13 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The build context is the pull request's own tree and the
+          # Dockerfile in it is the pull request's own code. Keeping the
+          # token in .git/config would put it inside that context — a pull
+          # request can drop the `.git` line from .dockerignore and read it
+          # in a build step.
+          persist-credentials: false
 
       # A registry reference must be lowercase, and the owner of this repo is
       # not. The path GitHub serves the packages under is the lowercased one.
@@ -123,13 +139,34 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - uses: docker/login-action@v3
+      # A pull request from a fork runs with a read-only GITHUB_TOKEN, so it
+      # cannot push to GHCR — an unconditional push turned the required Docker
+      # check red for every outside contributor. Fork runs build the same
+      # image into the runner's daemon and scan it from there; same-repo pull
+      # requests and pushes publish it as before.
+      - name: Resolve the publish target
+        id: publish
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ "$EVENT" = "pull_request" ] && [ "$HEAD_REPO" != "$REPO" ]; then
+            echo "trusted=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "trusted=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to GHCR
+        if: steps.publish.outputs.trusted == 'true'
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push the production image
+        if: steps.publish.outputs.trusted == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -142,7 +179,22 @@ jobs:
             NEXT_PUBLIC_STORAGE_DRIVER=${{ vars.NEXT_PUBLIC_STORAGE_DRIVER || 'blob' }}
             NEXT_PUBLIC_BLOB_ROOT=${{ vars.NEXT_PUBLIC_BLOB_ROOT || '' }}
 
+      - name: Build the image locally
+        if: steps.publish.outputs.trusted != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Loaded into the runner's Docker daemon instead of a registry — the
+          # scan below then checks the same image the suite would have run.
+          load: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          build-args: |
+            NEXT_PUBLIC_STORAGE_DRIVER=${{ vars.NEXT_PUBLIC_STORAGE_DRIVER || 'blob' }}
+            NEXT_PUBLIC_BLOB_ROOT=${{ vars.NEXT_PUBLIC_BLOB_ROOT || '' }}
+
       - name: Pull the image for scanning
+        if: steps.publish.outputs.trusted == 'true'
         run: docker pull ${{ env.IMAGE }}:${{ github.sha }}
 
       - name: Scan the image
@@ -178,6 +230,34 @@ jobs:
     # the production schema, seeded fresh by the job below. That branch
     # auto-deletes seven days after it was created, so E2E_DATABASE_URL has to
     # be repointed when it disappears.
+    #
+    # The E2E_* secrets live in the protected `e2e` environment instead of at
+    # repository scope: a pull request can rewrite this workflow, so
+    # repository secrets were readable by any pull request's own code. The
+    # environment's required reviewer has to approve every deployment before
+    # the secrets are released.
+    #
+    # Pull requests only. A push to main would sit waiting for that approval,
+    # and the pull request run already tested the exact merge commit that
+    # lands, so main loses no coverage.
+    #
+    # Same-repository pull requests only. A fork gets neither the E2E secrets
+    # nor an image in GHCR — the docker job builds a fork's image locally
+    # instead of publishing it — so the job could only fail there. A job that
+    # is skipped by its condition reports "Success", so the required check
+    # still passes for a fork; the maintainer runs the suite locally instead.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    environment: e2e
+    # One Neon branch, one suite at a time: two runs seeding and cleaning the
+    # same database at once would delete each other's fixtures. `queue: max`
+    # keeps several pull requests waiting instead of cancelling the pending
+    # one when a third arrives.
+    concurrency:
+      group: ${{ github.workflow }}-e2e-database
+      cancel-in-progress: false
+      queue: max
     permissions:
       contents: read
       # The image under test was pushed to GHCR by the docker job. The
@@ -186,6 +266,10 @@ jobs:
       packages: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The suite and the database script are the pull request's own
+          # code, so the checkout must not leave its token in .git/config.
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -212,7 +296,7 @@ jobs:
       - name: Require the E2E database
         run: |
           if [ -z "${E2E_DATABASE_URL}" ]; then
-            echo "::error::E2E_DATABASE_URL is not set. The suite needs its own Neon branch — see the comment in this job." >&2
+            echo "::error::E2E_DATABASE_URL is not set — the \`e2e\` environment secret is missing. A pull request from a fork cannot read it; run the suite locally instead. See the comment in this job." >&2
             exit 1
           fi
         env:

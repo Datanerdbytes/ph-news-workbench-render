@@ -8,7 +8,12 @@ import { envLocal } from "./e2e/helpers/env";
 // CI points the suite at the container under test instead, which already
 // listens on its own port and must not be shadowed by a dev server.
 const ciBaseURL = process.env.PLAYWRIGHT_BASE_URL;
-const authURL = new URL(envLocal().BETTER_AUTH_URL || "http://localhost:3000");
+// Env first, .env.local second — the same precedence e2e/helpers/env.ts
+// requireEnv() uses, so CI's exported BETTER_AUTH_URL wins over a developer's
+// local file.
+const authURL = new URL(
+  process.env.BETTER_AUTH_URL || envLocal().BETTER_AUTH_URL || "http://localhost:3000"
+);
 const PORT = Number(authURL.port) || 3000;
 const baseURL = ciBaseURL ?? `http://localhost:${PORT}`;
 const authFile = "e2e/.auth/owner.json";
@@ -53,5 +58,11 @@ export default defineConfig({
         url: baseURL,
         reuseExistingServer: true,
         timeout: 120_000,
+        // The lockout spec sends six sign-ins in a row; better-auth's
+        // production limiter answers 429 after three. A dev server that is
+        // already running is reused as-is, so it has to be started with the
+        // same flag (DISABLE_AUTH_RATE_LIMIT=1 npm run dev) for that spec to
+        // reach the app's own lockout message.
+        env: { DISABLE_AUTH_RATE_LIMIT: "1" },
       },
 });
