@@ -7,7 +7,7 @@ mode: error
 ---
 
 Route handlers under `app/api/` are the app's public surface. Check every
-changed route handler against these three rules.
+changed route handler against these four rules.
 
 Fail if a changed route handler does any of the following:
 
@@ -31,9 +31,20 @@ Fail if a changed route handler does any of the following:
      `{ response }` — a `NextResponse` to send back — when the caller has no
      usable platform connection, and `{ context }` on success. The handler
      checks `result.response` before it uses the context.
-3. It logs, returns or otherwise exposes a raw access token, a refresh token
+3. It reads or writes a resource that the request identifies — a route
+   parameter, a query parameter, or an id in the body — without proving the
+   caller may reach that resource. An id in the request identifies the row; it
+   does not authorize access to it. The handler has to scope the read or write
+   to the caller's own workspace, the way the rest of this repository does it:
+   take the workspace from the verified session (`access.workspace.id`) and
+   put it in the query's `WHERE` clause next to the id. A query that selects
+   the row by the request's id alone, or that trusts a workspace id sent by
+   the caller, fails this rule. A caller check on its own — `requireUser` in
+   particular — does not satisfy it, because it says who is calling without
+   saying what they may reach.
+4. It logs, returns or otherwise exposes a raw access token, a refresh token
    or an app secret. The Facebook page token is encrypted at rest by
    `lib/facebook-token.ts` and must never leave the server in plaintext.
 
-Pass when none of the three apply. Name the file and the line of every
+Pass when none of the four apply. Name the file and the line of every
 failure and quote the offending line.

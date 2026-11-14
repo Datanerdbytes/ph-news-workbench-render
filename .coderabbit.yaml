@@ -49,8 +49,9 @@ reviews:
       instructions: >-
         Route handlers must be force-dynamic and must not touch the database
         at import time. Check auth with the requirePlatformConnection /
-        requireWorkspace helpers before any data access, and never log or
-        return raw access tokens.
+        requireWorkspace helpers before any data access, scope every read and
+        write of a request-supplied id to the caller's own workspace id, and
+        never log or return raw access tokens.
     - path: "lib/**"
       instructions: >-
         Pure helpers in lib/ are unit-tested with vitest in sibling *.test.ts
