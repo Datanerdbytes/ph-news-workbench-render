@@ -577,7 +577,7 @@ export default function Home() {
             <div className="flex flex-wrap items-end justify-between gap-3">
               <div className="min-w-0">
                 <p className="eyebrow text-brand">
-                  Editorial queue · {formatLongDate()}
+                  Editorial queue · last 30 days · {formatLongDate()}
                 </p>
                 <div className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
                   <h1 className="font-heading text-2xl font-semibold tracking-tight">

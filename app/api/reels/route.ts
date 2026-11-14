@@ -1,7 +1,8 @@
+import { rm } from 'node:fs/promises';
 import { NextResponse } from 'next/server';
 import { publishPageReel } from '@/lib/facebook';
 import { stripMarkdown } from '@/lib/format';
-import { deleteStagedBlobs, stagedFileToBuffer } from '@/lib/blob';
+import { deleteStagedBlobs, stagedFileToTempFile } from '@/lib/blob';
 import { requirePublishingConnection } from '@/lib/publishing/connection';
 import {
   crosspostResponse,
@@ -13,7 +14,7 @@ import { parseScheduledPublishTime } from '@/lib/publishing/schedule';
 import { MAX_VIDEO_BYTES, publishPageVideo } from '@/lib/publishing/videos';
 import { notifyPublishAttemptFailure } from '@/lib/notifications';
 import { recordNativeSchedule } from '@/lib/schedule-mirror';
-import { readMp4DurationSeconds } from '@/lib/reel-meta';
+import { readMp4DurationSecondsFromFile } from '@/lib/reel-meta';
 
 export const dynamic = 'force-dynamic';
 // Blob download is same-network and fast; the Facebook rupload transfer owns
@@ -88,9 +89,10 @@ export async function POST(request: Request) {
 
   // Staged video: browser -> Blob -> server. The staging helper authenticates
   // the URL against our store, so a fabricated or foreign URL is refused.
-  let videoBytes: Buffer;
+  // Streamed to a temp file — buffering a 1 GB staged video was the OOM.
+  let staged: { workDir: string; path: string; size: number };
   try {
-    videoBytes = await stagedFileToBuffer(videoUrl);
+    staged = await stagedFileToTempFile(videoUrl);
   } catch (error) {
     const message =
       error instanceof Error
@@ -100,30 +102,35 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: message }, { status: 400 });
   }
 
-  if (videoBytes.length === 0) {
-    const message = 'The staged video is empty.';
+  // Content rejections return early: the staging copy SURVIVES (the user can
+  // retry without re-staging), but the temp file is always removed. Only the
+  // publish attempt below owns deleteStagedBlobs.
+  const reject = async (message: string) => {
+    await rm(staged.workDir, { recursive: true, force: true });
     await notifyFailure(message);
     return NextResponse.json({ error: message }, { status: 400 });
+  };
+
+  if (staged.size === 0) {
+    return await reject('The staged video is empty.');
   }
-  if (videoBytes.length > MAX_BYTES) {
-    const message = 'Reels must be 1 GB or smaller.';
-    await notifyFailure(message);
-    return NextResponse.json({ error: message }, { status: 400 });
+  if (staged.size > MAX_BYTES) {
+    return await reject('Reels must be 1 GB or smaller.');
   }
-  const durationSeconds = readMp4DurationSeconds(videoBytes);
+  const durationSeconds = await readMp4DurationSecondsFromFile(staged.path);
   if (durationSeconds === null) {
-    const message =
-      'Could not read the video length. Upload an MP4 or MOV file.';
-    await notifyFailure(message);
-    return NextResponse.json({ error: message }, { status: 400 });
+    return await reject(
+      'Could not read the video length. Upload an MP4 or MOV file.'
+    );
   }
   if (durationSeconds < MIN_SECONDS || durationSeconds > MAX_SECONDS) {
-    const message = `Reels must be ${MIN_SECONDS} seconds to ${Math.floor(MAX_SECONDS / 60)} minutes. This clip is ${durationSeconds >= 60 ? `${Math.floor(durationSeconds / 60)} minutes` : `${Math.round(durationSeconds)} seconds`}.`;
-    await notifyFailure(message);
-    return NextResponse.json({ error: message }, { status: 400 });
+    return await reject(
+      `Reels must be ${MIN_SECONDS} seconds to ${Math.floor(MAX_SECONDS / 60)} minutes. This clip is ${durationSeconds >= 60 ? `${Math.floor(durationSeconds / 60)} minutes` : `${Math.round(durationSeconds)} seconds`}.`
+    );
   }
 
   try {
+
     const { results } = await publishToSelectedPages({
       workspaceId: access.workspace.id,
       pageIds,
@@ -136,7 +143,8 @@ export async function POST(request: Request) {
               accessToken: page.accessToken,
               caption,
               video: {
-                bytes: videoBytes,
+                path: staged.path,
+                size: staged.size,
                 type: videoType,
                 filename,
               },
@@ -147,7 +155,8 @@ export async function POST(request: Request) {
               accessToken: page.accessToken,
               description: caption,
               video: {
-                bytes: videoBytes,
+                path: staged.path,
+                size: staged.size,
                 type: videoType,
                 filename,
               },
@@ -193,7 +202,9 @@ export async function POST(request: Request) {
     );
   } finally {
     // The staging copy is transient regardless of outcome — Facebook either
-    // has the video, or the user re-stages a fresh file on retry.
+    // has the video, or the user re-stages a fresh file on retry. The temp
+    // file goes with it.
+    await rm(staged.workDir, { recursive: true, force: true });
     await deleteStagedBlobs([videoUrl]);
   }
 }

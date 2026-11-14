@@ -1,9 +1,5 @@
-import {
-  FacebookApiError,
-  graphPostForm,
-  toArrayBuffer,
-  type PublishImage,
-} from '@/lib/facebook';
+import { FacebookApiError, graphPostForm, type PublishImage } from '@/lib/facebook';
+import { fileUploadInit } from '@/lib/media-file';
 
 export const MAX_STORY_VIDEO_BYTES = 100 * 1024 * 1024;
 const UPLOAD_TIMEOUT_MS = 5 * 60_000;
@@ -64,9 +60,15 @@ export async function publishVideoStory({
 }: {
   pageId: string;
   accessToken: string;
-  video: { bytes: Buffer; type: string; filename: string };
+  video: {
+    /** Temp file on disk — streamed to Facebook without heap buffering. */
+    path: string;
+    size: number;
+    type: string;
+    filename: string;
+  };
 }): Promise<StoryResult> {
-  if (video.bytes.length > MAX_STORY_VIDEO_BYTES) {
+  if (video.size > MAX_STORY_VIDEO_BYTES) {
     throw new Error('Story videos must be 100 MB or smaller.');
   }
 
@@ -87,18 +89,20 @@ export async function publishVideoStory({
 
   let upload: Response;
   try {
-    upload = await fetch(session.upload_url, {
-      method: 'POST',
-      headers: {
-        Authorization: `OAuth ${accessToken}`,
-        offset: '0',
-        file_size: String(video.bytes.length),
-        'content-type': 'application/octet-stream',
-      },
-      body: toArrayBuffer(video.bytes),
-      cache: 'no-store',
-      signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
-    });
+    upload = await fetch(
+      session.upload_url,
+      fileUploadInit(video.path, video.size, {
+        method: 'POST',
+        headers: {
+          Authorization: `OAuth ${accessToken}`,
+          offset: '0',
+          file_size: String(video.size),
+          'content-type': 'application/octet-stream',
+        },
+        cache: 'no-store',
+        signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
+      })
+    );
   } catch {
     throw new FacebookApiError('The story video upload to Facebook failed.');
   }

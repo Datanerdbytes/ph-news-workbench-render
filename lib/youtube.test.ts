@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("@/lib/db", () => ({ sql: vi.fn() }));
@@ -10,7 +13,7 @@ import {
   exchangeGoogleCode,
   fetchYouTubeChannel,
   fetchYouTubeRecentVideos,
-  uploadYouTubeBytes,
+  uploadYouTubeFile,
   YouTubeAuthError,
 } from "./youtube";
 
@@ -323,35 +326,69 @@ describe("createYouTubeUploadSession", () => {
   });
 });
 
-describe("uploadYouTubeBytes", () => {
+describe("uploadYouTubeFile", () => {
+  async function withTempVideo(
+    contents: string,
+    run: (filePath: string) => Promise<void>
+  ): Promise<void> {
+    const dir = await mkdtemp(path.join(tmpdir(), "youtube-upload-test-"));
+    try {
+      const filePath = path.join(dir, "video.mp4");
+      await writeFile(filePath, contents);
+      await run(filePath);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
   it("resolves the video id from the completed session response", async () => {
     respond({ id: "video-9" });
-    const id = await uploadYouTubeBytes(
-      "https://upload.google/session-1",
-      Buffer.from("video-bytes"),
-      "video/mp4"
-    );
-    expect(id).toBe("video-9");
+    await withTempVideo("video-bytes", async (filePath) => {
+      const id = await uploadYouTubeFile(
+        "https://upload.google/session-1",
+        filePath,
+        11,
+        "video/mp4"
+      );
+      expect(id).toBe("video-9");
+    });
+  });
+
+  it("declares the byte size on the wire", async () => {
+    respond({ id: "video-9" });
+    await withTempVideo("video-bytes", async (filePath) => {
+      await uploadYouTubeFile(
+        "https://upload.google/session-1",
+        filePath,
+        11,
+        "video/mp4"
+      );
+      const init = fetchMock.mock.calls.at(-1)?.[1] as RequestInit;
+      const headers = new Headers(init.headers);
+      expect(headers.get("content-length")).toBe("11");
+      expect(headers.get("content-type")).toBe("video/mp4");
+    });
   });
 
   it("maps quotaExceeded to a human explanation", async () => {
-    await expect(
-      (async () => {
-        respond(
-          {
-            error: {
-              message: "The request failed.",
-              errors: [{ reason: "quotaExceeded" }],
-            },
+    await withTempVideo("bytes", async (filePath) => {
+      respond(
+        {
+          error: {
+            message: "The request failed.",
+            errors: [{ reason: "quotaExceeded" }],
           },
-          { ok: false, status: 403 }
-        );
-        return uploadYouTubeBytes(
+        },
+        { ok: false, status: 403 }
+      );
+      await expect(
+        uploadYouTubeFile(
           "https://upload.google/session-1",
-          Buffer.from("bytes"),
+          filePath,
+          5,
           "video/mp4"
-        );
-      })()
-    ).rejects.toThrow(/quota for today is exhausted/);
+        )
+      ).rejects.toThrow(/quota for today is exhausted/);
+    });
   });
 });

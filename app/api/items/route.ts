@@ -17,6 +17,14 @@ type ItemRow = {
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 
+// The Story Queue is the active inbox: list and stat chips cover the last N
+// days of ingested stories, so Published drifts back to zero on its own as
+// stories age out instead of counting everything ever ingested. Lifetime
+// numbers belong on the Dashboard. (created_at = ingest time, not the
+// article's own publication date — an old article ingested today is queue
+// work you haven't handled.)
+const QUEUE_WINDOW_DAYS = 30;
+
 export async function GET(request: Request) {
   const access = await requireWorkspace(request);
   if (!access) return unauthorized();
@@ -47,6 +55,7 @@ export async function GET(request: Request) {
              END AS status
       FROM news_items n
       WHERE n.workspace_id = ${access.workspace.id}
+        AND n.created_at > now() - (${QUEUE_WINDOW_DAYS} * interval '1 day')
     )
     SELECT * FROM stories
     WHERE id < COALESCE(${before}, 2147483647)
@@ -75,6 +84,7 @@ export async function GET(request: Request) {
              END AS status
       FROM news_items n
       WHERE n.workspace_id = ${access.workspace.id}
+        AND n.created_at > now() - (${QUEUE_WINDOW_DAYS} * interval '1 day')
     ) stories
   `) as unknown as {
     total: number;

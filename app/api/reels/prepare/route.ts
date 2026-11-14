@@ -1,6 +1,7 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { createReadStream, type ReadStream } from 'node:fs';
+import { rm, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { NextResponse } from 'next/server';
 import {
   localRuntimeEnabled,
@@ -8,6 +9,12 @@ import {
   transcodeToReelFootage,
 } from '@/lib/reels/media';
 import { requireWorkspace, unauthorized } from '@/lib/session';
+import {
+  parseMultipartToDisk,
+  uploadedFileType,
+  MultipartTooLargeError,
+  type ParsedMultipart,
+} from '@/lib/media-file';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -27,6 +34,10 @@ const VIDEO_TYPES = new Set(['video/mp4', 'video/quicktime', 'video/webm']);
  * publishing. Browsers without AV1/HEVC support (Safari) cannot even preview
  * such files, and Facebook prefers standard encodings, so the Reels page runs
  * every picked video through here first.
+ *
+ * Everything streams: the upload spools to a temp file (request.formData()
+ * used to hold two full copies of the video in the heap — the Render 512 MB
+ * OOM), and the transcoded file streams back out instead of readFile().
  */
 export async function POST(request: Request) {
   const access = await requireWorkspace(request);
@@ -42,30 +53,62 @@ export async function POST(request: Request) {
     );
   }
 
-  const form = await request.formData().catch(() => null);
-  const video = form?.get('video');
-  if (!(video instanceof File) || video.size === 0) {
-    return NextResponse.json({ error: 'Choose an MP4 or MOV video.' }, { status: 400 });
-  }
-  const looksLikeVideo =
-    VIDEO_TYPES.has(video.type) ||
-    (!video.type && /\.(mp4|mov|webm)$/i.test(video.name));
-  if (!looksLikeVideo) {
-    return NextResponse.json({ error: 'Upload an MP4 or MOV video.' }, { status: 400 });
-  }
-  if (video.size > MAX_BYTES) {
+  let parsed: ParsedMultipart;
+  try {
+    parsed = await parseMultipartToDisk(request, {
+      video: { maxBytes: MAX_BYTES, spool: 'file' },
+    });
+  } catch (error) {
+    if (error instanceof MultipartTooLargeError) {
+      return NextResponse.json(
+        { error: 'Videos must be 1 GB or smaller.' },
+        { status: 400 }
+      );
+    }
     return NextResponse.json(
-      { error: 'Videos must be 1 GB or smaller.' },
+      { error: 'Choose an MP4 or MOV video.' },
       { status: 400 }
     );
   }
 
-  let workDir: string | null = null;
+  // The reader for the response body, once it exists: a body that is never
+  // consumed would otherwise hold the fd open past the workDir's removal.
+  let outputStream: ReadStream | null = null;
+  const cleanup = async () => {
+    outputStream?.destroy();
+    await rm(parsed.workDir, { recursive: true, force: true });
+  };
+
+  // Once the response streams from the workDir, deletion must wait for the
+  // stream to close — finally{} would rm the file before the runtime reads it.
+  let streaming = false;
+  // A client that disconnects before the body is read never fires 'close',
+  // so the abort is the only signal left to reclaim the workDir.
+  request.signal.addEventListener(
+    'abort',
+    () => {
+      void cleanup();
+    },
+    { once: true }
+  );
   try {
-    workDir = await mkdtemp(path.join(tmpdir(), 'reel-prepare-'));
-    const inputPath = path.join(workDir, 'input.mp4');
-    const outputPath = path.join(workDir, 'output.mp4');
-    await writeFile(inputPath, Buffer.from(await video.arrayBuffer()));
+    const video = parsed.files.video;
+    if (!video || video.kind !== 'file' || video.size === 0) {
+      return NextResponse.json(
+        { error: 'Choose an MP4 or MOV video.' },
+        { status: 400 }
+      );
+    }
+    const looksLikeVideo = VIDEO_TYPES.has(uploadedFileType(video));
+    if (!looksLikeVideo) {
+      return NextResponse.json(
+        { error: 'Upload an MP4 or MOV video.' },
+        { status: 400 }
+      );
+    }
+
+    const inputPath = video.path;
+    const outputPath = path.join(parsed.workDir, 'output.mp4');
 
     let duration = await probeVideoDurationSeconds(inputPath);
     let transcoded = false;
@@ -95,16 +138,25 @@ export async function POST(request: Request) {
     if (!transcoded) {
       await transcodeToReelFootage(inputPath, outputPath);
     }
-    const buffer = await readFile(outputPath);
+    const { size } = await stat(outputPath);
 
-    return new NextResponse(new Uint8Array(buffer), {
-      status: 200,
-      headers: {
-        'content-type': 'video/mp4',
-        'content-length': String(buffer.length),
-        'cache-control': 'no-store',
-      },
+    outputStream = createReadStream(outputPath);
+    outputStream.on('close', () => {
+      void cleanup();
     });
+    const response = new NextResponse(
+      Readable.toWeb(outputStream) as unknown as ReadableStream<Uint8Array>,
+      {
+        status: 200,
+        headers: {
+          'content-type': 'video/mp4',
+          'content-length': String(size),
+          'cache-control': 'no-store',
+        },
+      }
+    );
+    streaming = true;
+    return response;
   } catch (error) {
     return NextResponse.json(
       {
@@ -116,6 +168,6 @@ export async function POST(request: Request) {
       { status: 500 }
     );
   } finally {
-    if (workDir) await rm(workDir, { recursive: true, force: true });
+    if (!streaming) await cleanup();
   }
 }

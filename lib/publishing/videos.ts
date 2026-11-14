@@ -1,3 +1,4 @@
+import { open } from 'node:fs/promises';
 import {
   FacebookApiError,
   graphPostForm,
@@ -18,7 +19,9 @@ type StartResponse = {
 };
 
 export type VideoUpload = {
-  bytes: Buffer;
+  /** Temp file on disk — chunks are read off disk so heap use stays flat. */
+  path: string;
+  size: number;
   type: string;
   filename: string;
 };
@@ -44,11 +47,12 @@ export async function publishPageVideo({
   title?: string;
   description?: string;
   video: VideoUpload;
-  thumbnail?: VideoUpload | null;
+  /** Small enough to hold in memory (≤20 MB), unlike the video itself. */
+  thumbnail?: { bytes: Buffer; type: string; filename: string } | null;
   feedTargeting?: string;
   scheduledPublishTime?: number | null;
 }): Promise<PageVideo> {
-  if (video.bytes.length > MAX_VIDEO_BYTES) {
+  if (video.size > MAX_VIDEO_BYTES) {
     throw new Error(
       'Videos must be 1 GB or smaller for the chunked uploader.'
     );
@@ -58,7 +62,7 @@ export async function publishPageVideo({
     `${pageId}/videos`,
     {
       upload_phase: 'start',
-      file_size: String(video.bytes.length),
+      file_size: String(video.size),
     },
     accessToken
   );
@@ -71,26 +75,39 @@ export async function publishPageVideo({
 
   const sessionId = session.upload_session_id;
 
-  for (let offset = 0; offset < video.bytes.length; offset += CHUNK_BYTES) {
-    const end = Math.min(offset + CHUNK_BYTES, video.bytes.length);
-    const chunk: GraphUploadFile = {
-      field: 'video_file_chunk',
-      bytes: video.bytes.subarray(offset, end),
-      type: 'application/octet-stream',
-      filename: 'chunk',
-    };
+  // Reused scratch buffer + subarray views: each transfer puts only 4 MB of
+  // fresh bytes on the wire-heap. (Slicing the backing ArrayBuffer instead
+  // used to copy the WHOLE video once per chunk.)
+  const scratch = Buffer.alloc(CHUNK_BYTES);
+  const handle = await open(video.path, 'r');
+  try {
+    for (let offset = 0; offset < video.size; offset += CHUNK_BYTES) {
+      const end = Math.min(offset + CHUNK_BYTES, video.size);
+      const { bytesRead } = await handle.read(scratch, 0, end - offset, offset);
+      if (bytesRead !== end - offset) {
+        throw new Error('The video file changed while uploading.');
+      }
+      const chunk: GraphUploadFile = {
+        field: 'video_file_chunk',
+        bytes: scratch.subarray(0, bytesRead),
+        type: 'application/octet-stream',
+        filename: 'chunk',
+      };
 
-    await graphPostForm(
-      `${pageId}/videos`,
-      {
-        upload_phase: 'transfer',
-        upload_session_id: sessionId,
-        start_offset: String(offset),
-      },
-      accessToken,
-      [chunk],
-      CHUNK_TIMEOUT_MS
-    );
+      await graphPostForm(
+        `${pageId}/videos`,
+        {
+          upload_phase: 'transfer',
+          upload_session_id: sessionId,
+          start_offset: String(offset),
+        },
+        accessToken,
+        [chunk],
+        CHUNK_TIMEOUT_MS
+      );
+    }
+  } finally {
+    await handle.close();
   }
 
   const finishFields: Record<string, string> = {

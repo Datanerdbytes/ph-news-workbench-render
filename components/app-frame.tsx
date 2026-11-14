@@ -65,23 +65,25 @@ type NavItem = {
   facebookOnly?: boolean;
 };
 
+// Workspace holds the cross-platform utilities; Publish holds the
+// platform-specific pipeline (queue → drafts → composers → studios).
 const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: "Workspace",
     items: [
       { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-      { href: "/", label: "Story Queue", icon: Newspaper, exact: true, facebookOnly: true },
-      { href: "/status", label: "Drafts", icon: FileText },
+      { href: "/downloads", label: "Downloads", icon: Download },
       { href: "/calendar", label: "Calendar", icon: CalendarDays },
     ],
   },
   {
     title: "Publish",
     items: [
+      { href: "/", label: "Story Queue", icon: Newspaper, exact: true, facebookOnly: true },
+      { href: "/status", label: "Drafts", icon: FileText },
       { href: "/post", label: "Post", icon: PenLine, facebookOnly: true },
       { href: "/photos", label: "Photos", icon: Images, facebookOnly: true },
       { href: "/videos", label: "Videos", icon: Film, facebookOnly: true },
-      { href: "/downloads", label: "Downloads", icon: Download },
       { href: "/reels", label: "Reels", icon: Video, facebookOnly: true },
       { href: "/live", label: "Live", icon: Radio, facebookOnly: true },
       { href: "/stories", label: "Stories", icon: Sparkles, facebookOnly: true },

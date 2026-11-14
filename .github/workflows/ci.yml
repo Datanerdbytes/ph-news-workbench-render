@@ -1,0 +1,58 @@
+name: CI
+
+# Fast verification gate for every PR and every push to main: types, lint,
+# unit tests, and a production build. The app builds env-free (no DB or
+# secrets are touched at build time — routes are force-dynamic and queries
+# only run per request), so no environment setup is needed here. The real
+# deploy build happens in Render's Docker build; this catches breakage before
+# it gets there.
+#
+# Not included: Playwright e2e (needs a live database + built app — a candidate
+# for a separate scheduled/nightly job if it ever earns its keep).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+# Superseded runs on the same branch or PR are pointless — cancel them.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Match the runtime image (Dockerfile → node:22-slim).
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          # prepare runs husky's git-hooks installer — meaningless in CI and
+          # the Dockerfile skips it the same way.
+          HUSKY: '0'
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: '1'

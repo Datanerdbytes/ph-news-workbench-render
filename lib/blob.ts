@@ -7,5 +7,7 @@
 export {
   assertStagedBlob,
   deleteStagedBlobs,
+  stagedFileExtension,
   stagedFileToBuffer,
+  stagedFileToTempFile,
 } from '@/lib/storage';

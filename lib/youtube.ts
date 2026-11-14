@@ -1,6 +1,7 @@
 import { encryptYouTubeSecret } from '@/lib/facebook-token';
 import { sql } from '@/lib/db';
 import type { PlatformConnection } from '@/lib/publishing/connection';
+import { fileUploadInit } from '@/lib/media-file';
 
 export const YOUTUBE_UPLOAD_SCOPE =
   'https://www.googleapis.com/auth/youtube.upload';
@@ -394,19 +395,24 @@ export async function createYouTubeUploadSession({
   return location;
 }
 
-export async function uploadYouTubeBytes(
+/**
+ * Stream the video file from disk to the resumable-upload session URL.
+ * (The bytes-buffer version held the whole video — and one full copy — in
+ * the heap, which OOM-killed small instances on large uploads.)
+ */
+export async function uploadYouTubeFile(
   location: string,
-  bytes: Buffer,
+  filePath: string,
+  size: number,
   contentType: string
 ): Promise<string> {
-  const response = await fetch(location, {
-    method: 'PUT',
-    headers: {
-      'content-type': contentType,
-      'content-length': String(bytes.length),
-    },
-    body: new Uint8Array(bytes),
-  });
+  const response = await fetch(
+    location,
+    fileUploadInit(filePath, size, {
+      method: 'PUT',
+      headers: { 'content-type': contentType },
+    })
+  );
   if (!response.ok) {
     const detail = (await response.json().catch(() => null)) as {
       error?: { message?: string; errors?: { reason?: string }[] };
