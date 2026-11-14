@@ -30,7 +30,6 @@ env:
   # suite and the container's BETTER_AUTH_URL must agree on this origin or
   # sign-in fails with INVALID_ORIGIN.
   APP_PORT: 7860
-  IMAGE: ghcr.io/${{ github.repository }}/app
 
 jobs:
   static:
@@ -115,6 +114,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A registry reference must be lowercase, and the owner of this repo is
+      # not. The path GitHub serves the packages under is the lowercased one.
+      - name: Resolve the image name
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "IMAGE=ghcr.io/$(echo "$REPOSITORY" | tr '[:upper:]' '[:lower:]')/app" >> "$GITHUB_ENV"
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -157,8 +163,8 @@ jobs:
           skip-dirs: "/usr/local/lib/node_modules/npm"
 
       - name: Upload the scan results
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-results.sarif
           category: trivy-image
@@ -230,6 +236,12 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Same lowercased registry path the docker job pushed to.
+      - name: Resolve the image name
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "IMAGE=ghcr.io/$(echo "$REPOSITORY" | tr '[:upper:]' '[:lower:]')/app" >> "$GITHUB_ENV"
 
       - name: Pull the image under test
         run: docker pull ${{ env.IMAGE }}:${{ github.sha }}
