@@ -102,7 +102,14 @@ export async function POST(request: Request) {
     let thumbnail: { bytes: Buffer; type: string; filename: string } | null =
       null;
     const thumbnailFile = parsed.files.thumbnail;
-    if (thumbnailFile && thumbnailFile.kind === 'buffer') {
+    // An empty part is not a thumbnail — an <input type="file"> the user
+    // never picked still posts a zero-byte part, and Facebook rejects a
+    // 0-byte image with an opaque error.
+    if (
+      thumbnailFile &&
+      thumbnailFile.kind === 'buffer' &&
+      thumbnailFile.buffer.length > 0
+    ) {
       if (!IMAGE_TYPES.has(uploadedFileType(thumbnailFile))) {
         return NextResponse.json(
           { error: 'Thumbnails must be JPEG, PNG, or WebP.' },
