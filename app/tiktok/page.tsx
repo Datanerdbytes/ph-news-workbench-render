@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useState } from 'react';
-import { upload } from '@vercel/blob/client';
+import { stageUpload } from '@/lib/stage-client';
 import { deleteStagedBlob } from '@/lib/blob-cleanup';
 import { Film, Loader2, Music2, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -54,12 +54,10 @@ export default function TikTokPage() {
     }
     setStaging(true);
     try {
-      const blob = await upload(
+      const blob = await stageUpload(
         `tiktok/${Date.now()}-${file.name.replace(/[^\w.-]+/g, '_')}`,
         file,
         {
-          access: 'public',
-          handleUploadUrl: '/api/blob',
           contentType: file.type,
         }
       );

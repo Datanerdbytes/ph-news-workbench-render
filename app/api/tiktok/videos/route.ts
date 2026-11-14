@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireWorkspace, unauthorized } from '@/lib/session';
 import { assertStagedBlob } from '@/lib/blob';
+import { isManagedStagedUrl } from '@/lib/storage';
 import { ensureFreshTikTokToken, TikTokAuthError, tiktokPublicPostingApproved } from '@/lib/tiktok';
 import { requirePlatformConnection } from '@/lib/publishing/connection';
 import { publishTikTokVideo, type TikTokPublishResult } from '@/lib/publishing/tiktok';
@@ -64,7 +65,7 @@ export async function POST(request: Request) {
       { status: 400 }
     );
   }
-  if (!videoUrl.includes('.public.blob.vercel-storage.com')) {
+  if (!isManagedStagedUrl(videoUrl)) {
     return NextResponse.json(
       { error: 'The video is not a staged workbench upload.' },
       { status: 400 }

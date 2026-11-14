@@ -9,6 +9,11 @@ export async function register() {
   // or a long-running Node server) the in-process timer is the right answer.
   if (production && onVercel) return;
 
+  // Kill switch for multi-host setups: two long-running deployments pointed
+  // at the same database would each run this timer and race for due posts.
+  // Set DISABLE_LOCAL_SCHEDULER=1 on the copy that must not sweep.
+  if (process.env.DISABLE_LOCAL_SCHEDULER === "1") return;
+
   const scheduler = await import("./lib/local-scheduler");
   scheduler.startLocalScheduler();
 }

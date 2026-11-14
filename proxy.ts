@@ -30,7 +30,10 @@ export function proxy(request: NextRequest) {
 export const config = {
   // The proxy makes Next buffer the request body in memory, capped at 10MB by
   // default, which truncates large reel uploads before the route sees them.
-  // /api/reels/prepare streams its video straight to disk, so it stays out of
-  // the proxy; the route authenticates the request itself.
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|api/reels/prepare).*)"],
+  // /api/reels/prepare streams its video straight to disk and /api/stage takes
+  // large multipart hf-driver uploads, so both stay out of the proxy; both
+  // routes authenticate the request themselves.
+  matcher: [
+    "/((?!_next/static|_next/image|favicon.ico|api/reels/prepare|api/stage).*)",
+  ],
 };

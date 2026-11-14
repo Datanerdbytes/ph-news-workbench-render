@@ -19,6 +19,9 @@ const allowedDevOrigins = extraOrigins.flatMap((value) => {
 });
 
 const nextConfig = {
+  // Self-contained server bundle (.next/standalone + server.js) for the
+  // Hugging Face Space Docker image — no node_modules needed at runtime.
+  output: "standalone",
   allowedDevOrigins,
 };
 

@@ -1,0 +1,24 @@
+# git + local state
+.git
+.gitignore
+.env*
+.vercel
+
+# build artifacts (rebuilt inside the image)
+.next
+node_modules
+tsconfig.tsbuildinfo
+
+# test & scratch material that never reaches the image
+coverage
+e2e
+test-results
+playwright-report
+design
+design-layout.html
+vibe_images
+SAAS-PLAN.md
+
+# docker plumbing
+Dockerfile
+.dockerignore

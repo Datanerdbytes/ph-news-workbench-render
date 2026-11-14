@@ -3,6 +3,7 @@ import { sql } from '@/lib/db';
 import { stripMarkdown } from '@/lib/format';
 import { requireWorkspace, unauthorized } from '@/lib/session';
 import { assertStagedBlob } from '@/lib/blob';
+import { isManagedStagedUrl } from '@/lib/storage';
 import {
   publishInstagramImagePost,
   resolveInstagramAccount,
@@ -78,9 +79,9 @@ export async function POST(request: Request) {
       { status: 400 }
     );
   }
-  // Only freshly staged workbench blobs may be handed to Instagram — the
+  // Only freshly staged workbench uploads may be handed to Instagram — the
   // fetch happens from Meta's side, so stray URLs must never pass through.
-  if (!imageUrl.startsWith(`${process.env.NEXT_PUBLIC_BLOB_ROOT ?? 'https://'}`) || !imageUrl.includes('.public.blob.vercel-storage.com')) {
+  if (!isManagedStagedUrl(imageUrl)) {
     return NextResponse.json(
       { error: 'The image is not a staged workbench upload.' },
       { status: 400 }

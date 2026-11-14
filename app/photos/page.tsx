@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { FolderPlus, Images, ImagePlus, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { upload } from '@vercel/blob/client';
+import { stageUpload } from '@/lib/stage-client';
 import { deleteStagedBlob } from '@/lib/blob-cleanup';
 import { AssistantChat } from '@/components/assistant-chat';
 import { FacebookPreview } from '@/components/facebook-preview';
@@ -113,12 +113,10 @@ export default function PhotosPage() {
     setStaging(true);
     try {
       for (const file of accepted) {
-        const blob = await upload(
+        const blob = await stageUpload(
           `photos/${Date.now()}-${file.name.replace(/[^\w.-]+/g, '_')}`,
           file,
           {
-            access: 'public',
-            handleUploadUrl: '/api/blob',
             contentType: file.type,
           }
         );

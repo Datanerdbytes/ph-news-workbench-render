@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Video } from 'lucide-react';
 import { toast } from 'sonner';
-import { upload } from '@vercel/blob/client';
+import { stageUpload } from '@/lib/stage-client';
 import { AnimationPicker } from '@/components/reels/animation-picker';
 import { FinalReelPreview } from '@/components/publishing/final-reel-preview';
 import { AssistantChat } from '@/components/assistant-chat';
@@ -239,12 +239,10 @@ export default function ReelsPage() {
       // Stage the video straight to Blob from the browser — sidesteps the
       // serverless request-body limit so full-size reels post from production.
       // The server downloads it back and feeds the Facebook upload.
-      const staged = await upload(
+      const staged = await stageUpload(
         `reels/${Date.now()}-${uploadFile.name.replace(/[^\w.-]+/g, '_')}`,
         uploadFile,
         {
-          access: 'public',
-          handleUploadUrl: '/api/blob',
           contentType: uploadFile.type || 'video/mp4',
           onUploadProgress: (progress) => setUploadPct(progress.percentage),
         }

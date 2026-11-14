@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useState } from 'react';
-import { upload } from '@vercel/blob/client';
+import { stageUpload } from '@/lib/stage-client';
 import { deleteStagedBlob } from '@/lib/blob-cleanup';
 import { ImagePlus, Loader2, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -84,10 +84,10 @@ export default function InstagramPage() {
     }
     setStaging(true);
     try {
-      const blob = await upload(
+      const blob = await stageUpload(
         `instagram/${Date.now()}-${file.name.replace(/[^\w.-]+/g, '_')}`,
         file,
-        { access: 'public', handleUploadUrl: '/api/blob', contentType: file.type }
+        { contentType: file.type }
       );
       setImageUrl(blob.url);
     } catch {

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireWorkspace, unauthorized } from '@/lib/session';
 import { assertStagedBlob } from '@/lib/blob';
+import { isManagedStagedUrl } from '@/lib/storage';
 import { ensureFreshYouTubeToken, YouTubeAuthError } from '@/lib/youtube';
 import { requirePlatformConnection } from '@/lib/publishing/connection';
 import { publishYouTubeVideo, type YouTubePublishResult } from '@/lib/publishing/youtube';
@@ -69,7 +70,7 @@ export async function POST(request: Request) {
       { status: 400 }
     );
   }
-  if (!videoUrl.includes('.public.blob.vercel-storage.com')) {
+  if (!isManagedStagedUrl(videoUrl)) {
     return NextResponse.json(
       { error: 'The video is not a staged workbench upload.' },
       { status: 400 }

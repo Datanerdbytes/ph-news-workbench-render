@@ -1,154 +1,167 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+---
+title: PH News Workbench
+emoji: 📰
+colorFrom: gray
+colorTo: blue
+sdk: docker
+app_port: 7860
+pinned: false
+---
 
-## Getting Started
+# PH News Workbench — Hugging Face Space (Docker)
 
-First, run the development server:
+An isolated, Vercel-independent deployment of the newsroom workbench: the full
+Next.js 16 App Router app (pages **and** API Route Handlers — the backend lives
+in the same process) running as one container on port 7860. Built as a copy of
+`Datanerdbytes/ph-news-workbench` while the Vercel account is paused.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+The YAML frontmatter above is what Hugging Face uses to build the Space —
+keep it at the very top of this file (`sdk: docker`, `app_port: 7860`).
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## How the stack runs in the container
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| Concern | How it runs here |
+| --- | --- |
+| Web + API | Next.js standalone server (`node server.js`), port 7860, non-root uid 1000 |
+| Database | External Neon Postgres via `DATABASE_URL` — nothing is stored on the container |
+| Media staging | Pluggable driver — `blob` (Vercel Blob) / `s3` (R2, B2, …) / `hf` (private HF dataset repo) |
+| Scheduled publishing | In-process scheduler sweeps due posts every 60s (auto-starts in production; set `DISABLE_LOCAL_SCHEDULER=1` to stop it) |
+| Reel normalization | ffmpeg is baked into the image; enabled with `ENABLE_LOCAL_VIDEO_PROCESSING=1` |
+| Video downloads | **Not available** — the yt-dlp download worker is a macOS launchd agent, not part of this image; `/downloads` keeps its explainer state |
+| Cron (`cron.yml`) | Not present in this copy — the in-process scheduler replaces the external sweep |
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Deploy checklist
 
-## Facebook Page OAuth
+### 1. Create the Space
 
-The Connect chip in the masthead runs a Facebook Login handshake and stores one Page connection per desk account.
+1. huggingface.co → **New Space** → name it (e.g. `ph-news-workbench`).
+2. SDK: **Docker** → Blank template. License optional. Public or Private both
+   work (Private Spaces still serve the app to logged-in visitors via the
+   embedded viewer; for a phone-friendly public URL choose Public).
+3. Settings → **Variables and secrets** is where every credential below goes
+   (New secret, not variable, for anything sensitive). Secrets are injected at
+   container start — no rebuild needed when you change them.
 
-1. Create an app at [developers.facebook.com/apps](https://developers.facebook.com/apps) (type: Business).
-2. Add the **Facebook Login** product and register this **Valid OAuth Redirect URI**:
-   `http://localhost:3000/api/facebook/callback`
-3. Request `pages_show_list`, `pages_read_engagement`, and `pages_manage_posts`,
-   plus `business_management` — without it `/me/accounts` omits Pages that belong
-   to a Business portfolio, and `pages_manage_posts` must be enabled on the app's
-   Pages use case before the login dialog offers it.
-4. In the login dialog, opt in to all Pages (and all Businesses) when asked.
-5. Add the Facebook variables from `.env.example` to `.env.local`:
-   `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET`, and optionally `FACEBOOK_GRAPH_VERSION`
-   (defaults to `v23.0`). Set `FACEBOOK_PAGE_ID` to pin a Page when the login
-   manages several, or `FACEBOOK_REDIRECT_URI` to override the callback URL.
-6. Restart `npm run dev`.
-7. While the Meta app is in Development mode, only app Admins, Developers, and
-   Testers can authorize it. Add your account under App roles, or switch the app
-   to Live.
+### 2. Prepare the database (important)
 
-The callback exchanges the code for a long-lived user token, takes the Page
-token, encrypts it with AES-256-GCM using a key derived from
-`BETTER_AUTH_SECRET`, and writes it to `facebook_connections`. The raw token is
-never returned to the browser. Rotating `BETTER_AUTH_SECRET` makes stored
-tokens unreadable, so reconnect the Page afterwards.
+`DATABASE_URL` should point at its **own** Neon database (a Neon branch of the
+prod database is ideal), *not* the same database the paused Vercel app uses.
+Two long-running deployments on one database each run the publish scheduler
+and would race each other for due posts. If you must share the database, set
+`DISABLE_LOCAL_SCHEDULER=1` on one of them.
 
-A Page connected before publishing existed does not carry
-`pages_manage_posts`; reconnect it so Publish can post on your behalf. When the
-draft has an attached image, it is uploaded with the post. Facebook posts are
-plain text, so Markdown is stripped on the way out; the preview and Copy button
-show the same plain-text version.
+Migrations are already applied to the prod database; a **fresh** database
+needs them — run from your laptop with the new `DATABASE_URL` exported, e.g.
+`DATABASE_URL=postgres://… node migrate-scheduling.mjs` for each
+`migrate-*.mjs` that matches the tables you use, then seed the owner:
+`DATABASE_URL=postgres://… OWNER_EMAIL=… OWNER_PASSWORD=… node seed-owner.js`.
 
-## Image editing
+### 3. Add secrets
 
-Generation uses the NVIDIA NIM endpoint. Editing needs a provider that exposes an
-edits endpoint — the hosted NVIDIA API does not — so set `OPENAI_API_KEY` to use
-OpenAI's `gpt-image-1`.
+| Secret | Value / notes |
+| --- | --- |
+| `DATABASE_URL` | The copy's own Neon connection string (`?sslmode=require`) |
+| `BETTER_AUTH_SECRET` | Long random string |
+| `BETTER_AUTH_URL` | `https://<your-user>-<space-name>.hf.space` |
+| `BETTER_AUTH_TRUSTED_ORIGINS` | Same URL as above (comma-separated if more) |
+| `SIGNUP_INVITE_CODE` | Invite code for new accounts |
+| `CRON_SECRET` | Random string (bearer for `/api/schedule/run`) |
+| `FACEBOOK_APP_ID` / `FACEBOOK_APP_SECRET` | From the Meta app |
+| `FACEBOOK_GRAPH_VERSION` | e.g. `v23.0` |
+| `FACEBOOK_PAGE_ID` | Pin the default Page (same value as the local `.env.local`) |
+| `FACEBOOK_REDIRECT_URI` | `https://<your-user>-<space-name>.hf.space/api/facebook/callback` |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | YouTube OAuth client |
+| `GOOGLE_REDIRECT_URI` | `https://<your-user>-<space-name>.hf.space/api/youtube/callback` |
+| `TIKTOK_CLIENT_KEY` / `TIKTOK_CLIENT_SECRET` | TikTok content-posting app |
+| `TIKTOK_REDIRECT_URI` | `https://<your-user>-<space-name>.hf.space/api/tiktok/callback` |
+| `NIM_API_KEY` (+ optional `NIM_*` caps/models) | NVIDIA NIM for AI features |
+| `OPENAI_API_KEY` | Optional — AI image editing |
+| `HF_API_KEY` | Optional — Video composer LLM fallback (AI feature, **not** storage) |
+| `BLOB_READ_WRITE_TOKEN` | Only when staying on the `blob` storage driver |
+| `HF_TOKEN` | Only for the `hf` storage driver |
+| `ENABLE_LOCAL_VIDEO_PROCESSING` | `1` to enable server-side reel normalization (ffmpeg included) |
 
-1. Create a key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
-   `gpt-image-1` needs a paid account with billing enabled, and some accounts must
-   complete organization verification first.
-2. Add `OPENAI_API_KEY=...` to `.env.local` and restart `npm run dev`.
-3. Upload an image in the Image studio: it attaches to the Facebook preview
-   immediately. **Edit upload** replaces that attachment with the edited result.
+### 4. Update the OAuth callback URLs
 
-Without a key, uploads still attach to the post; editing reports that no editing
-provider is configured.
+Each provider only redirects to URLs registered in its developer app. Add the
+Space URLs next to the existing localhost ones (don't delete those — the Mac
+dev server still uses them):
 
-## Video downloads
+- **Meta app** (Facebook Login → Settings): add
+  `https://<your-user>-<space-name>.hf.space/api/facebook/callback`
+- **Google Cloud** OAuth client: add the `/api/youtube/callback` URL
+- **TikTok** developer app: add the `/api/tiktok/callback` URL
 
-The Downloads page queues video jobs in the shared database; a local worker on
-your Mac runs yt-dlp and uploads the finished file to Vercel Blob, so downloads
-work from both the live app and local development.
-
-Install it once as a macOS LaunchAgent so queued downloads are picked up
-automatically — it starts at login and restarts if it crashes:
-
-```bash
-npm run worker:install
-```
-
-Or run it manually in a terminal (and keep it open while you download):
-
-```bash
-npm run worker
-```
-
-It needs `DATABASE_URL` and `BLOB_READ_WRITE_TOKEN` in `.env.local`, plus yt-dlp
-in the Python environment at `~/python-project/Projects/YT_DLP/my_venv` (override
-with `YTDLP_PYTHON`). Check on the installed agent with
-`scripts/install-download-worker.sh --status`; logs land in
-`~/Library/Logs/ph-news-workbench-download-worker.log`. Videos save to
-`~/Downloads/VideoDownloader/<platform>/<job-id>` (override with
-`VIDEO_DOWNLOADER_ROOT`) and then sync to the workspace's cloud library, where
-the live app previews and serves them.
-
-The worker runs up to two downloads at once. Ctrl+C requeues anything active;
-jobs whose worker stops heartbeating for three minutes are requeued
-automatically, up to three attempts.
-
-## Scheduled publishing
-
-Posts scheduled in the composer go out on time only if the scheduling sweep
-runs. Facebook publishes reels and videos on its own schedule, but the
-workspace still has to check Facebook for the outcome before your publish
-notification appears. GitHub's Actions cron is scheduled every 5 minutes but
-often fires hours late, so this Mac runs the sweep every minute as a
-LaunchAgent (GitHub stays as the backup while your Mac sleeps):
+### 5. Push the repo
 
 ```bash
-npm run scheduler:install
+cd ~/ph-news-workbench-hf
+git remote add hf https://huggingface.co/spaces/<your-username>/<space-name>
+git push hf main
+# first push asks for your HF username + an access token with "write" scope
+# (create one at https://huggingface.co/settings/tokens)
 ```
 
-It needs `CRON_SECRET` in `.env.local` matching the value on Vercel — if you
-rotate the secret there, update `.env.local` to match. Check on the agent with
-`scripts/install-scheduler.sh --status`; logs land in
-`~/Library/Logs/ph-news-workbench-scheduler.log`. Run a one-off sweep any time
-with `npm run scheduler:sweep`.
+The Space builds the Docker image (5–10 min, live logs on the Space page),
+then serves the app at `https://<your-user>-<space-name>.hf.space`.
 
-## Repository automation — do not delete
+### 6. First-run verification
 
-Three tracked files under `.github/` keep this workspace running. Never delete
-or edit them for any reason:
+1. Sign in with the owner account (seeded in step 2, or your usual owner
+   email/password against the new database).
+2. **Staging**: pick a photo in the Photos composer and confirm the upload
+   lands (this exercises the storage driver end-to-end).
+3. **Publishing**: publish a test post to your own Page; confirm it appears
+   and the staged copy is cleaned up.
+4. **Scheduling**: schedule a post ~2 minutes out and watch the log tick
+   (`Container logs` on the Space page shows `route:"scheduler"` lines).
 
-- **`.github/workflows/ci.yml`** — the `verify` check (typecheck, lint, unit
-  tests) that GitHub requires before any PR can merge to `main`. Deleting it
-  removes the merge gate.
-- **`.github/workflows/cron.yml`** — the two GitHub Actions crons. The hourly
-  job is the *only* executor of feed ingest (`POST /api/ingest`) — nothing
-  local replaces it — and the 5-minute job publishes due posts while this Mac
-  is asleep (the LaunchAgent above is the primary; GitHub is its backup).
-- **`.github/pull_request_template.md`** — the PR description checklist.
+### 7. Operational notes
 
-If a workflow seems broken or noisy, investigate first — deleting any of
-these stops feed ingest, scheduled publishing during sleep, or the merge
-gate itself.
+- **Logs**: Space page → *Logs* → *Container*. Build issues appear under
+  *Build*.
+- **Restarts** apply new secrets without a rebuild; **Factory reboot**
+  rebuilds the image (needed after changing the Dockerfile/ARGs).
+- **Free-tier sleep**: a Space with no HTTP traffic for ~48h sleeps and the
+  scheduler stops with it. A cheap keep-alive pinger (e.g. cron-job.org hitting
+  `/login` every 30 min) keeps it awake — or upgrade the Space to sleepless
+  hardware.
+- **HTTPS**: the Space terminates TLS, so better-auth uses the `__Secure-`
+  cookie prefix — already handled by `proxy.ts`.
 
-## Learn More
+## Storage drivers
 
-To learn more about Next.js, take a look at the following resources:
+Staging (browser → storage → publish route) supports three backends. The
+client half is chosen at **build time** via `NEXT_PUBLIC_STORAGE_DRIVER`
+(inlined into the bundle; HF Spaces can't inject build args, so switch by
+editing the `ARG NEXT_PUBLIC_STORAGE_DRIVER=` line in the `Dockerfile` and
+re-pushing). The server half falls back to the same value unless
+`STORAGE_DRIVER` overrides it — keep both on the same driver.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+| Driver | Needs | Browser upload | Server read/delete | Notes |
+| --- | --- | --- | --- | --- |
+| `blob` (default) | `BLOB_READ_WRITE_TOKEN` | Direct to Vercel Blob via `/api/blob` | Vercel Blob API | Works only while the Blob store stays reachable during the pause |
+| `s3` | `S3_BUCKET`, `S3_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_PUBLIC_BASE` | Presigned PUT straight to the bucket (fast, 1 GB ok) | Plain GET on the public base | Recommended fallback. R2: endpoint `https://<accountid>.r2.cloudflarestorage.com`, region `auto`, public base `https://pub-<hash>.r2.dev`. Bucket needs public-read GET |
+| `hf` | `HF_TOKEN` (or `HF_API_KEY`), `HF_STAGING_REPO` | Multipart POST through the app server | Tokened GET/DELETE on the dataset repo | Create the dataset repo first (e.g. `username/workbench-staging`, **Private**). Private repos need the token for reads, so `<img>` previews of staged files won't render — prefer `s3` for full fidelity |
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Switching drivers later only affects *new* stagings — staged copies are
+transient and gone after each publish, so nothing to migrate.
 
-## Deploy on Vercel
+## Local Docker test
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+docker build -t workbench-hf .
+docker run --rm -p 7860:7860 --env-file .env.local workbench-hf
+# → http://localhost:7860
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+(`--env-file .env.local` passes your local secrets; nothing is baked into the
+image.)
+
+## App docs
+
+The original app README (features, workspace model, API map) lives upstream:
+`Datanerdbytes/ph-news-workbench`. `AGENTS.md` and `.env.example` in this copy
+stay accurate for self-hosted runs; `download-worker.ts` is included but only
+runs on a machine with yt-dlp + ffmpeg installed (macOS launchd agent via
+`npm run worker:install`).
