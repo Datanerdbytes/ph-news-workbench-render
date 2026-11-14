@@ -10,6 +10,7 @@ name: Keep-alive ping
 on:
   schedule:
     - cron: "*/30 * * * *"
+    - cron: "0 * * * *" # feed ingest — same executor contract as the main repo's cron.yml
   workflow_dispatch: {}
 
 permissions: {}
@@ -20,5 +21,22 @@ jobs:
     steps:
       - name: Ping the workbench
         run: curl -fsS -o /dev/null --max-time 30 "${KEEP_ALIVE_URL:-https://ph-news-workbench.onrender.com}/login"
+        env:
+          KEEP_ALIVE_URL: ${{ vars.KEEP_ALIVE_URL }}
+
+  # RSS ingest — the main repo's cron.yml points at the paused Vercel host, so
+  # this hourly POST against the Render deployment is the only live ingest
+  # executor. The route accepts a cron bearer (isCronRequest) or a signed-in
+  # user; CRON_SECRET is a repo secret with the same value as upstream.
+  ingest:
+    if: github.event.schedule == '0 * * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Trigger feed ingest
+        run: |
+          curl -fsS --max-time 300 -X POST \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${KEEP_ALIVE_URL:-https://ph-news-workbench.onrender.com}/api/ingest"
         env:
           KEEP_ALIVE_URL: ${{ vars.KEEP_ALIVE_URL }}
