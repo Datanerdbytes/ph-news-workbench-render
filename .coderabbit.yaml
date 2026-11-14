@@ -11,7 +11,29 @@ reviews:
     drafts: true
   # "chill" keeps the review focused on meaningful issues instead of nitpicks.
   profile: chill
-  request_changes_workflow: false
+  # Automatic Approvals: CodeRabbit requests changes while it has actionable
+  # findings and approves once they are addressed. Its approval is what
+  # satisfies the "1 approval" rule in the branch protection, so a finding
+  # that nobody fixes keeps the pull request unmergeable. The legacy
+  # `request_changes_workflow` key is the same switch under its old name and
+  # must not be set next to this one.
+  auto_approvals:
+    enabled: true
+    # A review that is skipped on purpose — a draft, or a pull request with
+    # nothing reviewable in it — still gets an approval, so a dependency bump
+    # cannot sit in the queue forever waiting for a review that will never
+    # happen. Errors and cancelled reviews are excluded from this.
+    approve_on_skipped_review: true
+    # The author approval command stays available (it is the default): it is
+    # the recorded way out of a CodeRabbit false positive or a rate-limited
+    # review. It does not clear the three directory checks — those are GitHub
+    # check runs that the branch protection requires, and nothing but a fix
+    # or a new review clears them.
+    allow_author_approval: true
+  # A review that errors out fails the CodeRabbit check instead of passing it,
+  # so a broken review cannot be merged past. Retry with
+  # `@coderabbitai full review`.
+  fail_commit_status: true
   high_level_summary: true
   review_status: true
   poem: false
