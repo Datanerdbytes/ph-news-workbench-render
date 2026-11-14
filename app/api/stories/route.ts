@@ -12,6 +12,13 @@ import {
   publishPhotoStory,
   publishVideoStory,
 } from '@/lib/publishing/stories';
+import {
+  cleanupParsedMultipart,
+  parseMultipartToDisk,
+  uploadedFileType,
+  MultipartTooLargeError,
+  type ParsedMultipart,
+} from '@/lib/media-file';
 
 export const dynamic = 'force-dynamic';
 
@@ -24,45 +31,68 @@ export async function POST(request: Request) {
   if (result.response) return result.response;
 
   const { access } = result.context;
-  const form = await request.formData().catch(() => null);
-  const kind = form?.get('kind');
-  if (kind !== 'photo' && kind !== 'video') {
+
+  // Videos spool to disk; photos (≤20 MB) stay in memory. request.formData()
+  // buffered the whole upload in the heap — the Render 512 MB OOM.
+  let parsed: ParsedMultipart;
+  try {
+    parsed = await parseMultipartToDisk(request, {
+      photo: { maxBytes: MAX_IMAGE_BYTES, spool: 'memory' },
+      video: { maxBytes: MAX_STORY_VIDEO_BYTES, spool: 'file' },
+    });
+  } catch (error) {
+    if (error instanceof MultipartTooLargeError) {
+      return NextResponse.json(
+        {
+          error:
+            error.part === 'video'
+              ? 'Story videos must be 100 MB or smaller.'
+              : 'Photo stories must be 20 MB or smaller.',
+        },
+        { status: 400 }
+      );
+    }
     return NextResponse.json(
       { error: 'Choose a photo or video story.' },
       { status: 400 }
     );
   }
 
-  const pageIds = readPageIds(form?.get('pageIds'));
-
   try {
+    const kind = parsed.fields.kind;
+    if (kind !== 'photo' && kind !== 'video') {
+      return NextResponse.json(
+        { error: 'Choose a photo or video story.' },
+        { status: 400 }
+      );
+    }
+
+    const pageIds = readPageIds(parsed.fields.pageIds);
+
     if (kind === 'photo') {
-      const file = form?.get('photo');
-      const url = form?.get('photoUrl');
+      const file = parsed.files.photo;
+      const url = parsed.fields.photoUrl;
       let image: PublishImage | null = null;
 
-      if (file instanceof File && file.size > 0) {
-        if (!IMAGE_TYPES.has(file.type)) {
+      if (file && file.kind === 'buffer' && file.buffer.length > 0) {
+        // uploadedFileType falls back to the filename when the client sent
+        // no Content-Type — the same signal request.formData() used to give.
+        const fileType = uploadedFileType(file);
+        if (!IMAGE_TYPES.has(fileType)) {
           return NextResponse.json(
             { error: 'Photo stories must be JPEG, PNG, or WebP.' },
             { status: 400 }
           );
         }
-        if (file.size > MAX_IMAGE_BYTES) {
-          return NextResponse.json(
-            { error: 'Photo stories must be 20 MB or smaller.' },
-            { status: 400 }
-          );
-        }
         const extension =
-          file.type === 'image/jpeg'
+          fileType === 'image/jpeg'
             ? 'jpg'
-            : file.type === 'image/webp'
+            : fileType === 'image/webp'
               ? 'webp'
               : 'png';
         image = {
-          base64: Buffer.from(await file.arrayBuffer()).toString('base64'),
-          type: file.type,
+          base64: file.buffer.toString('base64'),
+          type: fileType,
           filename: `story.${extension}`,
         };
       } else if (typeof url === 'string' && /^https?:\/\//i.test(url.trim())) {
@@ -87,37 +117,32 @@ export async function POST(request: Request) {
           }),
       });
 
-      return crosspostResponse(results, { kind }, {
-      workspaceId: access.workspace.id,
-      actorUserId: access.user.id,
-      kind,
-    });
+      return crosspostResponse(
+        results,
+        { kind },
+        {
+          workspaceId: access.workspace.id,
+          actorUserId: access.user.id,
+          kind,
+        }
+      );
     }
 
-    const video = form?.get('video');
-    if (!(video instanceof File) || video.size === 0) {
+    const video = parsed.files.video;
+    if (!video || video.kind !== 'file' || video.size === 0) {
       return NextResponse.json(
         { error: 'Choose an MP4 or MOV video for the story.' },
         { status: 400 }
       );
     }
-    const looksLikeVideo =
-      VIDEO_TYPES.has(video.type) ||
-      (!video.type && /\.(mp4|mov)$/i.test(video.name));
+    const looksLikeVideo = VIDEO_TYPES.has(uploadedFileType(video));
     if (!looksLikeVideo) {
       return NextResponse.json(
         { error: 'Upload an MP4 or MOV video.' },
         { status: 400 }
       );
     }
-    if (video.size > MAX_STORY_VIDEO_BYTES) {
-      return NextResponse.json(
-        { error: 'Story videos must be 100 MB or smaller.' },
-        { status: 400 }
-      );
-    }
 
-    const bytes = Buffer.from(await video.arrayBuffer());
     const { results } = await publishToSelectedPages({
       workspaceId: access.workspace.id,
       pageIds,
@@ -126,23 +151,30 @@ export async function POST(request: Request) {
           pageId: page.id,
           accessToken: page.accessToken,
           video: {
-            bytes,
-            type: video.type || 'video/mp4',
-            filename: video.name || 'story.mp4',
+            path: video.path,
+            size: video.size,
+            type: uploadedFileType(video) || 'video/mp4',
+            filename: video.filename || 'story.mp4',
           },
         }),
     });
 
-    return crosspostResponse(results, { kind }, {
-      workspaceId: access.workspace.id,
-      actorUserId: access.user.id,
-      kind,
-    });
+    return crosspostResponse(
+      results,
+      { kind },
+      {
+        workspaceId: access.workspace.id,
+        actorUserId: access.user.id,
+        kind,
+      }
+    );
   } catch (error) {
     return facebookErrorResponse(
       error,
       'story_failed',
       'The story could not be published.'
     );
+  } finally {
+    await cleanupParsedMultipart(parsed);
   }
 }

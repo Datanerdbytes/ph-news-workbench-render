@@ -1,4 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import { createWriteStream } from 'node:fs';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import {
   DeleteObjectCommand,
   HeadObjectCommand,
@@ -23,6 +29,7 @@ import { deleteFiles, uploadFile } from '@huggingface/hub';
  *   - isManagedStagedUrl: cheap shape check — reject URLs we did not stage
  *   - assertStagedBlob: authenticated check before fetching or deleting
  *   - stagedFileToBuffer: read a staged file into memory
+ *   - stagedFileToTempFile: stream a staged file to a temp file on disk
  *   - deleteStagedBlobs: best-effort cleanup
  *
  * Driver credentials are read from the environment on every call, so switching
@@ -141,6 +148,19 @@ function stagedKey(pathname: string): string {
 }
 
 /**
+ * The extension of a staged file, lowercased.
+ *
+ * stagedKey() appends "-<uuid8>" AFTER the pathname, so a staged ".mov"
+ * reads as ".mov-a1b2c3d4" and every extension check downstream silently
+ * failed. The blob driver keeps the suffix before the extension, so the
+ * strip only ever applies to the s3 and hf keys.
+ */
+export function stagedFileExtension(url: string): string {
+  const pathname = new URL(url).pathname;
+  return path.extname(pathname.replace(/-[0-9a-f]{8}$/, '')).toLowerCase();
+}
+
+/**
  * True when a URL was staged by this app under the active driver. Publish
  * routes hand URLs to Meta/YouTube from here, so foreign URLs must never
  * pass — this shape check is the cheap first gate; `assertStagedBlob` is the
@@ -218,6 +238,47 @@ export async function stagedFileToBuffer(url: string): Promise<Buffer> {
     throw new Error('The staged upload could not be read.');
   }
   return Buffer.from(await response.arrayBuffer());
+}
+
+/**
+ * Streaming twin of stagedFileToBuffer: download a staged file to a temp dir
+ * instead of the heap, so publishing a staged 1 GB video never OOMs a small
+ * instance. Caller removes the returned workDir (rm -rf) when done.
+ */
+export async function stagedFileToTempFile(
+  url: string
+): Promise<{ workDir: string; path: string; size: number }> {
+  await assertStagedBlob(url);
+  const headers: Record<string, string> = {};
+  if (getStorageDriver() === 'hf') {
+    headers.Authorization = `Bearer ${requireHfConfig()}`;
+  }
+  const response = await fetch(url, { cache: 'no-store', headers });
+  if (!response.ok || !response.body) {
+    throw new Error('The staged upload could not be read.');
+  }
+
+  const workDir = await mkdtemp(path.join(tmpdir(), 'ph-staged-'));
+  const suffix = stagedFileExtension(url);
+  const filePath = path.join(
+    workDir,
+    ['.mp4', '.mov', '.webm'].includes(suffix) ? `video${suffix}` : 'video'
+  );
+
+  try {
+    await pipeline(
+      Readable.fromWeb(
+        response.body as unknown as import('node:stream/web').ReadableStream
+      ),
+      createWriteStream(filePath)
+    );
+  } catch (error) {
+    await rm(workDir, { recursive: true, force: true });
+    throw error;
+  }
+
+  const { size } = await stat(filePath);
+  return { workDir, path: filePath, size };
 }
 
 /**

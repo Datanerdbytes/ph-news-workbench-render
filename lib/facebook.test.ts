@@ -19,7 +19,6 @@ import {
   parseImages,
   redactTokens,
   selectPage,
-  toArrayBuffer,
   type ConnectedFacebookPage,
 } from "./facebook";
 
@@ -182,13 +181,6 @@ describe("redactTokens", () => {
     expect(redactTokens(message)).toBe(
       "bad request: access_token=[redacted]&fb_exchange_token=[redacted]&client_secret=[redacted]"
     );
-  });
-});
-
-describe("toArrayBuffer", () => {
-  it("copies exactly the viewed byte range", () => {
-    const view = Buffer.from([9, 1, 2, 3]).subarray(1, 3);
-    expect(Array.from(new Uint8Array(toArrayBuffer(view)))).toEqual([1, 2]);
   });
 });
 

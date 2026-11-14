@@ -1,3 +1,6 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("@/lib/db", () => ({ sql: vi.fn() }));
@@ -5,7 +8,7 @@ vi.mock("@/lib/session", () => ({
   requirePublishingConnection: vi.fn(),
 }));
 vi.mock("@/lib/blob", () => ({
-  stagedFileToBuffer: vi.fn(),
+  stagedFileToTempFile: vi.fn(),
   deleteStagedBlobs: vi.fn(),
 }));
 vi.mock("@/lib/facebook", async (importOriginal) => {
@@ -24,28 +27,28 @@ vi.mock("@/lib/publishing/crosspost", () => ({
   crosspostResponse: vi.fn(),
 }));
 vi.mock("@/lib/schedule-mirror", () => ({ recordNativeSchedule: vi.fn() }));
-vi.mock("@/lib/reel-meta", () => ({ readMp4DurationSeconds: vi.fn() }));
+vi.mock("@/lib/reel-meta", () => ({ readMp4DurationSecondsFromFile: vi.fn() }));
 vi.mock("@/lib/notifications", () => ({
   notifyPublishAttemptFailure: vi.fn(),
 }));
 
-import { deleteStagedBlobs, stagedFileToBuffer } from "@/lib/blob";
+import { deleteStagedBlobs, stagedFileToTempFile } from "@/lib/blob";
 import { publishPageReel } from "@/lib/facebook";
 import { notifyPublishAttemptFailure } from "@/lib/notifications";
 import { crosspostResponse, publishToSelectedPages } from "@/lib/publishing/crosspost";
 import { requirePublishingConnection } from "@/lib/publishing/connection";
 import { publishPageVideo } from "@/lib/publishing/videos";
-import { readMp4DurationSeconds } from "@/lib/reel-meta";
+import { readMp4DurationSecondsFromFile } from "@/lib/reel-meta";
 import { POST } from "./route";
 
 const requireMock = requirePublishingConnection as unknown as Mock;
-const stageMock = stagedFileToBuffer as unknown as Mock;
+const stageMock = stagedFileToTempFile as unknown as Mock;
 const delMock = deleteStagedBlobs as unknown as Mock;
 const publishMock = publishToSelectedPages as unknown as Mock;
 const responseMock = crosspostResponse as unknown as Mock;
 const reelMock = publishPageReel as unknown as Mock;
 const videoMock = publishPageVideo as unknown as Mock;
-const durationMock = readMp4DurationSeconds as unknown as Mock;
+const durationMock = readMp4DurationSecondsFromFile as unknown as Mock;
 const notifyMock = notifyPublishAttemptFailure as unknown as Mock;
 
 const access = {
@@ -53,8 +56,6 @@ const access = {
   workspace: { id: "ws_1", role: "owner" },
 };
 
-/** A minimal valid MP4 (ftyp + mdat) is not needed — reel-meta reads the
- * buffer, so the fixture is shaped for the mocked duration parser below. */
 function post(body: Record<string, unknown>) {
   return new Request("http://localhost/api/reels", {
     method: "POST",
@@ -63,10 +64,16 @@ function post(body: Record<string, unknown>) {
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
   requireMock.mockResolvedValue({ response: null, context: { access } });
-  stageMock.mockResolvedValue(Buffer.alloc(64 * 1024 * 1024)); // 64 MB
+  // Real temp dir so the route's rm(workDir) cleanup acts on real disk.
+  const workDir = await mkdtemp(path.join(tmpdir(), "reels-route-test-"));
+  stageMock.mockResolvedValue({
+    workDir,
+    path: path.join(workDir, "video"),
+    size: 64 * 1024 * 1024, // 64 MB
+  });
   delMock.mockResolvedValue(undefined);
   publishMock.mockImplementation(async ({ publish }) => {
     const result = await publish({ id: "p1", accessToken: "token", name: "NeuralVerse" });
@@ -74,7 +81,7 @@ beforeEach(() => {
   });
   reelMock.mockResolvedValue({ id: "fb_1", permalink: null });
   videoMock.mockResolvedValue({ id: "fb_video_1", permalink: null });
-  durationMock.mockReturnValue(30); // a plausible 30-second reel
+  durationMock.mockResolvedValue(30); // a plausible 30-second reel
   responseMock.mockReturnValue(new Response(JSON.stringify({ ok: true }), { status: 201 }));
 });
 
@@ -117,7 +124,8 @@ describe("POST /api/reels (Blob-staged)", () => {
     expect(reelMock).toHaveBeenCalledWith(
       expect.objectContaining({
         video: {
-          bytes: expect.any(Buffer),
+          path: expect.any(String),
+          size: 64 * 1024 * 1024,
           type: "video/mp4",
           filename: "clip.mp4",
         },
@@ -187,7 +195,8 @@ describe("POST /api/reels (Blob-staged)", () => {
       expect.objectContaining({
         description: "", // no caption
         video: {
-          bytes: expect.any(Buffer),
+          path: expect.any(String),
+          size: 64 * 1024 * 1024,
           type: "video/mp4",
           filename: "reel.mp4",
         },

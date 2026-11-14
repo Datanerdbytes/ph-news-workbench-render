@@ -1,3 +1,5 @@
+import { fileUploadInit } from '@/lib/media-file';
+
 const DEFAULT_GRAPH_VERSION = 'v23.0';
 const TIMEOUT_MS = 15_000;
 const REEL_UPLOAD_TIMEOUT_MS = 5 * 60_000;
@@ -532,13 +534,6 @@ export async function fetchInstagramOverview(
   };
 }
 
-export function toArrayBuffer(bytes: Buffer): ArrayBuffer {
-  return bytes.buffer.slice(
-    bytes.byteOffset,
-    bytes.byteOffset + bytes.byteLength
-  ) as ArrayBuffer;
-}
-
 export async function graphGet<T>(
   path: string,
   params: Record<string, string>,
@@ -729,7 +724,10 @@ export async function isFacebookStillScheduled(
 
 export type GraphUploadFile = {
   field: string;
-  bytes: Buffer;
+  // Buffer/Uint8Array view — the Blob constructor below copies only this
+  // view's byte range, never the whole backing ArrayBuffer (a naive
+  // bytes.buffer.slice() here copied the entire video once per 4 MB chunk).
+  bytes: Buffer | Uint8Array;
   type: string;
   filename: string;
 };
@@ -749,7 +747,9 @@ export async function graphPostForm<T>(
   for (const file of files) {
     form.append(
       file.field,
-      new Blob([toArrayBuffer(file.bytes)], { type: file.type }),
+      // Blob copies only this view's byte range; the cast silences TS's
+      // ArrayBufferLike-vs-ArrayBuffer strictness on Buffer internals.
+      new Blob([file.bytes as unknown as BlobPart], { type: file.type }),
       file.filename
     );
   }
@@ -956,7 +956,9 @@ export async function publishPagePost({
 }
 
 export type ReelVideo = {
-  bytes: Buffer;
+  /** Temp file on disk — the reel streams to Facebook without heap buffering. */
+  path: string;
+  size: number;
   type: string;
   filename: string;
 };
@@ -986,18 +988,20 @@ export async function publishPageReel({
 
   let upload: Response;
   try {
-    upload = await fetch(session.upload_url, {
-      method: 'POST',
-      headers: {
-        Authorization: `OAuth ${accessToken}`,
-        offset: '0',
-        file_size: String(video.bytes.length),
-        'content-type': 'application/octet-stream',
-      },
-      body: toArrayBuffer(video.bytes),
-      cache: 'no-store',
-      signal: AbortSignal.timeout(REEL_UPLOAD_TIMEOUT_MS),
-    });
+    upload = await fetch(
+      session.upload_url,
+      fileUploadInit(video.path, video.size, {
+        method: 'POST',
+        headers: {
+          Authorization: `OAuth ${accessToken}`,
+          offset: '0',
+          file_size: String(video.size),
+          'content-type': 'application/octet-stream',
+        },
+        cache: 'no-store',
+        signal: AbortSignal.timeout(REEL_UPLOAD_TIMEOUT_MS),
+      })
+    );
   } catch {
     throw new FacebookApiError('The video upload to Facebook failed.');
   }
