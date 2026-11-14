@@ -39,6 +39,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `npm ci` runs the pull request's own lifecycle scripts, so the
+          # checkout must not leave its token in .git/config.
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -84,6 +88,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `npm ci` runs the pull request's own lifecycle scripts, so the
+          # checkout must not leave its token in .git/config.
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -114,6 +122,13 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The build context is the pull request's own tree and the
+          # Dockerfile in it is the pull request's own code. Keeping the
+          # token in .git/config would put it inside that context — a pull
+          # request can drop the `.git` line from .dockerignore and read it
+          # in a build step.
+          persist-credentials: false
 
       # A registry reference must be lowercase, and the owner of this repo is
       # not. The path GitHub serves the packages under is the lowercased one.
@@ -251,6 +266,10 @@ jobs:
       packages: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The suite and the database script are the pull request's own
+          # code, so the checkout must not leave its token in .git/config.
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
