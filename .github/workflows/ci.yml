@@ -1,14 +1,16 @@
 name: CI
 
-# Fast verification gate for every PR and every push to main: types, lint,
-# unit tests, and a production build. The app builds env-free (no DB or
+# Verification gate for every PR and every push to main: types, lint, unit
+# tests, a production Docker build, a container vulnerability scan, and the
+# Playwright suite against that container. The app builds env-free (no DB or
 # secrets are touched at build time — routes are force-dynamic and queries
-# only run per request), so no environment setup is needed here. The real
+# only run per request), so the build job needs no environment setup. The real
 # deploy build happens in Render's Docker build; this catches breakage before
 # it gets there.
 #
-# Not included: Playwright e2e (needs a live database + built app — a candidate
-# for a separate scheduled/nightly job if it ever earns its keep).
+# Job layout: static analysis and the unit suite run in parallel because both
+# are cheap; the Docker build waits for both so a broken PR never burns build
+# minutes; the e2e job waits for the image because it runs against it.
 on:
   push:
     branches: [main]
@@ -23,8 +25,15 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # The container publishes 7860 (see Dockerfile → EXPOSE). The Playwright
+  # suite and the container's BETTER_AUTH_URL must agree on this origin or
+  # sign-in fails with INVALID_ORIGIN.
+  APP_PORT: 7860
+
 jobs:
-  verify:
+  static:
+    name: Static analysis & lint
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -43,16 +52,239 @@ jobs:
           # the Dockerfile skips it the same way.
           HUSKY: '0'
 
-      - name: Typecheck
-        run: npm run typecheck
-
+      # Next 16 dropped `next lint` — the ESLint CLI is the supported path.
       - name: Lint
-        run: npm run lint
+        run: npx eslint .
 
-      - name: Unit tests
-        run: npm test
+      # typegen writes the App Router route types that tsc then checks.
+      - name: Typecheck
+        run: npx next typegen && npx tsc --noEmit
 
-      - name: Production build
-        run: npm run build
+      - name: Lint the Dockerfile
+        run: docker run --rm -i hadolint/hadolint hadolint - < Dockerfile
+
+      # Blocking floor: nothing above critical is tolerated.
+      - name: Dependency audit (critical)
+        run: npm audit --audit-level=critical
+
+      # Advisory for now. All four high advisories are one transitive chain —
+      # @vercel/blob → @vercel/oidc → @vercel/cli-config → zod<4.6.6 — where
+      # the zod schemas parse the developer's local Vercel CLI config, not
+      # request input, and npm's only offered fix is a breaking downgrade of
+      # @vercel/blob. Promote this to blocking once the chain is patched
+      # upstream; deleting the step is the wrong way to make it green.
+      - name: Dependency audit (high — advisory)
+        continue-on-error: true
+        run: npm audit --audit-level=high
+
+  test:
+    name: Unit & integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
         env:
-          NEXT_TELEMETRY_DISABLED: '1'
+          HUSKY: '0'
+
+      # Vitest picks the environment per file: node for the media/route suites
+      # that touch node:fs and node:stream, jsdom for the React components.
+      # The exclude list keeps the .next/standalone build copy out of the glob.
+      - name: Unit and integration tests
+        run: npx vitest run
+
+  docker:
+    name: Docker build & scan
+    needs: [static, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      # The e2e job pulls the image this job pushes.
+      packages: write
+      # Trivy findings land in the code-scanning tab.
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # A registry reference must be lowercase, and the owner of this repo is
+      # not. The path GitHub serves the packages under is the lowercased one.
+      - name: Resolve the image name
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "IMAGE=ghcr.io/$(echo "$REPOSITORY" | tr '[:upper:]' '[:lower:]')/app" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          # Layer cache shared with every other job and run on this branch.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            NEXT_PUBLIC_STORAGE_DRIVER=${{ vars.NEXT_PUBLIC_STORAGE_DRIVER || 'blob' }}
+            NEXT_PUBLIC_BLOB_ROOT=${{ vars.NEXT_PUBLIC_BLOB_ROOT || '' }}
+
+      - name: Pull the image for scanning
+        run: docker pull ${{ env.IMAGE }}:${{ github.sha }}
+
+      - name: Scan the image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          # Unfixed base-image CVEs have no upstream patch to pull in — they
+          # would make the gate permanently red without anything to do.
+          ignore-unfixed: true
+          exit-code: '1'
+          # node:22-slim ships npm with its own CLI dependencies (pacote,
+          # sigstore, brace-expansion, ip-address, picomatch). Ten HIGH
+          # advisories live in that tree and none of it is the app — excluding
+          # it leaves the gate scanning what actually ships.
+          skip-dirs: "/usr/local/lib/node_modules/npm"
+
+      - name: Upload the scan results
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-image
+
+  e2e:
+    name: E2E against the production container
+    needs: docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # The suite runs against the `ci-e2e` Neon branch — a throwaway copy of
+    # the production schema, seeded fresh by the job below. That branch
+    # auto-deletes seven days after it was created, so E2E_DATABASE_URL has to
+    # be repointed when it disappears.
+    permissions:
+      contents: read
+      # The image under test was pushed to GHCR by the docker job. The
+      # workflow-level permissions set every other scope to none, so this job
+      # would be denied the pull without asking for packages here.
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          HUSKY: '0'
+
+      - name: Cache the Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      # The app talks to Neon over its HTTP SQL API, so a stock postgres
+      # service container cannot back it — E2E_DATABASE_URL must point at a
+      # Neon branch (a throwaway copy of the schema, reset per run).
+      - name: Require the E2E database
+        run: |
+          if [ -z "${E2E_DATABASE_URL}" ]; then
+            echo "::error::E2E_DATABASE_URL is not set. The suite needs its own Neon branch — see the comment in this job." >&2
+            exit 1
+          fi
+        env:
+          E2E_DATABASE_URL: ${{ secrets.E2E_DATABASE_URL }}
+
+      # The base schema, the migrations, the owner account and its workspace,
+      # in the order the migrations depend on each other. The Facebook page
+      # token migration decrypts with this secret, so it has to be the same
+      # value the container runs with.
+      - name: Prepare the test database
+        run: node scripts/prepare-e2e-db.mjs
+        env:
+          DATABASE_URL: ${{ secrets.E2E_DATABASE_URL }}
+          OWNER_EMAIL: ${{ secrets.E2E_OWNER_EMAIL }}
+          OWNER_PASSWORD: ${{ secrets.E2E_OWNER_PASSWORD }}
+          BETTER_AUTH_SECRET: ${{ secrets.E2E_BETTER_AUTH_SECRET }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Same lowercased registry path the docker job pushed to.
+      - name: Resolve the image name
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "IMAGE=ghcr.io/$(echo "$REPOSITORY" | tr '[:upper:]' '[:lower:]')/app" >> "$GITHUB_ENV"
+
+      - name: Pull the image under test
+        run: docker pull ${{ env.IMAGE }}:${{ github.sha }}
+
+      - name: Start the container
+        run: |
+          docker run -d --name app \
+            -p ${{ env.APP_PORT }}:7860 \
+            -e DATABASE_URL="${{ secrets.E2E_DATABASE_URL }}" \
+            -e BETTER_AUTH_SECRET="${{ secrets.E2E_BETTER_AUTH_SECRET }}" \
+            -e BETTER_AUTH_URL="http://localhost:${{ env.APP_PORT }}" \
+            -e BETTER_AUTH_TRUSTED_ORIGINS="http://localhost:${{ env.APP_PORT }}" \
+            -e SIGNUP_INVITE_CODE="${{ secrets.E2E_SIGNUP_INVITE_CODE }}" \
+            -e DISABLE_LOCAL_SCHEDULER=1 \
+            -e DISABLE_AUTH_RATE_LIMIT=1 \
+            ${{ env.IMAGE }}:${{ github.sha }}
+
+      - name: Wait for the app to answer
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl -fsS "http://localhost:${{ env.APP_PORT }}/login" > /dev/null; then
+              echo "app is up after ${attempt} attempts"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the container never became ready" >&2
+          docker logs app >&2
+          exit 1
+
+      - name: Run the Playwright suite
+        run: npx playwright test
+        env:
+          PLAYWRIGHT_BASE_URL: http://localhost:${{ env.APP_PORT }}
+          DATABASE_URL: ${{ secrets.E2E_DATABASE_URL }}
+          OWNER_EMAIL: ${{ secrets.E2E_OWNER_EMAIL }}
+          OWNER_PASSWORD: ${{ secrets.E2E_OWNER_PASSWORD }}
+
+      - name: Upload the Playwright artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.run_id }}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7

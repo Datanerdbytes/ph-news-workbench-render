@@ -5,9 +5,12 @@ import { envLocal } from "./e2e/helpers/env";
 // BETTER_AUTH_URL in .env.local instead of a hardcoded copy that can drift from
 // the dev server (the source of INVALID_ORIGIN sign-in failures). When the
 // developer's dev server is already up it is reused; otherwise one is booted.
+// CI points the suite at the container under test instead, which already
+// listens on its own port and must not be shadowed by a dev server.
+const ciBaseURL = process.env.PLAYWRIGHT_BASE_URL;
 const authURL = new URL(envLocal().BETTER_AUTH_URL || "http://localhost:3000");
 const PORT = Number(authURL.port) || 3000;
-const baseURL = `http://localhost:${PORT}`;
+const baseURL = ciBaseURL ?? `http://localhost:${PORT}`;
 const authFile = "e2e/.auth/owner.json";
 
 export default defineConfig({
@@ -43,10 +46,12 @@ export default defineConfig({
       use: { storageState: authFile },
     },
   ],
-  webServer: {
-    command: `npx next dev -p ${PORT}`,
-    url: baseURL,
-    reuseExistingServer: true,
-    timeout: 120_000,
-  },
+  webServer: ciBaseURL
+    ? undefined
+    : {
+        command: `npx next dev -p ${PORT}`,
+        url: baseURL,
+        reuseExistingServer: true,
+        timeout: 120_000,
+      },
 });

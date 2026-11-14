@@ -19,10 +19,14 @@ test("renders the calendar with its scheduled sidebar", async ({ page }) => {
 test("signs out from the account menu back to /login", async ({ page }) => {
   await page.goto("/dashboard");
 
-  // The account trigger lives in the sidebar; other aria-haspopup="menu"
-  // buttons (bell, publish nav) are elsewhere in the frame.
-  await page.locator("aside button[aria-haspopup='menu']").click();
-  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  // The account trigger lives in the sidebar; the other aria-haspopup="dialog"
+  // buttons (bell, publish nav, Facebook connection) are elsewhere in the frame.
+  const trigger = page.locator("aside button[aria-haspopup='dialog']");
+  // One trigger once the page has hydrated — the count waits out the
+  // server-rendered copy the client render replaces.
+  await expect(trigger).toHaveCount(1);
+  await trigger.click();
+  await page.getByRole("button", { name: "Sign out" }).click();
 
   await expect(page).toHaveURL(/\/login/);
 });
