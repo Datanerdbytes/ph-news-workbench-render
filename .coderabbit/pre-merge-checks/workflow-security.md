@@ -15,8 +15,11 @@ Fail if a changed workflow does any of the following:
    title, body, branch name, head ref or commit message — inside a `run:`
    block or as an input to another action. Interpolating
    `${{ github.event.pull_request.* }}` straight into a shell command lets a
-   pull request run its own code in the runner. Values read from a file or
-   from a numeric field such as the pull request number are safe.
+   pull request run its own code in the runner. A numeric field such as the
+   pull request number is safe. A value read from a file is safe only when
+   the file's contents cannot originate from the pull request — a pull
+   request can change any file in its own tree, so a file the pull request
+   adds or edits is not safe.
 2. It widens `permissions:` beyond what the job needs. The workflow-level
    default in this repository is `contents: read`; a job that needs more has
    to ask for the specific scope it uses, such as `packages: write` or

@@ -24,12 +24,14 @@ reviews:
     # cannot sit in the queue forever waiting for a review that will never
     # happen. Errors and cancelled reviews are excluded from this.
     approve_on_skipped_review: true
-    # The author approval command stays available (it is the default): it is
-    # the recorded way out of a CodeRabbit false positive or a rate-limited
-    # review. It does not clear the three directory checks — those are GitHub
-    # check runs that the branch protection requires, and nothing but a fix
-    # or a new review clears them.
-    allow_author_approval: true
+    # The author cannot wave the review through with `@coderabbitai approve`:
+    # that command approves without a completed review of the latest commit
+    # and without the directory checks passing, which would make the whole
+    # gate advisory for the one person who can push to this repository. The
+    # way out of a false positive is to resolve the review thread itself —
+    # CodeRabbit approves once the requirements are met — or to downgrade the
+    # offending check to `mode: warning` in a follow-up commit.
+    allow_author_approval: false
   # A review that errors out fails the CodeRabbit check instead of passing it,
   # so a broken review cannot be merged past. Retry with
   # `@coderabbitai full review`.
