@@ -139,6 +139,11 @@ The job's log names the stage that failed:
 - `Render API POST ... failed with 401` — the API key is wrong or was
   regenerated in Render. Create a new one and update `RENDER_API_KEY`.
 
+A deploy that queues behind another one is created but not started yet, and
+Render answers the request with `202` and an empty body. The script then finds
+that deploy in the service's deploy list and waits for it like any other, so a
+queued deploy is normal and not a failure.
+
 ### Re-running a deploy
 
 **Actions → Deploy → Run workflow** re-runs the pipeline from the selected
