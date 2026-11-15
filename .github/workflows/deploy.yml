@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       commit:
-        description: "Commit sha to deploy (defaults to the commit that triggered the run)"
+        description: "Full 40-character commit sha to deploy (defaults to the commit that triggered the run)"
         required: false
         type: string
 
@@ -46,8 +46,10 @@ jobs:
           TRIGGER_SHA: ${{ github.sha }}
         run: |
           sha="${REQUESTED_COMMIT:-$TRIGGER_SHA}"
-          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{7,40}$'; then
-            echo "::error::the requested commit is not a commit sha" >&2
+          # A full sha only: a short one could name a branch or a tag, and
+          # that value ends up as a checkout ref.
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::the requested commit is not a full 40-character commit sha" >&2
             exit 1
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"

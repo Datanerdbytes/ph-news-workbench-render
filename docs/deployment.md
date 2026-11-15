@@ -73,9 +73,15 @@ readable by a pull request's own code. Scoping the Render credentials to the
 environment keeps them out of reach of every pull request workflow — the
 `deploy` job of the `main` workflow is the only place they are released.
 
+The environment also needs a **deployment branch rule**: Settings →
+Environments → `production` → *Deployment branches and tags* → *Selected
+branches and tags* → add `main`. Without it the environment's secrets and
+variables are released to a job that runs from any branch, which is exactly
+what the environment is supposed to prevent.
+
 The environment has no required reviewer, so a merge deploys on its own. Add
-one (Settings → Environments → `production`) to make every production deploy a
-manual step.
+one (Settings → Environments → `production` → *Required reviewers*) to make
+every production deploy a manual step.
 
 ### Other secrets this repository already uses
 
