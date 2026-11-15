@@ -90,11 +90,16 @@ export function readDeployId(payload) {
  * and only shows up in the deploy list. The list is ordered newest first and
  * every entry wraps the deploy in a `deploy` key.
  *
+ * Deploys that already existed when the request was sent are skipped: the
+ * same commit may have been deployed before, and that older deploy must not be
+ * mistaken for the one this request created.
+ *
  * @param {unknown} payload
  * @param {string} commitId
+ * @param {Set<string>} [exclude] ids that existed before the request
  * @returns {string | null}
  */
-export function findDeployIdByCommit(payload, commitId) {
+export function findDeployIdByCommit(payload, commitId, exclude = new Set()) {
   const entries = Array.isArray(payload)
     ? payload
     : /** @type {{ deploys?: unknown[] }} */ (payload)?.deploys ?? [];
@@ -105,12 +110,9 @@ export function findDeployIdByCommit(payload, commitId) {
       ?.deploy;
     const id = deploy?.id;
     const deployCommit = deploy?.commit?.id;
-    if (
-      typeof id === "string" &&
-      id.length > 0 &&
-      typeof deployCommit === "string" &&
-      sameCommit(deployCommit, commitId)
-    ) {
+    if (typeof id !== "string" || id.length === 0) continue;
+    if (exclude.has(id)) continue;
+    if (typeof deployCommit === "string" && sameCommit(deployCommit, commitId)) {
       return id;
     }
   }
@@ -179,6 +181,28 @@ async function request(path, { apiKey, method = "GET", body, fetchImpl = fetch }
 }
 
 /**
+ * The ids of the deploys the service already had.
+ *
+ * @param {{ apiKey: string, serviceId: string, fetchImpl?: typeof fetch }} options
+ * @returns {Promise<Set<string>>}
+ */
+async function readExistingDeployIds({ apiKey, serviceId, fetchImpl = fetch }) {
+  const list = await request(`/services/${serviceId}/deploys?limit=20`, {
+    apiKey,
+    fetchImpl,
+  });
+  const entries = Array.isArray(list)
+    ? list
+    : /** @type {{ deploys?: unknown[] }} */ (list)?.deploys ?? [];
+  const ids = new Set();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const id = /** @type {{ deploy?: { id?: unknown } }} */ (entry)?.deploy?.id;
+    if (typeof id === "string" && id.length > 0) ids.add(id);
+  }
+  return ids;
+}
+
+/**
  * @param {{ apiKey: string, serviceId: string, commitId: string, clearCache?: string, fetchImpl?: typeof fetch }} options
  */
 export async function triggerDeploy({
@@ -188,6 +212,10 @@ export async function triggerDeploy({
   clearCache = "do_not_clear",
   fetchImpl = fetch,
 }) {
+  // Taken before the request, so the fallback below can only pick up a deploy
+  // this call created and not one from an earlier deploy of the same commit.
+  const existing = await readExistingDeployIds({ apiKey, serviceId, fetchImpl });
+
   const payload = await request(`/services/${serviceId}/deploys`, {
     apiKey,
     method: "POST",
@@ -202,17 +230,17 @@ export async function triggerDeploy({
 
   // A queued-behind-another-deploy answer carries no id, so the deploy has to
   // be picked out of the service's recent deploys by its commit.
-  const list = await request(`/services/${serviceId}/deploys?limit=10`, {
+  const list = await request(`/services/${serviceId}/deploys?limit=20`, {
     apiKey,
     fetchImpl,
   });
-  const queuedId = findDeployIdByCommit(list, commitId);
+  const queuedId = findDeployIdByCommit(list, commitId, existing);
   if (queuedId) {
     return { deployId: queuedId, deploy: null };
   }
 
   throw new Error(
-    "Render accepted the deploy but returned no deploy id, and no queued deploy for that commit is listed.",
+    "Render accepted the deploy but returned no deploy id, and no new queued deploy for that commit is listed.",
   );
 }
 

@@ -115,6 +115,15 @@ describe("findDeployIdByCommit", () => {
     expect(findDeployIdByCommit(list, "428ed81")).toBe("dep-1");
   });
 
+  it("skips a deploy that already existed before the request", () => {
+    const list = [
+      { deploy: { id: "dep-old", commit: { id: "428ed8187958632859bf58f2bd77cd81c27a16a5" } } },
+      { deploy: { id: "dep-new", commit: { id: "428ed8187958632859bf58f2bd77cd81c27a16a5" } } },
+    ];
+
+    expect(findDeployIdByCommit(list, "428ed81", new Set(["dep-old"]))).toBe("dep-new");
+  });
+
   it("returns null when no deploy matches the commit", () => {
     const list = [{ deploy: { id: "dep-2", commit: { id: "c662bc0" } } }];
 
@@ -126,6 +135,7 @@ describe("findDeployIdByCommit", () => {
 describe("triggerDeploy", () => {
   it("posts the commit and returns the deploy id", async () => {
     const { impl, calls } = stubFetch([
+      { body: [] },
       { status: 201, body: { id: "dep-9", status: "created" } },
     ]);
 
@@ -137,13 +147,14 @@ describe("triggerDeploy", () => {
     });
 
     expect(result.deployId).toBe("dep-9");
-    expect(calls[0].url).toBe("https://api.render.com/v1/services/srv-1/deploys");
-    expect(calls[0].init?.method).toBe("POST");
-    expect(JSON.parse(String(calls[0].init?.body))).toMatchObject({ commitId: "abc123" });
+    expect(calls[1].url).toBe("https://api.render.com/v1/services/srv-1/deploys");
+    expect(calls[1].init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[1].init?.body))).toMatchObject({ commitId: "abc123" });
   });
 
   it("finds the queued deploy when Render answers an empty body", async () => {
     const { impl, calls } = stubFetch([
+      { body: [] },
       { status: 202, body: null },
       {
         body: [
@@ -161,11 +172,36 @@ describe("triggerDeploy", () => {
     });
 
     expect(result.deployId).toBe("dep-7");
-    expect(calls[1].url).toBe("https://api.render.com/v1/services/srv-1/deploys?limit=10");
+    expect(calls[2].url).toBe("https://api.render.com/v1/services/srv-1/deploys?limit=20");
+  });
+
+  it("does not mistake an earlier deploy of the same commit for the queued one", async () => {
+    const { impl } = stubFetch([
+      { body: [{ deploy: { id: "dep-old", commit: { id: "abc123def456" } } }] },
+      { status: 202, body: null },
+      {
+        body: [
+          { deploy: { id: "dep-old", commit: { id: "abc123def456" } } },
+          { deploy: { id: "dep-new", commit: { id: "abc123def456" } } },
+        ],
+      },
+    ]);
+
+    const result = await triggerDeploy({
+      apiKey: "key",
+      serviceId: "srv-1",
+      commitId: "abc123",
+      fetchImpl: impl,
+    });
+
+    expect(result.deployId).toBe("dep-new");
   });
 
   it("fails with the API's own message and keeps the key out of it", async () => {
-    const { impl } = stubFetch([{ status: 401, body: { message: "Unauthorized" } }]);
+    const { impl } = stubFetch([
+      { body: [] },
+      { status: 401, body: { message: "Unauthorized" } },
+    ]);
 
     const error = (await triggerDeploy({
       apiKey: "rnd_secret_key",
@@ -180,8 +216,9 @@ describe("triggerDeploy", () => {
     expect(error.message).not.toContain("rnd_secret_key");
   });
 
-  it("fails when Render accepts the deploy but no deploy for it is listed", async () => {
+  it("fails when Render accepts the deploy but no new deploy for it is listed", async () => {
     const { impl } = stubFetch([
+      { body: [] },
       { status: 201, body: {} },
       { body: [{ deploy: { id: "dep-6", commit: { id: "0000000" } } }] },
     ]);
@@ -253,6 +290,7 @@ describe("waitForDeploy", () => {
 describe("runDeploy", () => {
   it("deploys the requested commit and confirms what went live", async () => {
     const { impl } = stubFetch([
+      { body: [] },
       { status: 201, body: { id: "dep-9", status: "created" } },
       { body: { status: "live", commit: { id: "abc123def456" } } },
     ]);
@@ -272,6 +310,7 @@ describe("runDeploy", () => {
 
   it("fails when a different commit went live", async () => {
     const { impl } = stubFetch([
+      { body: [] },
       { status: 201, body: { id: "dep-9", status: "created" } },
       { body: { status: "live", commit: { id: "0000000" } } },
     ]);
