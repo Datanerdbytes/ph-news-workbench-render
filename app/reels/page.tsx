@@ -17,12 +17,12 @@ import {
   ResultList,
   ScheduleField,
   defaultScheduleValue,
-  resolveScheduledFor,
   mediaFileError,
   textareaClass,
   useManagedPages,
   type PublishResult,
 } from '@/components/publishing/publish-page';
+import { resolveScheduledFor } from '@/lib/publishing/schedule';
 import { bakeReelAnimation } from '@/lib/reels/bake';
 import {
   finalizeBakedVideo,
@@ -185,13 +185,12 @@ export default function ReelsPage() {
     }
     let scheduledForIso: string | null = null;
     if (scheduleOn) {
-      scheduledForIso = resolveScheduledFor(scheduledFor);
-      if (!scheduledForIso) {
-        setScheduleError(
-          'Pick a time between 10 minutes and 75 days from now.'
-        );
+      const schedule = resolveScheduledFor(scheduledFor);
+      if (schedule.iso === null) {
+        setScheduleError(schedule.error);
         return;
       }
+      scheduledForIso = schedule.iso;
       setScheduleError('');
     }
     setBusy(true);

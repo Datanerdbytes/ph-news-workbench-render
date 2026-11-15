@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { FacebookMark } from '@/components/facebook-mark';
 import { AppFrame } from '@/components/app-frame';
@@ -8,6 +8,7 @@ import { useFacebookConnection } from '@/components/facebook-connection';
 import { Button } from '@/components/ui/button';
 import { cn } from 'cn';
 import { GATE_HINTS } from '@/components/publishing/gate-hints';
+import { resolveScheduledFor } from '@/lib/publishing/schedule';
 
 export function PublishPage({
   eyebrow,
@@ -545,7 +546,12 @@ export function ScheduleField({
 }) {
   // Bounds for the native picker; typed values are re-checked by
   // resolveScheduledFor() before submit.
-  const bounds = scheduleBounds();
+  const now = useScheduleClock();
+  const bounds = scheduleBounds(now);
+  // The window keeps closing while the tab is open, so the value is judged
+  // against the current clock, not against the one from the last render.
+  const outOfWindow = enabled ? resolveScheduledFor(value, now).error : undefined;
+  const message = error || outOfWindow;
   return (
     <div>
       <label className="tap-target flex items-center gap-2 py-1 text-xs font-medium">
@@ -562,22 +568,31 @@ export function ScheduleField({
           <input
             type="datetime-local"
             aria-label="Publish date and time"
-            aria-invalid={Boolean(error)}
-            aria-describedby={error ? 'schedule-error' : undefined}
+            aria-invalid={Boolean(message)}
+            aria-describedby={message ? 'schedule-error' : undefined}
             min={bounds.min}
             max={bounds.max}
             value={value}
             onChange={(event) => onChange(event.target.value)}
             className={cn(inputClass, 'mt-1.5')}
           />
-          {error && (
+          {message && (
             <p
               id="schedule-error"
               role="alert"
               className="mt-1 text-[11px] text-destructive"
             >
-              {error}
+              {message}
             </p>
+          )}
+          {outOfWindow && (
+            <button
+              type="button"
+              onClick={() => onChange(defaultScheduleValue())}
+              className="mt-1 text-[11px] font-medium text-brand underline underline-offset-2"
+            >
+              Reset to tomorrow 9:00
+            </button>
           )}
           <p className="mt-1 text-[10px] text-muted-foreground">{hint}</p>
         </>
@@ -600,26 +615,18 @@ export function scheduleBounds(now = new Date()) {
 }
 
 /**
- * Validates the schedule field before submit: returns the ISO string to
- * send, or null when the value is missing, unparseable, or outside the
- * 10-minute-to-75-day window (caller shows an inline error instead of
- * letting `new Date(...).toISOString()` throw).
+ * A clock that keeps ticking, so the native picker's min/max never drift away
+ * from the moment the user actually submits. A tab left open for an hour
+ * would otherwise keep offering a time that has since fallen out of the
+ * window.
  */
-export function resolveScheduledFor(
-  value: string,
-  now = new Date()
-): string | null {
-  if (!value) return null;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  const time = date.getTime();
-  if (
-    time < now.getTime() + 10 * 60 * 1000 ||
-    time > now.getTime() + 75 * 24 * 60 * 60 * 1000
-  ) {
-    return null;
-  }
-  return date.toISOString();
+export function useScheduleClock(intervalMs = 30_000): Date {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), intervalMs);
+    return () => window.clearInterval(id);
+  }, [intervalMs]);
+  return now;
 }
 
 export function defaultScheduleValue() {

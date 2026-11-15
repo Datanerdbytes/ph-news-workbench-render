@@ -13,10 +13,10 @@ import {
   ResultList,
   ScheduleField,
   defaultScheduleValue,
-  resolveScheduledFor,
   textareaClass,
   type PublishResult,
 } from '@/components/publishing/publish-page';
+import { resolveScheduledFor } from '@/lib/publishing/schedule';
 import { GATE_HINTS } from '@/components/publishing/gate-hints';
 import { InstagramPreview } from '@/components/instagram-preview';
 import { useInstagramConnection } from '@/components/instagram-connection';
@@ -104,11 +104,12 @@ export default function InstagramPage() {
     }
     let scheduledForIso: string | null = null;
     if (scheduleOn) {
-      scheduledForIso = resolveScheduledFor(scheduledFor);
-      if (!scheduledForIso) {
-        setScheduleError('Pick a time between 10 minutes and 75 days from now.');
+      const schedule = resolveScheduledFor(scheduledFor);
+      if (schedule.iso === null) {
+        setScheduleError(schedule.error);
         return;
       }
+      scheduledForIso = schedule.iso;
     }
     setBusy(true);
     try {

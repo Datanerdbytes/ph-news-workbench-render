@@ -13,12 +13,12 @@ import {
   ResultList,
   ScheduleField,
   defaultScheduleValue,
-  resolveScheduledFor,
   textareaClass,
   inputClass,
   mediaFileError,
   type PublishResult,
 } from '@/components/publishing/publish-page';
+import { resolveScheduledFor } from '@/lib/publishing/schedule';
 import { GATE_HINTS } from '@/components/publishing/gate-hints';
 import { YouTubePreview } from '@/components/youtube-preview';
 import { useYouTubeConnection } from '@/components/youtube-connection';
@@ -86,11 +86,12 @@ export default function YouTubePage() {
     }
     let scheduledForIso: string | null = null;
     if (scheduleOn) {
-      scheduledForIso = resolveScheduledFor(scheduledFor);
-      if (!scheduledForIso) {
-        setScheduleError('Pick a time between 10 minutes and 75 days from now.');
+      const schedule = resolveScheduledFor(scheduledFor);
+      if (schedule.iso === null) {
+        setScheduleError(schedule.error);
         return;
       }
+      scheduledForIso = schedule.iso;
     }
     setBusy(true);
     try {
