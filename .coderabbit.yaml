@@ -19,11 +19,13 @@ reviews:
   # must not be set next to this one.
   auto_approvals:
     enabled: true
-    # A review that is skipped on purpose — a draft, or a pull request with
-    # nothing reviewable in it — still gets an approval, so a dependency bump
-    # cannot sit in the queue forever waiting for a review that will never
-    # happen. Errors and cancelled reviews are excluded from this.
-    approve_on_skipped_review: true
+    # A review that is skipped on purpose does not get an approval. An
+    # approval that CodeRabbit hands out without having read the diff is not
+    # a gate, and a review skipped because the pull request exceeded the file
+    # limit is exactly the case where nothing was read. A pull request that
+    # has to be split, or a draft, stays unmergeable until a real review has
+    # run — which is the point of the rule.
+    approve_on_skipped_review: false
     # The author cannot wave the review through with `@coderabbitai approve`:
     # that command approves without a completed review of the latest commit
     # and without the directory checks passing, which would make the whole
