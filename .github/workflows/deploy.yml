@@ -1,0 +1,67 @@
+name: Deploy
+
+# The production pipeline: a merge into main runs the same CI the pull
+# request ran, and only a green run deploys to Render.
+#
+# The deploy job waits for Render to report the deploy live and then checks
+# the production health endpoint. A failed deploy fails this workflow, so the
+# failure is visible on the commit and not only in the Render dashboard.
+#
+# Pull requests never reach this file — they run `.github/workflows/ci.yml`.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Commit sha to deploy (defaults to the commit that triggered the run)"
+        required: false
+        type: string
+
+# One production deploy at a time. A second push queues behind the running
+# deploy instead of cancelling it — cancelling a build mid-flight leaves
+# Render with a half-finished release.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      # The docker job publishes the image that the e2e job pulls.
+      packages: write
+      # Trivy findings land in the code-scanning tab.
+      security-events: write
+
+  deploy:
+    name: Deploy to Render
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # The deployment history lives in this environment. Adding a required
+    # reviewer to it turns every production deploy into a manual step.
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Deploy the commit to Render
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ vars.RENDER_SERVICE_ID }}
+          RENDER_DEPLOY_SHA: ${{ inputs.commit || github.sha }}
+        run: node scripts/render-deploy.mjs
+
+      - name: Verify the production health endpoint
+        env:
+          RENDER_HEALTH_URL: ${{ vars.RENDER_HEALTH_URL }}
+        run: node scripts/verify-production.mjs

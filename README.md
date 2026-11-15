@@ -11,6 +11,24 @@ in the same process) running as one container. Built as a copy of
 version of this exact setup is ready too — HF now gates Docker Spaces behind
 PRO — the Dockerfile, storage drivers, and docs here work unchanged on either.
 
+## How a change reaches production
+
+```
+pull request  ──►  CI (lint · types · tests · image build + scan · Playwright)
+                     +  CodeRabbit review  ──►  approval  ──►  merge
+                                                                     │
+  main push  ──►  CI again  ──►  Render deploy  ──►  health check  ──►  live
+```
+
+GitHub Actions is the only thing that deploys. A pull request never reaches
+production, and a merge reaches it only after the same CI run is green. The
+deploy job waits for Render to report the deploy **live** and then checks the
+health endpoint, so a broken build fails the workflow instead of quietly
+leaving the previous version running.
+
+Full pipeline, required secrets, troubleshooting and rollback:
+[`docs/deployment.md`](docs/deployment.md).
+
 ## How the stack runs in the container
 
 | Concern | How it runs here |
@@ -24,6 +42,10 @@ PRO — the Dockerfile, storage drivers, and docs here work unchanged on either.
 | Video downloads | **Not available** — the yt-dlp download worker is a macOS launchd agent, not part of this image; `/downloads` keeps its explainer state |
 
 ## Deploy checklist (Render)
+
+This is the one-off setup for a **new** service. The existing service is
+deployed by GitHub Actions — see [`docs/deployment.md`](docs/deployment.md)
+for that pipeline, the required secrets and the rollback path.
 
 1. **Repo**: this repo must be visible to Render — sign in at render.com with
    GitHub and install the Render GitHub App on it.

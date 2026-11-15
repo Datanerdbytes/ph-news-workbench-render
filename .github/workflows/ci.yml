@@ -1,21 +1,22 @@
 name: CI
 
-# Verification gate for every PR and every push to main: types, lint, unit
-# tests, a production Docker build and a container vulnerability scan on both;
-# the Playwright suite against that container on pull requests, where the
-# protected `e2e` environment holds its secrets. The app builds env-free (no DB
-# or secrets are touched at build time — routes are force-dynamic and queries
-# only run per request), so the build job needs no environment setup. The real
-# deploy build happens in Render's Docker build; this catches breakage before
-# it gets there.
+# Verification gate for every pull request: types, lint, unit tests, a
+# production Docker build and a container vulnerability scan on both; the
+# Playwright suite against that container, where the protected `e2e`
+# environment holds its secrets. The app builds env-free (no DB or secrets are
+# touched at build time — routes are force-dynamic and queries only run per
+# request), so the build job needs no environment setup. The real deploy build
+# happens in Render's Docker build; this catches breakage before it gets there.
+#
+# The same workflow runs on main through `deploy.yml`, which calls it as a
+# reusable workflow and deploys to Render only after this workflow is green.
 #
 # Job layout: static analysis and the unit suite run in parallel because both
 # are cheap; the Docker build waits for both so a broken PR never burns build
 # minutes; the e2e job waits for the image because it runs against it.
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_call:
   workflow_dispatch: {}
 
 # Superseded runs on the same branch or PR are pointless — cancel them.
