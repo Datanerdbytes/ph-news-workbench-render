@@ -16,6 +16,7 @@ import {
   mediaFileError,
   type PublishResult,
 } from '@/components/publishing/publish-page';
+import { GATE_HINTS } from '@/components/publishing/gate-hints';
 import { TikTokPreview } from '@/components/tiktok-preview';
 import { useTikTokConnection } from '@/components/tiktok-connection';
 import { Button } from '@/components/ui/button';
@@ -133,7 +134,7 @@ export default function TikTokPage() {
       title="TikTok"
       mark={<PlatformMark platform="tiktok" className="size-7" />}
       platformName="TikTok"
-      gateHint="Direct posts open through TikTok's Content Posting API, so the account must be connected first."
+      gateHint={GATE_HINTS.tiktok}
       connectLabel="Connect TikTok"
       connection={connection}
     >

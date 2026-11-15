@@ -19,6 +19,7 @@ import {
   mediaFileError,
   type PublishResult,
 } from '@/components/publishing/publish-page';
+import { GATE_HINTS } from '@/components/publishing/gate-hints';
 import { YouTubePreview } from '@/components/youtube-preview';
 import { useYouTubeConnection } from '@/components/youtube-connection';
 import { Button } from '@/components/ui/button';
@@ -164,7 +165,7 @@ export default function YouTubePage() {
       title="YouTube"
       mark={<PlatformMark platform="youtube" className="size-7" />}
       platformName="YouTube"
-      gateHint="Publishing uploads with the YouTube Data API, so a channel must be connected first."
+      gateHint={GATE_HINTS.youtube}
       connectLabel="Connect YouTube"
       connection={connection}
     >
