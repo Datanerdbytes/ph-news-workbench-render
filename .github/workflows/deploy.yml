@@ -1,0 +1,104 @@
+name: Deploy
+
+# The production pipeline: a merge into main runs the same CI the pull
+# request ran, and only a green run deploys to Render.
+#
+# The deploy job waits for Render to report the deploy live and then checks
+# the production health endpoint. A failed deploy fails this workflow, so the
+# failure is visible on the commit and not only in the Render dashboard.
+#
+# Pull requests never reach this file — they run `.github/workflows/ci.yml`.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Full 40-character commit sha to deploy (defaults to the commit that triggered the run)"
+        required: false
+        type: string
+
+# One production deploy at a time. A second push queues behind the running
+# deploy instead of cancelling it — cancelling a build mid-flight leaves
+# Render with a half-finished release.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # One sha for the whole pipeline: CI checks it out, the image is tagged with
+  # it and Render deploys it. The value is validated here so a dispatch input
+  # can never turn into a ref or a command.
+  resolve:
+    name: Resolve the commit to deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - name: Resolve the sha
+        id: sha
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+          TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          sha="${REQUESTED_COMMIT:-$TRIGGER_SHA}"
+          # A full sha only: a short one could name a branch or a tag, and
+          # that value ends up as a checkout ref.
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::the requested commit is not a full 40-character commit sha" >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: CI
+    needs: [resolve]
+    uses: ./.github/workflows/ci.yml
+    with:
+      sha: ${{ needs.resolve.outputs.sha }}
+    permissions:
+      contents: read
+      # The docker job publishes the image that the e2e job pulls.
+      packages: write
+      # Trivy findings land in the code-scanning tab.
+      security-events: write
+
+  deploy:
+    name: Deploy to Render
+    needs: [resolve, ci]
+    # Only main deploys to production. A manual run from another branch still
+    # runs the CI, but it must not touch the live service.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # The deployment history lives in this environment, and the Render
+    # credentials are scoped to it — a pull request workflow cannot read
+    # them. Adding a required reviewer turns every deploy into a manual step.
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      # The deploy scripts come from the trusted head of main, not from the
+      # commit that is being deployed.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Deploy the commit to Render
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ vars.RENDER_SERVICE_ID }}
+          RENDER_DEPLOY_SHA: ${{ needs.resolve.outputs.sha }}
+          RENDER_DEPLOY_TIMEOUT_MINUTES: ${{ vars.RENDER_DEPLOY_TIMEOUT_MINUTES }}
+        run: node scripts/render-deploy.mjs
+
+      - name: Verify the production health endpoint
+        env:
+          RENDER_HEALTH_URL: ${{ vars.RENDER_HEALTH_URL }}
+          RENDER_HEALTH_TIMEOUT_MINUTES: ${{ vars.RENDER_HEALTH_TIMEOUT_MINUTES }}
+        run: node scripts/verify-production.mjs

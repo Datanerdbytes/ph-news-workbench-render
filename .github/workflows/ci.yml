@@ -1,21 +1,27 @@
 name: CI
 
-# Verification gate for every PR and every push to main: types, lint, unit
-# tests, a production Docker build and a container vulnerability scan on both;
-# the Playwright suite against that container on pull requests, where the
-# protected `e2e` environment holds its secrets. The app builds env-free (no DB
-# or secrets are touched at build time — routes are force-dynamic and queries
-# only run per request), so the build job needs no environment setup. The real
-# deploy build happens in Render's Docker build; this catches breakage before
-# it gets there.
+# Verification gate for every pull request: types, lint, unit tests, a
+# production Docker build and a container vulnerability scan on both; the
+# Playwright suite against that container, where the protected `e2e`
+# environment holds its secrets. The app builds env-free (no DB or secrets are
+# touched at build time — routes are force-dynamic and queries only run per
+# request), so the build job needs no environment setup. The real deploy build
+# happens in Render's Docker build; this catches breakage before it gets there.
+#
+# The same workflow runs on main through `deploy.yml`, which calls it as a
+# reusable workflow and deploys to Render only after this workflow is green.
 #
 # Job layout: static analysis and the unit suite run in parallel because both
 # are cheap; the Docker build waits for both so a broken PR never burns build
 # minutes; the e2e job waits for the image because it runs against it.
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_call:
+    inputs:
+      sha:
+        description: "Commit sha to check out (defaults to the commit that triggered the run)"
+        required: false
+        type: string
   workflow_dispatch: {}
 
 # Superseded runs on the same branch or PR are pointless — cancel them.
@@ -40,6 +46,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # The commit this run verifies: the triggering commit by default,
+          # the resolved commit when deploy.yml calls this workflow.
+          ref: ${{ inputs.sha || github.sha }}
           # `npm ci` runs the pull request's own lifecycle scripts, so the
           # checkout must not leave its token in .git/config.
           persist-credentials: false
@@ -89,6 +98,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # The commit this run verifies: the triggering commit by default,
+          # the resolved commit when deploy.yml calls this workflow.
+          ref: ${{ inputs.sha || github.sha }}
           # `npm ci` runs the pull request's own lifecycle scripts, so the
           # checkout must not leave its token in .git/config.
           persist-credentials: false
@@ -114,6 +126,10 @@ jobs:
     needs: [static, test]
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      # The image is tagged with the commit it was built from, so the e2e job
+      # pulls exactly what this job pushed.
+      IMAGE_SHA: ${{ inputs.sha || github.sha }}
     permissions:
       contents: read
       # The e2e job pulls the image this job pushes.
@@ -123,6 +139,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # The commit this run verifies: the triggering commit by default,
+          # the resolved commit when deploy.yml calls this workflow.
+          ref: ${{ inputs.sha || github.sha }}
           # The build context is the pull request's own tree and the
           # Dockerfile in it is the pull request's own code. Keeping the
           # token in .git/config would put it inside that context — a pull
@@ -171,7 +190,7 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          tags: ${{ env.IMAGE }}:${{ env.IMAGE_SHA }}
           # Layer cache shared with every other job and run on this branch.
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -187,7 +206,7 @@ jobs:
           # Loaded into the runner's Docker daemon instead of a registry — the
           # scan below then checks the same image the suite would have run.
           load: true
-          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          tags: ${{ env.IMAGE }}:${{ env.IMAGE_SHA }}
           cache-from: type=gha
           build-args: |
             NEXT_PUBLIC_STORAGE_DRIVER=${{ vars.NEXT_PUBLIC_STORAGE_DRIVER || 'blob' }}
@@ -195,12 +214,12 @@ jobs:
 
       - name: Pull the image for scanning
         if: steps.publish.outputs.trusted == 'true'
-        run: docker pull ${{ env.IMAGE }}:${{ github.sha }}
+        run: docker pull ${{ env.IMAGE }}:${{ env.IMAGE_SHA }}
 
       - name: Scan the image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
+          image-ref: ${{ env.IMAGE }}:${{ env.IMAGE_SHA }}
           format: sarif
           output: trivy-results.sarif
           severity: HIGH,CRITICAL
@@ -226,6 +245,9 @@ jobs:
     needs: docker
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      # The tag the docker job pushed for the commit this run verifies.
+      IMAGE_SHA: ${{ inputs.sha || github.sha }}
     # The suite runs against the `ci-e2e` Neon branch — a throwaway copy of
     # the production schema, seeded fresh by the job below. That branch
     # auto-deletes seven days after it was created, so E2E_DATABASE_URL has to
@@ -267,6 +289,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # The commit this run verifies: the triggering commit by default,
+          # the resolved commit when deploy.yml calls this workflow.
+          ref: ${{ inputs.sha || github.sha }}
           # The suite and the database script are the pull request's own
           # code, so the checkout must not leave its token in .git/config.
           persist-credentials: false
@@ -327,7 +352,7 @@ jobs:
         run: echo "IMAGE=ghcr.io/$(echo "$REPOSITORY" | tr '[:upper:]' '[:lower:]')/app" >> "$GITHUB_ENV"
 
       - name: Pull the image under test
-        run: docker pull ${{ env.IMAGE }}:${{ github.sha }}
+        run: docker pull ${{ env.IMAGE }}:${{ env.IMAGE_SHA }}
 
       - name: Start the container
         run: |
@@ -340,7 +365,7 @@ jobs:
             -e SIGNUP_INVITE_CODE="${{ secrets.E2E_SIGNUP_INVITE_CODE }}" \
             -e DISABLE_LOCAL_SCHEDULER=1 \
             -e DISABLE_AUTH_RATE_LIMIT=1 \
-            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:${{ env.IMAGE_SHA }}
 
       - name: Wait for the app to answer
         run: |
