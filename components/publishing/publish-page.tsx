@@ -8,7 +8,11 @@ import { useFacebookConnection } from '@/components/facebook-connection';
 import { Button } from '@/components/ui/button';
 import { cn } from 'cn';
 import { GATE_HINTS } from '@/components/publishing/gate-hints';
-import { resolveScheduledFor } from '@/lib/publishing/schedule';
+import {
+  MAX_SCHEDULE_MS,
+  MIN_SCHEDULE_MS,
+  resolveScheduledFor,
+} from '@/lib/publishing/schedule';
 
 export function PublishPage({
   eyebrow,
@@ -606,11 +610,28 @@ function toLocalInput(date: Date) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-/** Allowed schedule window: 10 minutes to 75 days from now. */
+function ceilToMinute(date: Date) {
+  return new Date(Math.ceil(date.getTime() / 60_000) * 60_000);
+}
+
+/**
+ * Allowed schedule window: 10 minutes to 75 days from now.
+ *
+ * Both bounds go through toLocalInput(), which drops seconds — but the live
+ * check (resolveScheduledFor) compares exact milliseconds, so a floored min
+ * sat inside the floor it advertised: at 09:00:30 the picker offered 09:10,
+ * whose delta is 9m30s, and the check refused the very time the field had
+ * just offered. The min is therefore rounded UP to the next whole minute and
+ * padded a further minute, so the earliest choice stays valid across the 30s
+ * clock ticks while the composer is open. The max stays floored — rounding it
+ * up would offer a delta past the 75-day ceiling.
+ */
 export function scheduleBounds(now = new Date()) {
   return {
-    min: toLocalInput(new Date(now.getTime() + 10 * 60 * 1000)),
-    max: toLocalInput(new Date(now.getTime() + 75 * 24 * 60 * 60 * 1000)),
+    min: toLocalInput(
+      ceilToMinute(new Date(now.getTime() + MIN_SCHEDULE_MS + 60_000))
+    ),
+    max: toLocalInput(new Date(now.getTime() + MAX_SCHEDULE_MS)),
   };
 }
 

@@ -22,6 +22,7 @@ import {
   type PublishResult,
 } from "./publish-page";
 import { GATE_HINTS } from "./gate-hints";
+import { resolveScheduledFor } from "@/lib/publishing/schedule";
 import type { ManagedPage } from "./page-selection";
 
 afterEach(cleanup);
@@ -287,6 +288,32 @@ describe("ScheduleField", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Scheduling supports at most 75 days ahead."
     );
+  });
+
+  it("offers a minimum the live window check accepts", () => {
+    // The bug this pins: the old min dropped the clock's seconds, so with the
+    // time at 09:00:30 the picker offered 09:10 — 9m30s out — and the live
+    // check refused the field's own suggestion the moment it was picked.
+    vi.setSystemTime(new Date("2026-11-13T09:00:30"));
+    render(
+      <ScheduleField
+        enabled
+        onEnabled={() => {}}
+        value="2026-11-14T09:00"
+        onChange={() => {}}
+      />
+    );
+    const min =
+      screen.getByLabelText("Publish date and time").getAttribute("min") ?? "";
+    // Floor plus one minute, rounded up to the whole minute: 09:11:30 → 09:12.
+    expect(min).toBe("2026-11-13T09:12");
+    expect(
+      resolveScheduledFor(min, new Date("2026-11-13T09:00:30")).error
+    ).toBeUndefined();
+    // The clock ticks while the composer is open — the offer must survive it.
+    expect(
+      resolveScheduledFor(min, new Date("2026-11-13T09:01:00")).error
+    ).toBeUndefined();
   });
 
   it("offers a way back to a valid time", () => {
