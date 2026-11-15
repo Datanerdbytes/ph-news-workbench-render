@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
@@ -306,6 +306,23 @@ describe("AppFrame platform nav", () => {
     );
   }
 
+  // The sidebar renders one <div> per group: the heading <p> followed by that
+  // group's links. Scope every query to it — the header duplicates some of
+  // these links (Post, Photos, …) outside the sidebar.
+  function sidebarGroups() {
+    const sidebar = screen.getByRole("complementary", {
+      name: "Workspace navigation",
+    });
+    const groups = new Map<string, HTMLElement>();
+    for (const group of Array.from(
+      sidebar.querySelector("nav")?.children ?? []
+    )) {
+      const title = group.querySelector("p")?.textContent?.trim();
+      if (title) groups.set(title, group as HTMLElement);
+    }
+    return groups;
+  }
+
   it("lists the platform studios in the sidebar on Facebook routes too", async () => {
     pathnameRef.current = "/post";
     stubFetchWith({});
@@ -316,13 +333,163 @@ describe("AppFrame platform nav", () => {
     );
     await flush();
 
-    expect(screen.getByRole("link", { name: "Instagram" })).toHaveAttribute(
+    const channels = sidebarGroups().get("Channels")!;
+    expect(within(channels).getByRole("link", { name: "Instagram" })).toHaveAttribute(
       "href",
       "/instagram"
     );
-    expect(screen.getByRole("link", { name: "YouTube" })).toHaveAttribute(
+    expect(within(channels).getByRole("link", { name: "YouTube" })).toHaveAttribute(
       "href",
       "/youtube"
+    );
+    expect(within(channels).getByRole("link", { name: "TikTok" })).toHaveAttribute(
+      "href",
+      "/tiktok"
+    );
+  });
+
+  it("keeps the Page tools under Facebook Page and the studios under Channels", async () => {
+    pathnameRef.current = "/post";
+    stubFetchWith({});
+    render(
+      <AppFrame>
+        <p>Page body</p>
+      </AppFrame>
+    );
+    await flush();
+
+    const groups = sidebarGroups();
+    expect([...groups.keys()]).toEqual([
+      "Workspace",
+      "Facebook Page",
+      "Channels",
+      "Grow",
+      "Manage",
+    ]);
+
+    const facebook = groups.get("Facebook Page")!;
+    for (const [label, href] of [
+      ["Story Queue", "/"],
+      ["Post", "/post"],
+      ["Photos", "/photos"],
+      ["Videos", "/videos"],
+      ["Reels", "/reels"],
+      ["Live", "/live"],
+      ["Stories", "/stories"],
+    ]) {
+      expect(within(facebook).getByRole("link", { name: label })).toHaveAttribute(
+        "href",
+        href
+      );
+    }
+
+    const channels = groups.get("Channels")!;
+    for (const label of ["Facebook", "Instagram", "YouTube", "TikTok"]) {
+      expect(
+        within(channels).getByRole("link", { name: label })
+      ).toBeInTheDocument();
+    }
+    // The Page tools must not leak into the channels group.
+    expect(
+      within(channels).queryByRole("link", { name: "Post" })
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the Facebook channel entry a shortcut that never highlights", async () => {
+    pathnameRef.current = "/post";
+    stubFetchWith({});
+    render(
+      <AppFrame>
+        <p>Page body</p>
+      </AppFrame>
+    );
+    await flush();
+
+    const channels = sidebarGroups().get("Channels")!;
+    const facebook = within(channels).getByRole("link", { name: "Facebook" });
+    expect(facebook).toHaveAttribute("href", "/post");
+    // The Page group's own "Post" item is the one that marks the current
+    // page — two highlighted links to the same place would be a bug.
+    expect(facebook).not.toHaveAttribute("aria-current");
+    expect(
+      within(sidebarGroups().get("Facebook Page")!).getByRole("link", {
+        name: "Post",
+      })
+    ).toHaveAttribute("aria-current", "page");
+  });
+
+  it("drops the whole Facebook Page group on a platform studio route", async () => {
+    pathnameRef.current = "/youtube";
+    stubFetchWith({});
+    render(
+      <AppFrame>
+        <p>Page body</p>
+      </AppFrame>
+    );
+    await flush();
+
+    // The heading goes with its items — no stranded "FACEBOOK PAGE" label.
+    const groups = sidebarGroups();
+    expect(groups.has("Facebook Page")).toBe(false);
+    expect([...groups.keys()]).not.toContain("Facebook Page");
+    expect(
+      within(groups.get("Channels")!).queryByRole("link", { name: "Reels" })
+    ).not.toBeInTheDocument();
+    // Facebook stays reachable as a channel from the studios.
+    expect(
+      within(groups.get("Channels")!).getByRole("link", { name: "Facebook" })
+    ).toHaveAttribute("href", "/post");
+  });
+
+  it("lists Facebook as a channel on the Platforms hub", async () => {
+    pathnameRef.current = "/platforms";
+    stubFetchWith({});
+    render(
+      <AppFrame>
+        <p>Page body</p>
+      </AppFrame>
+    );
+    await flush();
+
+    const groups = sidebarGroups();
+    // The hub lists Facebook as a platform, so the sidebar mirrors that list.
+    const channels = groups.get("Channels")!;
+    expect(within(channels).getByRole("link", { name: "Facebook" })).toHaveAttribute(
+      "href",
+      "/post"
+    );
+    for (const label of ["Instagram", "YouTube", "TikTok"]) {
+      expect(
+        within(channels).getByRole("link", { name: label })
+      ).toBeInTheDocument();
+    }
+    // The Page tools themselves stay out of the hub.
+    expect(groups.has("Facebook Page")).toBe(false);
+    expect(
+      within(channels).queryByRole("link", { name: "Post" })
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps Drafts with the cross-platform workspace items", async () => {
+    pathnameRef.current = "/instagram";
+    stubFetchWith({});
+    render(
+      <AppFrame>
+        <p>Page body</p>
+      </AppFrame>
+    );
+    await flush();
+
+    const workspace = sidebarGroups().get("Workspace")!;
+    expect(workspace).toContainElement(
+      screen.getByRole("link", { name: "Dashboard" })
+    );
+    expect(workspace).toContainElement(
+      screen.getByRole("link", { name: "Drafts" })
+    );
+    expect(screen.getByRole("link", { name: "Drafts" })).toHaveAttribute(
+      "href",
+      "/status"
     );
   });
 

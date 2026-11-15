@@ -22,6 +22,7 @@ import {
   type PlatformConnectionState,
   type PublishResult,
 } from "./publish-page";
+import { GATE_HINTS } from "./gate-hints";
 import type { ManagedPage } from "./page-selection";
 
 afterEach(cleanup);
@@ -44,7 +45,7 @@ function renderPage(state: Partial<PlatformConnectionState> = {}) {
       title="Instagram"
       mark={<PlatformMark platform="instagram" className="size-7" />}
       platformName="Instagram"
-      gateHint="Publishing tools post with the Instagram Graph API, so a business account must be connected first."
+      gateHint={GATE_HINTS.instagram}
       connectLabel="Connect Instagram"
       connection={connection(state)}
     >
@@ -75,7 +76,7 @@ describe("PlatformPublishPage", () => {
     expect(screen.getAllByText("Connect Instagram").length).toBe(2);
     expect(
       screen.getByText(
-        "Publishing tools post with the Instagram Graph API, so a business account must be connected first."
+        "An Instagram business account has to be connected before you can publish — posts go out through the Instagram Graph API."
       )
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Connect Instagram" }));

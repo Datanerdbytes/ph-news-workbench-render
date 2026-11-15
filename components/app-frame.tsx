@@ -63,10 +63,15 @@ type NavItem = {
   mark?: PlatformKind;
   exact?: boolean;
   facebookOnly?: boolean;
+  // A shortcut to a platform the sidebar already owns as its own group. It
+  // jumps to that platform's composer but never claims to be the current
+  // page, so the group's own items stay the single source of "you are here".
+  shortcut?: boolean;
 };
 
-// Workspace holds the cross-platform utilities; Publish holds the
-// platform-specific pipeline (queue → drafts → composers → studios).
+// Workspace holds the cross-platform utilities; Facebook Page holds the Page
+// pipeline (queue → composers); Channels holds the platforms you publish to,
+// each linking to its own composer or studio.
 const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: "Workspace",
@@ -74,21 +79,30 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
       { href: "/downloads", label: "Downloads", icon: Download },
       { href: "/calendar", label: "Calendar", icon: CalendarDays },
+      { href: "/status", label: "Drafts", icon: FileText },
     ],
   },
   {
-    title: "Publish",
+    title: "Facebook Page",
     items: [
       { href: "/", label: "Story Queue", icon: Newspaper, exact: true, facebookOnly: true },
-      { href: "/status", label: "Drafts", icon: FileText },
       { href: "/post", label: "Post", icon: PenLine, facebookOnly: true },
       { href: "/photos", label: "Photos", icon: Images, facebookOnly: true },
       { href: "/videos", label: "Videos", icon: Film, facebookOnly: true },
       { href: "/reels", label: "Reels", icon: Video, facebookOnly: true },
       { href: "/live", label: "Live", icon: Radio, facebookOnly: true },
       { href: "/stories", label: "Stories", icon: Sparkles, facebookOnly: true },
+    ],
+  },
+  {
+    title: "Channels",
+    items: [
+      // Facebook is a channel like the others — it just also owns a group of
+      // its own above, so this entry is a shortcut to its composer.
+      { href: "/post", label: "Facebook", mark: "facebook", shortcut: true },
       { href: "/instagram", label: "Instagram", mark: "instagram" },
       { href: "/youtube", label: "YouTube", mark: "youtube" },
+      { href: "/tiktok", label: "TikTok", mark: "tiktok" },
     ],
   },
   {
@@ -140,6 +154,9 @@ const PUBLISH_LINKS = [
 
 function isActivePath(pathname: string, item: NavItem) {
   if (!item.href) return false;
+  // A shortcut points at a destination another group owns in detail — the
+  // group below it stays the one that highlights.
+  if (item.shortcut) return false;
   if (item.exact) return pathname === item.href;
   if (item.href === "/status")
     return pathname.startsWith("/status") || pathname.startsWith("/drafts");
@@ -188,12 +205,15 @@ export function AppFrame({
   const pathname = usePathname();
   const router = useRouter();
   const showFacebookTools = facebookToolsVisible(pathname);
-  const navGroups = showFacebookTools
-    ? NAV_GROUPS
-    : NAV_GROUPS.map((group) => ({
-        ...group,
-        items: group.items.filter((item) => !item.facebookOnly),
-      }));
+  // The Facebook tools vanish on the platform studios and the Platforms hub,
+  // which empties their whole group — drop the heading too instead of
+  // leaving "FACEBOOK PAGE" stranded above nothing.
+  const navGroups = NAV_GROUPS.map((group) => ({
+    ...group,
+    items: group.items.filter(
+      (item) => !item.facebookOnly || showFacebookTools
+    ),
+  })).filter((group) => group.items.length > 0);
   const [navOpen, setNavOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
@@ -919,7 +939,10 @@ function PublishQuickNav() {
 
   return (
     <div ref={containerRef} className="relative flex items-center">
-      <nav aria-label="Publishing tools" className="hidden items-center gap-0.5 lg:flex">
+      <nav
+        aria-label="Facebook Page publishing tools"
+        className="hidden items-center gap-0.5 lg:flex"
+      >
         {PUBLISH_LINKS.map(({ href, label, icon: Icon }) => {
           const active = pathname.startsWith(href);
           return (
@@ -946,6 +969,10 @@ function PublishQuickNav() {
         })}
       </nav>
 
+      {/* The Facebook Page composers — the same set as the sidebar's
+          "Facebook Page" group, so the labels match. It sits next to the
+          Facebook connection button in the header, but that one is an
+          icon-only round button, so the two stay distinguishable. */}
       <button
         type="button"
         ref={triggerRef}
@@ -954,7 +981,7 @@ function PublishQuickNav() {
         aria-haspopup="dialog"
         className="flex items-center gap-1 rounded-[7px] border border-border bg-card px-2.5 py-1.5 text-[11px] font-semibold text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 lg:hidden"
       >
-        Publish
+        Facebook Page
         <ChevronDown
           className={cn("size-3.5 transition-transform", open && "rotate-180")}
           aria-hidden
@@ -965,7 +992,7 @@ function PublishQuickNav() {
         <div
           ref={panelRef}
           role="dialog"
-          aria-label="Publishing tools"
+          aria-label="Facebook Page publishing tools"
           className="absolute right-0 top-[calc(100%+6px)] z-50 w-60 rounded-lg border border-border bg-card p-1 shadow-lg"
         >
           {PUBLISH_LINKS.map(({ href, label, hint, icon: Icon }) => {

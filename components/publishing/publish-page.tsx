@@ -7,6 +7,7 @@ import { AppFrame } from '@/components/app-frame';
 import { useFacebookConnection } from '@/components/facebook-connection';
 import { Button } from '@/components/ui/button';
 import { cn } from 'cn';
+import { GATE_HINTS } from '@/components/publishing/gate-hints';
 
 export function PublishPage({
   eyebrow,
@@ -190,7 +191,7 @@ function ConnectGate({
       mark={<FacebookMark className="size-7" />}
       platformName="Facebook"
       heading="Connect a Facebook Page"
-      gateHint="Publishing tools post with the Page access token, so a Page must be connected first."
+      gateHint={GATE_HINTS.facebook}
       connectLabel="Connect Facebook"
     />
   );

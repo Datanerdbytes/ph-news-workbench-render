@@ -17,6 +17,7 @@ import {
   textareaClass,
   type PublishResult,
 } from '@/components/publishing/publish-page';
+import { GATE_HINTS } from '@/components/publishing/gate-hints';
 import { InstagramPreview } from '@/components/instagram-preview';
 import { useInstagramConnection } from '@/components/instagram-connection';
 import { Button } from '@/components/ui/button';
@@ -54,8 +55,7 @@ function gateReasonNode(reason: string | null, detail: string | null) {
   }
   return (
     <>
-      Publishing tools post with the Instagram Graph API, so a business account
-      must be connected first.
+      {GATE_HINTS.instagram}
       {FACEBOOK_LOGIN_EXPECTED}
     </>
   );
@@ -183,7 +183,7 @@ export default function InstagramPage() {
         connection.reason === 'scope_missing' ||
         connection.reason === 'no_ig_account'
           ? reasonNode
-          : 'Publishing tools post with the Instagram Graph API, so a business account must be connected first.'
+          : GATE_HINTS.instagram
       }
       connectLabel="Connect Instagram"
       connection={connection}
