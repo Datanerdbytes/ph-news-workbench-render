@@ -20,11 +20,22 @@ CI (ci.yml)  +  CodeRabbit review  ──►  human approval  ──►  merge
 | --- | --- | --- | --- |
 | Pull request | `ci.yml` | `static`, `test`, `docker`, `e2e` | Lint, types, unit tests, image build + Trivy scan, Playwright against the image |
 | Pull request | CodeRabbit | — | AI review; the approval it posts is what satisfies the branch rule |
+| Merge to `main` | `deploy.yml` | `resolve` | Picks the one commit the whole pipeline works on |
 | Merge to `main` | `deploy.yml` | `ci` | The same CI, run as a reusable workflow |
 | Merge to `main` | `deploy.yml` | `deploy` | Triggers the Render deploy, waits for it to go live, checks the health endpoint |
 
 The `deploy` job depends on `ci` with `needs:`, so a red CI run stops the
 deploy before Render is ever told to build anything.
+
+One commit runs the whole pipeline. The `resolve` job validates it once and
+hands it to CI (as the checkout ref and the image tag) and to Render (as
+`commitId`), so the code that was tested is the code that ships. A manual run
+can name a different commit; the same commit is still the one CI checks and
+the one Render builds.
+
+The `deploy` job only runs on `main` (`if: github.ref == 'refs/heads/main'`).
+A manual run from another branch runs the CI but never touches the live
+service.
 
 ## Why the API and not the deploy hook
 
@@ -40,13 +51,13 @@ is the commit that was asked for.
 
 ## Required GitHub settings
 
-### Repository secret
+### `production` environment secret
 
 | Name | Value |
 | --- | --- |
 | `RENDER_API_KEY` | A Render API key — Render → Account settings → API Keys → *Create API key*. The value is shown once. |
 
-### Repository variables
+### `production` environment variables
 
 | Name | Value | Required |
 | --- | --- | --- |
@@ -55,9 +66,16 @@ is the commit that was asked for.
 | `RENDER_DEPLOY_TIMEOUT_MINUTES` | `30` | no (defaults to this) |
 | `RENDER_HEALTH_TIMEOUT_MINUTES` | `10` | no (defaults to this) |
 
-The API key is only read inside the `deploy` job of the `main` workflow. Pull
-request workflows never see it: the `deploy` job is not part of `ci.yml`, and
-a pull request cannot run the `main` workflow.
+These live in the `production` **environment**, not at repository scope, and
+the `deploy` job is the only job that declares that environment. A pull
+request can rewrite a workflow, so anything stored at repository scope is
+readable by a pull request's own code. Scoping the Render credentials to the
+environment keeps them out of reach of every pull request workflow — the
+`deploy` job of the `main` workflow is the only place they are released.
+
+The environment has no required reviewer, so a merge deploys on its own. Add
+one (Settings → Environments → `production`) to make every production deploy a
+manual step.
 
 ### Other secrets this repository already uses
 

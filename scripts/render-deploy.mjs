@@ -67,15 +67,21 @@ export function describeStatus(status) {
 }
 
 /**
+ * A created deploy comes back as the deploy object itself — the id sits at the
+ * top level. The deploy list wraps every entry in a `deploy` key, so both
+ * shapes are read here.
+ *
  * @param {unknown} payload
  * @returns {string | null}
  */
 export function readDeployId(payload) {
-  const id =
-    payload && typeof payload === "object"
-      ? /** @type {{ deploy?: { id?: unknown } }} */ (payload).deploy?.id
-      : undefined;
-  return typeof id === "string" && id.length > 0 ? id : null;
+  if (!payload || typeof payload !== "object") return null;
+
+  const direct = /** @type {{ id?: unknown }} */ (payload).id;
+  if (typeof direct === "string" && direct.length > 0) return direct;
+
+  const nested = /** @type {{ deploy?: { id?: unknown } }} */ (payload).deploy?.id;
+  return typeof nested === "string" && nested.length > 0 ? nested : null;
 }
 
 /**

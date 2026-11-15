@@ -74,13 +74,14 @@ describe("describeStatus", () => {
 
 describe("readDeployId", () => {
   it("reads the id out of the API payload", () => {
+    expect(readDeployId({ id: "dep-1", status: "created" })).toBe("dep-1");
     expect(readDeployId({ deploy: { id: "dep-1" } })).toBe("dep-1");
   });
 
   it("returns null when the payload carries no id", () => {
     expect(readDeployId({})).toBeNull();
     expect(readDeployId(null)).toBeNull();
-    expect(readDeployId({ deploy: { id: "" } })).toBeNull();
+    expect(readDeployId({ id: "" })).toBeNull();
   });
 });
 
@@ -124,7 +125,9 @@ describe("findDeployIdByCommit", () => {
 
 describe("triggerDeploy", () => {
   it("posts the commit and returns the deploy id", async () => {
-    const { impl, calls } = stubFetch([{ status: 201, body: { deploy: { id: "dep-9" } } }]);
+    const { impl, calls } = stubFetch([
+      { status: 201, body: { id: "dep-9", status: "created" } },
+    ]);
 
     const result = await triggerDeploy({
       apiKey: "key",
@@ -182,7 +185,6 @@ describe("triggerDeploy", () => {
       { status: 201, body: {} },
       { body: [{ deploy: { id: "dep-6", commit: { id: "0000000" } } }] },
     ]);
-
     await expect(
       triggerDeploy({
         apiKey: "key",
@@ -251,7 +253,7 @@ describe("waitForDeploy", () => {
 describe("runDeploy", () => {
   it("deploys the requested commit and confirms what went live", async () => {
     const { impl } = stubFetch([
-      { status: 201, body: { deploy: { id: "dep-9" } } },
+      { status: 201, body: { id: "dep-9", status: "created" } },
       { body: { status: "live", commit: { id: "abc123def456" } } },
     ]);
 
@@ -270,7 +272,7 @@ describe("runDeploy", () => {
 
   it("fails when a different commit went live", async () => {
     const { impl } = stubFetch([
-      { status: 201, body: { deploy: { id: "dep-9" } } },
+      { status: 201, body: { id: "dep-9", status: "created" } },
       { body: { status: "live", commit: { id: "0000000" } } },
     ]);
 
