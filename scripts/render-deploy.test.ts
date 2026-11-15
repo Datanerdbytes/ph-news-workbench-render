@@ -3,6 +3,7 @@ import {
   classifyStatus,
   dashboardUrl,
   describeStatus,
+  findDeployIdByCommit,
   readDeployId,
   runDeploy,
   sameCommit,
@@ -103,6 +104,24 @@ describe("dashboardUrl", () => {
   });
 });
 
+describe("findDeployIdByCommit", () => {
+  it("picks the queued deploy for the commit out of the service's deploys", () => {
+    const list = [
+      { deploy: { id: "dep-2", commit: { id: "c662bc0" } } },
+      { deploy: { id: "dep-1", commit: { id: "428ed8187958632859bf58f2bd77cd81c27a16a5" } } },
+    ];
+
+    expect(findDeployIdByCommit(list, "428ed81")).toBe("dep-1");
+  });
+
+  it("returns null when no deploy matches the commit", () => {
+    const list = [{ deploy: { id: "dep-2", commit: { id: "c662bc0" } } }];
+
+    expect(findDeployIdByCommit(list, "428ed81")).toBeNull();
+    expect(findDeployIdByCommit(null, "428ed81")).toBeNull();
+  });
+});
+
 describe("triggerDeploy", () => {
   it("posts the commit and returns the deploy id", async () => {
     const { impl, calls } = stubFetch([{ status: 201, body: { deploy: { id: "dep-9" } } }]);
@@ -118,6 +137,28 @@ describe("triggerDeploy", () => {
     expect(calls[0].url).toBe("https://api.render.com/v1/services/srv-1/deploys");
     expect(calls[0].init?.method).toBe("POST");
     expect(JSON.parse(String(calls[0].init?.body))).toMatchObject({ commitId: "abc123" });
+  });
+
+  it("finds the queued deploy when Render answers an empty body", async () => {
+    const { impl, calls } = stubFetch([
+      { status: 202, body: null },
+      {
+        body: [
+          { deploy: { id: "dep-7", commit: { id: "abc123def456" } } },
+          { deploy: { id: "dep-6", commit: { id: "0000000" } } },
+        ],
+      },
+    ]);
+
+    const result = await triggerDeploy({
+      apiKey: "key",
+      serviceId: "srv-1",
+      commitId: "abc123",
+      fetchImpl: impl,
+    });
+
+    expect(result.deployId).toBe("dep-7");
+    expect(calls[1].url).toBe("https://api.render.com/v1/services/srv-1/deploys?limit=10");
   });
 
   it("fails with the API's own message and keeps the key out of it", async () => {
@@ -136,8 +177,11 @@ describe("triggerDeploy", () => {
     expect(error.message).not.toContain("rnd_secret_key");
   });
 
-  it("fails when Render accepts the deploy but returns no id", async () => {
-    const { impl } = stubFetch([{ status: 201, body: {} }]);
+  it("fails when Render accepts the deploy but no deploy for it is listed", async () => {
+    const { impl } = stubFetch([
+      { status: 201, body: {} },
+      { body: [{ deploy: { id: "dep-6", commit: { id: "0000000" } } }] },
+    ]);
 
     await expect(
       triggerDeploy({
@@ -146,7 +190,7 @@ describe("triggerDeploy", () => {
         commitId: "abc123",
         fetchImpl: impl,
       }),
-    ).rejects.toThrow(/did not return a deploy id/);
+    ).rejects.toThrow(/returned no deploy id/);
   });
 });
 

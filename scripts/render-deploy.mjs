@@ -79,6 +79,40 @@ export function readDeployId(payload) {
 }
 
 /**
+ * Render answers a create-deploy request with `202` and an empty body when the
+ * service already has a deploy in flight — the new deploy is queued behind it
+ * and only shows up in the deploy list. The list is ordered newest first and
+ * every entry wraps the deploy in a `deploy` key.
+ *
+ * @param {unknown} payload
+ * @param {string} commitId
+ * @returns {string | null}
+ */
+export function findDeployIdByCommit(payload, commitId) {
+  const entries = Array.isArray(payload)
+    ? payload
+    : /** @type {{ deploys?: unknown[] }} */ (payload)?.deploys ?? [];
+  if (!Array.isArray(entries)) return null;
+
+  for (const entry of entries) {
+    const deploy = /** @type {{ deploy?: { id?: unknown, commit?: { id?: unknown } } }} */ (entry)
+      ?.deploy;
+    const id = deploy?.id;
+    const deployCommit = deploy?.commit?.id;
+    if (
+      typeof id === "string" &&
+      id.length > 0 &&
+      typeof deployCommit === "string" &&
+      sameCommit(deployCommit, commitId)
+    ) {
+      return id;
+    }
+  }
+
+  return null;
+}
+
+/**
  * @param {string} serviceId
  * @param {string} deployId
  * @returns {string}
@@ -156,13 +190,24 @@ export async function triggerDeploy({
   });
 
   const deployId = readDeployId(payload);
-  if (!deployId) {
-    throw new Error(
-      "Render accepted the deploy but did not return a deploy id — cannot follow the deploy.",
-    );
+  if (deployId) {
+    return { deployId, deploy: payload };
   }
 
-  return { deployId, deploy: payload };
+  // A queued-behind-another-deploy answer carries no id, so the deploy has to
+  // be picked out of the service's recent deploys by its commit.
+  const list = await request(`/services/${serviceId}/deploys?limit=10`, {
+    apiKey,
+    fetchImpl,
+  });
+  const queuedId = findDeployIdByCommit(list, commitId);
+  if (queuedId) {
+    return { deployId: queuedId, deploy: null };
+  }
+
+  throw new Error(
+    "Render accepted the deploy but returned no deploy id, and no queued deploy for that commit is listed.",
+  );
 }
 
 /**
