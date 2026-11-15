@@ -27,10 +27,11 @@ import {
   ComposerCard,
   PageSelector,
   defaultScheduleValue,
-  resolveScheduledFor,
   scheduleBounds,
   useManagedPages,
+  useScheduleClock,
 } from '@/components/publishing/publish-page';
+import { resolveScheduledFor } from '@/lib/publishing/schedule';
 import { StatusPill, statusMeta } from '@/components/status-pill';
 import { Button } from '@/components/ui/button';
 import { ConfirmIconButton } from '@/components/ui/confirm-button';
@@ -151,6 +152,8 @@ export default function Home() {
   const [scheduleError, setScheduleError] = useState('');
   const [scheduledFor, setScheduledFor] = useState(defaultScheduleValue);
   const [scheduling, setScheduling] = useState(false);
+  const scheduleNow = useScheduleClock();
+  const scheduleProblem = resolveScheduledFor(scheduledFor, scheduleNow).error;
 
   const load = useCallback(async () => {
     try {
@@ -404,15 +407,15 @@ export default function Home() {
 
   async function schedulePost() {
     if (!selected || !draft.trim()) return;
-    const whenIso = resolveScheduledFor(scheduledFor);
-    if (!whenIso) {
-      setScheduleError('Pick a time between 10 minutes and 75 days from now.');
+    const schedule = resolveScheduledFor(scheduledFor);
+    if (schedule.iso === null) {
+      setScheduleError(schedule.error);
       return;
     }
     setScheduleError('');
     setScheduling(true);
     try {
-      const when = new Date(whenIso);
+      const when = new Date(schedule.iso);
       const res = await fetch('/api/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -421,7 +424,7 @@ export default function Home() {
           draftId: selected.draft_id ?? undefined,
           text: draft,
           imageUrls: images,
-          scheduledFor: whenIso,
+          scheduledFor: schedule.iso,
           pageId: pages.selected[0],
         }),
       });
@@ -1172,8 +1175,14 @@ export default function Home() {
                                 id="scheduled-for"
                                 type="datetime-local"
                                 aria-label="Publish date and time"
-                                min={scheduleBounds().min}
-                                max={scheduleBounds().max}
+                                aria-invalid={Boolean(scheduleError || scheduleProblem)}
+                                aria-describedby={
+                                  scheduleError || scheduleProblem
+                                    ? 'schedule-error'
+                                    : undefined
+                                }
+                                min={scheduleBounds(scheduleNow).min}
+                                max={scheduleBounds(scheduleNow).max}
                                 value={scheduledFor}
                                 onChange={(event) => {
                                   setScheduledFor(event.target.value);
@@ -1181,13 +1190,26 @@ export default function Home() {
                                 }}
                                 className="h-8 rounded-md border border-input bg-background px-2 text-[11.5px] text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                               />
-                              {scheduleError && (
+                              {(scheduleError || scheduleProblem) && (
                                 <p
+                                  id="schedule-error"
                                   role="alert"
                                   className="w-full text-right text-[11px] text-destructive"
                                 >
-                                  {scheduleError}
+                                  {scheduleError ?? scheduleProblem}
                                 </p>
+                              )}
+                              {scheduleProblem && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setScheduledFor(defaultScheduleValue());
+                                    setScheduleError('');
+                                  }}
+                                  className="text-[11px] font-medium text-brand underline underline-offset-2"
+                                >
+                                  Reset to tomorrow 9:00
+                                </button>
                               )}
                               <Button
                                 size="sm"

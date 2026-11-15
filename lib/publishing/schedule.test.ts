@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { parseScheduledPublishTime, scheduledFields } from "./schedule";
+import {
+  SCHEDULE_INVALID_ERROR,
+  SCHEDULE_MISSING_ERROR,
+  SCHEDULE_TOO_FAR_ERROR,
+  SCHEDULE_TOO_SOON_ERROR,
+  parseScheduledPublishTime,
+  resolveScheduledFor,
+  scheduledFields,
+} from "./schedule";
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -50,6 +58,76 @@ describe("parseScheduledPublishTime", () => {
     expect(parseScheduledPublishTime(target.toISOString())).toEqual({
       unix: Math.floor(target.getTime() / 1000),
     });
+  });
+});
+
+describe("resolveScheduledFor", () => {
+  // Local time on purpose: a datetime-local value parses as local time, so
+  // building both the clock and the expectations from local strings keeps
+  // these assertions timezone-independent.
+  const now = new Date("2026-11-13T09:00:00");
+
+  beforeEach(() => {
+    vi.setSystemTime(now);
+  });
+
+  it("resolves a value inside the window to an ISO string", () => {
+    expect(resolveScheduledFor("2026-11-14T09:00", now)).toEqual({
+      iso: new Date("2026-11-14T09:00").toISOString(),
+    });
+  });
+
+  it("names a missing value instead of the window", () => {
+    expect(resolveScheduledFor("", now)).toEqual({
+      iso: null,
+      error: SCHEDULE_MISSING_ERROR,
+    });
+    expect(resolveScheduledFor(undefined, now)).toEqual({
+      iso: null,
+      error: SCHEDULE_MISSING_ERROR,
+    });
+  });
+
+  it("names an unparseable value", () => {
+    expect(resolveScheduledFor("not-a-date", now)).toEqual({
+      iso: null,
+      error: SCHEDULE_INVALID_ERROR,
+    });
+  });
+
+  it("says how close the time is when it is too soon", () => {
+    // 5 minutes out — below the 10-minute floor.
+    expect(resolveScheduledFor("2026-11-13T09:05", now)).toEqual({
+      iso: null,
+      error: SCHEDULE_TOO_SOON_ERROR,
+    });
+  });
+
+  it("says the ceiling when the time is too far out", () => {
+    // 80 days out — past the 75-day ceiling.
+    expect(resolveScheduledFor("2027-02-01T09:00", now)).toEqual({
+      iso: null,
+      error: SCHEDULE_TOO_FAR_ERROR,
+    });
+  });
+
+  it("accepts the exact 10-minute and 75-day edges", () => {
+    expect(resolveScheduledFor("2026-11-13T09:10", now).iso).toBe(
+      new Date("2026-11-13T09:10").toISOString()
+    );
+    expect(resolveScheduledFor("2027-01-27T09:00", now).iso).toBe(
+      new Date("2027-01-27T09:00").toISOString()
+    );
+  });
+
+  it("refuses exactly what the server refuses", () => {
+    // Client and server share the window rules, so a value the composer
+    // accepts has to survive the server's own check — and vice versa.
+    expect(resolveScheduledFor("2026-11-14T09:00", now).iso).not.toBeNull();
+    expect(parseScheduledPublishTime("2026-11-14T09:00").unix).not.toBeNull();
+
+    expect(resolveScheduledFor("2026-11-13T09:05", now).iso).toBeNull();
+    expect(parseScheduledPublishTime("2026-11-13T09:05").unix).toBeNull();
   });
 });
 

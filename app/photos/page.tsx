@@ -19,12 +19,12 @@ import {
   ResultList,
   ScheduleField,
   defaultScheduleValue,
-  resolveScheduledFor,
   inputClass,
   textareaClass,
   useManagedPages,
   type PublishResult,
 } from '@/components/publishing/publish-page';
+import { resolveScheduledFor } from '@/lib/publishing/schedule';
 
 const MAX_IMAGES = 10;
 // Facebook rejects album photos above 10 MB — reject them here with a clear
@@ -159,13 +159,12 @@ export default function PhotosPage() {
     if (!images.length || staging) return;
     let scheduledForIso: string | null = null;
     if (scheduleOn) {
-      scheduledForIso = resolveScheduledFor(scheduledFor);
-      if (!scheduledForIso) {
-        setScheduleError(
-          'Pick a time between 10 minutes and 75 days from now.'
-        );
+      const schedule = resolveScheduledFor(scheduledFor);
+      if (schedule.iso === null) {
+        setScheduleError(schedule.error);
         return;
       }
+      scheduledForIso = schedule.iso;
       setScheduleError('');
     }
     setBusy(true);

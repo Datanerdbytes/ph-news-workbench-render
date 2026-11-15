@@ -17,6 +17,7 @@ import {
   inputClass,
   textareaClass,
 } from '@/components/publishing/publish-page';
+import { resolveScheduledFor } from '@/lib/publishing/schedule';
 import {
   MediaPreviewCard,
   MediaPreviewMedia,
@@ -70,6 +71,7 @@ export default function LivePage() {
   const [description, setDescription] = useState('');
   const [scheduleOn, setScheduleOn] = useState(false);
   const [scheduledFor, setScheduledFor] = useState(defaultScheduleValue);
+  const [scheduleError, setScheduleError] = useState('');
 
   const load = useCallback(async (refresh = false) => {
     setLoading(true);
@@ -94,6 +96,16 @@ export default function LivePage() {
   }, [load]);
 
   async function create() {
+    let scheduledForIso: string | null = null;
+    if (scheduleOn) {
+      const schedule = resolveScheduledFor(scheduledFor);
+      if (schedule.iso === null) {
+        setScheduleError(schedule.error);
+        return;
+      }
+      scheduledForIso = schedule.iso;
+    }
+    setScheduleError('');
     setBusy(true);
     try {
       const res = await fetch('/api/live', {
@@ -102,7 +114,7 @@ export default function LivePage() {
         body: JSON.stringify({
           title,
           description,
-          scheduledFor: scheduleOn ? new Date(scheduledFor).toISOString() : null,
+          scheduledFor: scheduledForIso,
         }),
       });
       const data = await res.json().catch(() => null);
@@ -232,7 +244,11 @@ export default function LivePage() {
               enabled={scheduleOn}
               onEnabled={setScheduleOn}
               value={scheduledFor}
-              onChange={setScheduledFor}
+              onChange={(value) => {
+                setScheduledFor(value);
+                setScheduleError('');
+              }}
+              error={scheduleError}
             />
             <Button
               variant="brand"

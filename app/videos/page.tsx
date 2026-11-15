@@ -14,13 +14,13 @@ import {
   ResultList,
   ScheduleField,
   defaultScheduleValue,
-  resolveScheduledFor,
   inputClass,
   mediaFileError,
   textareaClass,
   useManagedPages,
   type PublishResult,
 } from '@/components/publishing/publish-page';
+import { resolveScheduledFor } from '@/lib/publishing/schedule';
 import {
   MediaPreviewCard,
   MediaPreviewMedia,
@@ -147,13 +147,12 @@ export default function VideosPage() {
     }
     let scheduledForIso: string | null = null;
     if (scheduleOn) {
-      scheduledForIso = resolveScheduledFor(scheduledFor);
-      if (!scheduledForIso) {
-        setScheduleError(
-          'Pick a time between 10 minutes and 75 days from now.'
-        );
+      const schedule = resolveScheduledFor(scheduledFor);
+      if (schedule.iso === null) {
+        setScheduleError(schedule.error);
         return;
       }
+      scheduledForIso = schedule.iso;
       setScheduleError('');
     }
 

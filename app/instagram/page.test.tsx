@@ -28,21 +28,35 @@ vi.mock("@/components/publishing/publish-page", () => ({
   ScheduleField: ({
     enabled,
     onEnabled,
+    value,
+    onChange,
+    error,
   }: {
     enabled: boolean;
     onEnabled: (value: boolean) => void;
     value: string;
     onChange: (value: string) => void;
+    error?: string;
   }) => (
-    <input
-      type="checkbox"
-      aria-label="Schedule on Instagram"
-      checked={enabled}
-      onChange={(event) => onEnabled(event.target.checked)}
-    />
+    <>
+      <input
+        type="checkbox"
+        aria-label="Schedule on Instagram"
+        checked={enabled}
+        onChange={(event) => onEnabled(event.target.checked)}
+      />
+      {enabled && (
+        <input
+          type="datetime-local"
+          aria-label="Publish date and time"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      )}
+      {error && <p role="alert">{error}</p>}
+    </>
   ),
   defaultScheduleValue: () => "2026-11-15T09:00",
-  resolveScheduledFor: (value: string) => (value ? `${value}:00.000Z` : null),
   inputClass: "",
   textareaClass: "",
 }));
@@ -84,6 +98,10 @@ function stageImage() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The composer validates the schedule against the real clock, so pin it:
+  // the mocked default ("2026-11-15T09:00") has to land inside the window.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-11-14T08:00:00"));
   vi.stubGlobal("fetch", fetchMock);
   fetchMock.mockResolvedValue({
     ok: true,
@@ -97,6 +115,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -148,10 +167,40 @@ describe("InstagramPage composer", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
 
     const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));
-    expect(body.scheduledFor).toBe("2026-11-15T09:00:00.000Z");
+    expect(body.scheduledFor).toBe(new Date("2026-11-15T09:00").toISOString());
     expect(toast.success).toHaveBeenCalledWith(
       "Instagram post scheduled",
       expect.anything()
     );
+  });
+
+  it("refuses a schedule inside the 10-minute floor and says which bound it broke", async () => {
+    render(<InstagramPage />);
+    await flush();
+
+    stageImage();
+    await flush();
+
+    fireEvent.change(screen.getByLabelText("Caption"), {
+      target: { value: "Behind the headline" },
+    });
+    fireEvent.click(screen.getByLabelText("Schedule on Instagram"));
+    // Chrome's native picker seeds its time column with the current time, so
+    // editing the date can leave the time a few minutes out — inside the
+    // 10-minute floor. The composer must refuse it before uploading.
+    fireEvent.change(screen.getByLabelText("Publish date and time"), {
+      target: { value: "2026-11-14T08:05" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Schedule post" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Scheduled time must be at least 10 minutes from now."
+    );
+    expect(
+      fetchMock.mock.calls.some(
+        ([url]) => String(url) === "/api/instagram/posts"
+      )
+    ).toBe(false);
   });
 });

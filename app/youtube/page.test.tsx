@@ -26,7 +26,8 @@ vi.mock("@/components/publishing/publish-page", () => ({
     children?: ReactNode;
   }) => <label htmlFor={htmlFor}>{children}</label>,
   // Interactive stub: the page drives the schedule toggle through these
-  // props, and submit-time validation runs through resolveScheduledFor.
+  // props. Submit-time validation runs through the real resolveScheduledFor
+  // in @/lib/publishing/schedule, so it is not mocked away here.
   ScheduleField: ({
     enabled,
     onEnabled,
@@ -44,8 +45,6 @@ vi.mock("@/components/publishing/publish-page", () => ({
     />
   ),
   defaultScheduleValue: () => "2026-11-15T09:00",
-  resolveScheduledFor: (value: string) =>
-    value ? `${value}:00.000Z` : null,
   inputClass: "",
   textareaClass: "",
   mediaFileError: () => null,
@@ -86,6 +85,10 @@ function stageVideo() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The composer validates the schedule against the real clock, so pin it:
+  // the mocked default ("2026-11-15T09:00") has to land inside the window.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-11-14T08:00:00"));
   vi.stubGlobal("fetch", fetchMock);
   fetchMock.mockResolvedValue({
     ok: true,
@@ -100,6 +103,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -156,7 +160,7 @@ describe("YouTubePage composer", () => {
     expect(JSON.parse(String(init.body))).toMatchObject({
       title: "Newsroom cut",
       privacyStatus: "private",
-      scheduledFor: "2026-11-15T09:00:00.000Z",
+      scheduledFor: new Date("2026-11-15T09:00").toISOString(),
     });
     expect(toast.success).toHaveBeenCalledWith(
       "Video scheduled on YouTube",

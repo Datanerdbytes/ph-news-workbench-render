@@ -15,12 +15,12 @@ import {
   ResultList,
   ScheduleField,
   defaultScheduleValue,
-  resolveScheduledFor,
   inputClass,
   textareaClass,
   useManagedPages,
   type PublishResult,
 } from '@/components/publishing/publish-page';
+import { resolveScheduledFor } from '@/lib/publishing/schedule';
 
 const MAX_MESSAGE_LENGTH = 5000;
 
@@ -42,13 +42,12 @@ export default function PostPage() {
     if (!canPublish) return;
     let scheduledForIso: string | null = null;
     if (scheduleOn) {
-      scheduledForIso = resolveScheduledFor(scheduledFor);
-      if (!scheduledForIso) {
-        setScheduleError(
-          'Pick a time between 10 minutes and 75 days from now.'
-        );
+      const schedule = resolveScheduledFor(scheduledFor);
+      if (schedule.iso === null) {
+        setScheduleError(schedule.error);
         return;
       }
+      scheduledForIso = schedule.iso;
       setScheduleError('');
     }
     setBusy(true);
