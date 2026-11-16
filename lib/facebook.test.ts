@@ -395,16 +395,50 @@ describe("isFacebookStillScheduled", () => {
     await expect(isFacebookStillScheduled("pg1", "ctr1", "tok")).resolves.toBeNull();
   });
 
-  it("treats a truncated queue as unknown rather than released", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(
+  it("follows paging.next to find an item on a later page", async () => {
+    const mock = fetchMock();
+    mock
+      .mockResolvedValueOnce(
         jsonResponse({
           data: [{ id: "pg1_other" }],
-          paging: { next: "https://graph.example/next" },
+          paging: { next: "https://graph.example/next", cursors: { after: "c1" } },
         })
       )
+      .mockResolvedValueOnce(jsonResponse({ data: [{ id: "pg1_ctr1" }] }));
+
+    await expect(isFacebookStillScheduled("pg1", "ctr1", "tok")).resolves.toBe(
+      true
     );
+    expect(lastRequestedUrl(mock).searchParams.get("after")).toBe("c1");
+  });
+
+  it("reports absence only after reading the whole queue", async () => {
+    const mock = fetchMock();
+    mock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: [{ id: "pg1_other" }],
+          paging: { next: "https://graph.example/next", cursors: { after: "c1" } },
+        })
+      )
+      .mockResolvedValueOnce(jsonResponse({ data: [{ id: "pg1_other2" }] }));
+
+    await expect(isFacebookStillScheduled("pg1", "ctr1", "tok")).resolves.toBe(
+      false
+    );
+    expect(mock).toHaveBeenCalledTimes(2);
+  });
+
+  it("stays unknown when a later page cannot be read", async () => {
+    const mock = fetchMock();
+    mock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: [],
+          paging: { next: "https://graph.example/next", cursors: { after: "c1" } },
+        })
+      )
+      .mockResolvedValueOnce(graphError(1, "Try again later"));
 
     await expect(isFacebookStillScheduled("pg1", "ctr1", "tok")).resolves.toBeNull();
   });

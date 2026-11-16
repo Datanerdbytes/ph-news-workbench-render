@@ -725,30 +725,44 @@ export async function rescheduleFacebookScheduledPost(
  * stops existing once Facebook publishes — so membership of this edge is the
  * only reliable signal for those kinds. `null` when the edge is unreadable.
  */
+const QUEUE_PAGE_LIMIT = 100;
+const QUEUE_MAX_PAGES = 5;
+
 export async function isFacebookStillScheduled(
   pageId: string,
   postId: string,
   accessToken: string
 ): Promise<boolean | null> {
+  const compound = `${pageId}_${postId}`;
+  const matches = (id?: string) =>
+    Boolean(
+      id &&
+        (id === compound || id === postId || id.endsWith(`_${postId}`))
+    );
+
+  let params: Record<string, string> = {
+    fields: "id",
+    limit: String(QUEUE_PAGE_LIMIT),
+  };
   try {
-    const body = await graphGet<{
-      data?: Array<{ id?: string }>;
-      paging?: { next?: string };
-    }>(`${pageId}/scheduled_posts`, { fields: "id", limit: "100" }, accessToken);
-    const compound = `${pageId}_${postId}`;
-    for (const entry of body.data ?? []) {
-      if (!entry.id) continue;
-      if (
-        entry.id === compound ||
-        entry.id === postId ||
-        entry.id.endsWith(`_${postId}`)
-      ) {
-        return true;
-      }
+    for (let page = 0; page < QUEUE_MAX_PAGES; page++) {
+      const body = await graphGet<{
+        data?: Array<{ id?: string }>;
+        paging?: { next?: string; cursors?: { after?: string } };
+      }>(`${pageId}/scheduled_posts`, params, accessToken);
+
+      if ((body.data ?? []).some((entry) => matches(entry.id))) return true;
+      if (!body.paging?.next) return false;
+
+      const after =
+        body.paging.cursors?.after ??
+        new URL(body.paging.next).searchParams.get("after") ??
+        undefined;
+      if (!after) return null;
+      params = { ...params, after };
     }
-    // Later pages are not read, so absence here is not proof the item was
-    // released. Callers treat null as "unknown" and fall through to Graph.
-    return body.paging?.next ? null : false;
+    // More pages remain than we are willing to read; absence is unproven.
+    return null;
   } catch {
     return null;
   }
