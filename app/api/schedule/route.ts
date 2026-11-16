@@ -72,6 +72,38 @@ export async function POST(request: Request) {
         .slice(0, MAX_POST_IMAGES);
   const kind = videoUrl ? "video" : "post";
 
+  // Only identifiers this workspace owns may be linked to the schedule — the
+  // Activity feed joins news_items without a workspace predicate, so a
+  // foreign story or draft id would leak its headline into this workspace.
+  let verifiedNewsItemId: number | null = null;
+  if (Number.isInteger(newsItemId) && newsItemId > 0) {
+    const owned = (await sql`
+      SELECT id FROM news_items
+      WHERE id = ${newsItemId} AND workspace_id = ${access.workspace.id}
+    `) as unknown as { id: number }[];
+    if (!owned.length) {
+      return NextResponse.json(
+        { error: "Story not found in this workspace." },
+        { status: 404 }
+      );
+    }
+    verifiedNewsItemId = newsItemId;
+  }
+  let verifiedDraftId: number | null = null;
+  if (Number.isInteger(draftId) && draftId > 0) {
+    const ownedDrafts = (await sql`
+      SELECT id FROM drafts
+      WHERE id = ${draftId} AND workspace_id = ${access.workspace.id}
+    `) as unknown as { id: number }[];
+    if (!ownedDrafts.length) {
+      return NextResponse.json(
+        { error: "Draft not found in this workspace." },
+        { status: 404 }
+      );
+    }
+    verifiedDraftId = draftId;
+  }
+
   // Optional target page — validated against the workspace's connected pages;
   // null lets the executor fall back to the default (primary) page.
   const requestedPageId =
@@ -96,8 +128,8 @@ export async function POST(request: Request) {
       (workspace_id, news_item_id, draft_id, text, image_url, image_urls, scheduled_for, kind, page_id, created_by)
     VALUES
       (${access.workspace.id},
-       ${Number.isInteger(newsItemId) && newsItemId > 0 ? newsItemId : null},
-       ${Number.isInteger(draftId) && draftId > 0 ? draftId : null},
+       ${verifiedNewsItemId},
+       ${verifiedDraftId},
        ${text},
        ${videoUrl ?? imageUrls[0] ?? null},
        ${imageUrls.length ? JSON.stringify(imageUrls) : null}::jsonb,
