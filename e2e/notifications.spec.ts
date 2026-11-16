@@ -21,13 +21,28 @@ test("shows the unread badge, lists rows, and marks all read", async ({
   await expect(page.getByText("Regression seed 1")).toBeVisible();
   await expect(page.getByText("Regression seed 2")).toBeVisible();
 
+  const markAllResponse = page.waitForResponse(
+    (res) =>
+      res.url().includes("/api/notifications/read") &&
+      res.request().method() === "POST"
+  );
   await page.getByRole("button", { name: "Mark all read" }).click();
+  const response = await markAllResponse;
+  expect(response.ok()).toBeTruthy();
   await expect(
     page.getByRole("button", { name: "Mark all read" })
   ).toBeHidden();
   await expect(
     page.getByRole("button", { name: "Notifications", exact: true })
   ).toBeVisible();
+
+  await page.reload();
+  await expect(
+    page.getByRole("button", { name: "Notifications", exact: true })
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Notifications, 2 unread" })
+  ).toHaveCount(0);
 });
 
 test("marks a row read and follows its link", async ({ page }) => {
