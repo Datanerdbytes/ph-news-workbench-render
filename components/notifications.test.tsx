@@ -223,6 +223,39 @@ describe("NotificationBell", () => {
     ).toBeNull();
   });
 
+  it("keeps the badge clear when a stale refresh lands after mark all", async () => {
+    pollData = {
+      rows: [notif(1), notif(2)],
+      unread: 2,
+      nextCursor: null,
+      hasMore: false,
+    };
+    render(<NotificationBell />);
+    await flush();
+
+    // Hold the panel's refresh open so it lands after the mutation.
+    let release!: (value: Awaited<ReturnType<typeof fetchMock>>) => void;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        })
+    );
+    await openPanel();
+
+    fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+    await flush();
+
+    // The in-flight response still reports two unread — it must not win.
+    release({ ok: true, json: async () => pollData });
+    await flush();
+
+    expect(screen.queryByText("2")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Mark all read" })
+    ).toBeNull();
+  });
+
   it("marks a row read and follows its link on click", async () => {
     pollData = {
       rows: [notif(3, { type: "facebook_token_invalid", link: "/settings" })],
