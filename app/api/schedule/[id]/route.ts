@@ -273,12 +273,22 @@ export async function PATCH(
       Math.floor(scheduledFor.getTime() / 1000)
     );
     if (!moved.ok) {
-      // Nothing moved on Facebook, so the claim is dropped and the old time
-      // stands. Once a Page has accepted the new time, the row must keep it or
-      // the calendar would show a time Facebook no longer holds.
+      // A partial move already changed some Pages, so the row must keep the new
+      // time. When nothing moved, only release the claim for a confirmed refusal
+      // (e.g. the item is no longer queued); otherwise preserve the claim and let
+      // recovery reconcile the remote schedule.
       if (moved.moved === 0) {
-        await release();
-        return NextResponse.json({ error: moved.error }, { status: 409 });
+        if (moved.definite) {
+          await release();
+          return NextResponse.json({ error: moved.error }, { status: 409 });
+        }
+        return NextResponse.json(
+          {
+            error:
+              "Facebook's response was unclear, so the app is checking the schedule in the background. Reload the calendar in a moment.",
+          },
+          { status: 409 }
+        );
       }
       warning = moved.error;
     }
@@ -361,7 +371,16 @@ async function cancelOnFacebook(
   }
 
   for (const target of targets) {
-    const token = await resolvePageToken(row.workspace_id, target.pageId);
+    let token: string | null = null;
+    try {
+      token = await resolvePageToken(row.workspace_id, target.pageId);
+    } catch {
+      return {
+        ok: false,
+        error:
+          "The stored Page token could not be read, so this item cannot be canceled. Reload the calendar and try again.",
+      };
+    }
     if (!token) {
       return {
         ok: false,
@@ -406,7 +425,9 @@ export const RESCHEDULE_OPERATION_TIMEOUT_MS = 2 * 60_000;
 /**
  * Move the schedule Facebook is holding, across every Page that accepted it.
  * Returns how many Pages the new time reached so the caller can decide
- * whether the local row should follow a partial move.
+ * whether the local row should follow a partial move. `definite: true` means the
+ * failure proved nothing moved on Facebook; otherwise the outcome may be
+ * ambiguous and the caller must preserve the claim for reconciliation.
  *
  * An operation-wide deadline bounds the entire sequence of Graph calls to well
  * below the 10-minute stale claim reset threshold in the schedule worker, so a
@@ -416,12 +437,13 @@ async function rescheduleOnFacebook(
   row: TargetRow,
   scheduledPublishTime: number,
   timeoutMs = RESCHEDULE_OPERATION_TIMEOUT_MS
-): Promise<{ ok: boolean; moved: number; error?: string }> {
+): Promise<{ ok: boolean; moved: number; error?: string; definite?: boolean }> {
   const targets = facebookTargets(row);
   if (!targets.length) {
     return {
       ok: false,
       moved: 0,
+      definite: true,
       error:
         "This item is scheduled on Facebook but the app has no id for it, so it cannot be moved here. Move it in Meta Business Suite.",
     };
@@ -434,6 +456,7 @@ async function rescheduleOnFacebook(
       return {
         ok: false,
         moved,
+        definite: moved === 0,
         error: `Rescheduling timed out before all Pages could be moved.${partialMoveNote(moved, targets.length)}`,
       };
     }
@@ -448,6 +471,7 @@ async function rescheduleOnFacebook(
       return {
         ok: false,
         moved,
+        definite: moved === 0,
         error: `The stored Page token could not be read, so this item may only have moved on some Pages.${partialMoveNote(moved, targets.length)} Reload the calendar to see where each Page stands.`,
       };
     }
@@ -455,20 +479,23 @@ async function rescheduleOnFacebook(
       return {
         ok: false,
         moved,
+        definite: moved === 0,
         error: `The stored Page token is unreadable, so this item cannot be moved.${partialMoveNote(moved, targets.length)} Reconnect the Page, or move it in Meta Business Suite.`,
       };
     }
 
+    let held: boolean | null = null;
     try {
       // A row the sync has not caught up with may already be published;
       // moving then is refused by Facebook. Say so instead of guessing.
-      const held = target.pageId
+      held = target.pageId
         ? await isFacebookStillScheduled(target.pageId, target.postId, token)
         : null;
       if (held === false) {
         return {
           ok: false,
           moved,
+          definite: moved === 0,
           error: `Facebook no longer holds this item in its scheduled queue — it may have already published.${partialMoveNote(moved, targets.length)} Reload the calendar to see where it stands.`,
         };
       }
@@ -480,19 +507,26 @@ async function rescheduleOnFacebook(
       );
       moved += 1;
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       const reason =
         error instanceof Error
           ? `Facebook refused to move this item: ${error.message}`
           : "Facebook refused to move this item.";
+      const definiteRefusal =
+        held !== null &&
+        !/facebook (could not be reached|returned an empty response)/i.test(
+          message
+        );
       return {
         ok: false,
         moved,
+        definite: moved === 0 && definiteRefusal,
         error: `${reason}${partialMoveNote(moved, targets.length)} You can cancel it here and schedule it again.`,
       };
     }
   }
 
-  return { ok: true, moved };
+  return { ok: true, moved, definite: true };
 }
 
 function partialMoveNote(moved: number, total: number) {

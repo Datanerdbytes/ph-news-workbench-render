@@ -8,6 +8,7 @@ import {
   parseImages,
   publishPagePost,
   redactTokens,
+  rescheduleFacebookScheduledPost,
 } from "@/lib/facebook";
 import { stripMarkdown } from "@/lib/format";
 import {
@@ -427,43 +428,83 @@ export async function recoverStaleReschedules(): Promise<number> {
 
   let recovered = 0;
   for (const row of stale) {
-    let intendedIso: string | null = null;
+    let parsed: { claim?: string; action?: string; intended?: string } | null =
+      null;
     try {
       if (row.error_message?.startsWith("{")) {
-        const parsed = JSON.parse(row.error_message);
-        if (typeof parsed.intended === "string") intendedIso = parsed.intended;
+        parsed = JSON.parse(row.error_message);
       }
     } catch {}
 
+    // Separate deletion-claim recovery from rescheduling-claim recovery.
+    // If a DELETE operation crashed while holding the claim, complete the deletion
+    // rather than restoring it to scheduled.
+    if (parsed?.action === "delete") {
+      const deleted = (await sql`
+        DELETE FROM scheduled_posts
+        WHERE id = ${row.id}
+          AND status = 'rescheduling'
+          AND (error_message = ${row.error_message} OR (${row.error_message} IS NULL AND error_message IS NULL))
+        RETURNING id, news_item_id, scheduled_for`) as unknown as {
+        id: number;
+        news_item_id: number | null;
+        scheduled_for: string;
+      }[];
+
+      if (deleted.length) {
+        await recordScheduleEvent({
+          workspaceId: row.workspace_id,
+          scheduledPostId: deleted[0].id,
+          newsItemId: deleted[0].news_item_id,
+          event: "canceled",
+          source: "scheduler",
+          metadata: { scheduledFor: deleted[0].scheduled_for, recovered: true },
+        });
+        recovered++;
+      }
+      continue;
+    }
+
+    const intendedIso =
+      typeof parsed?.intended === "string" ? parsed.intended : null;
     let targetTime = row.scheduled_for;
     if (intendedIso) {
       if (row.source === "facebook" && row.page_id && row.facebook_post_id) {
         try {
           const token = await resolvePageToken(row.workspace_id, row.page_id);
           if (token) {
-            const held = await isFacebookStillScheduled(
-              row.page_id,
+            // Idempotently apply the intended schedule to Facebook so remote time is confirmed
+            const newUnix = Math.floor(new Date(intendedIso).getTime() / 1000);
+            await rescheduleFacebookScheduledPost(
               row.facebook_post_id,
-              token
+              token,
+              newUnix,
+              row.page_id
             );
-            if (held === true) {
-              targetTime = intendedIso;
-            }
+            targetTime = intendedIso;
           }
-        } catch {}
+        } catch {
+          // If remote move failed or was unconfirmed, keep row.scheduled_for
+        }
       } else {
         targetTime = intendedIso;
       }
     }
 
-    await sql`
+    const updated = (await sql`
       UPDATE scheduled_posts
       SET status = 'scheduled',
           scheduled_for = ${targetTime},
           error_message = NULL,
           updated_at = now()
-      WHERE id = ${row.id} AND status = 'rescheduling'`;
-    recovered++;
+      WHERE id = ${row.id}
+        AND status = 'rescheduling'
+        AND (error_message = ${row.error_message} OR (${row.error_message} IS NULL AND error_message IS NULL))
+      RETURNING id`) as unknown as { id: number }[];
+
+    if (updated.length) {
+      recovered++;
+    }
   }
 
   return recovered;
