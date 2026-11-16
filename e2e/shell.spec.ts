@@ -16,6 +16,14 @@ test("renders the dashboard publishing stats", async ({ page }) => {
   // platform query degrades the cards to a dash instead, so this is what
   // catches a query that no longer runs.
   await expect(page.getByText(/\d+ in the last 30 days/)).toBeVisible();
+
+  // And the endpoint itself must answer with a platform breakdown — the
+  // dashboard swallows a failed stats call on purpose, so only the
+  // response catches a broken aggregation.
+  const res = await page.request.get("/api/analytics");
+  expect(res.ok()).toBeTruthy();
+  const data = await res.json();
+  expect(data.platforms).toHaveLength(4);
 });
 
 test("renders the calendar with its scheduled sidebar", async ({ page }) => {
