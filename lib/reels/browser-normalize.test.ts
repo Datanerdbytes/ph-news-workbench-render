@@ -113,6 +113,14 @@ describe("buildBrowserTranscodeArgs", () => {
     expect(args[1]).toBe("input.mov");
     expect(args[args.length - 1]).toBe("output.mp4");
   });
+
+  it("writes the Facebook-safe audio/video spec", () => {
+    const args = buildBrowserTranscodeArgs("input.mov", "output.mp4");
+    expect(args[args.indexOf("-fps_mode") + 1]).toBe("cfr");
+    expect(args[args.indexOf("-ar") + 1]).toBe("48000");
+    expect(args[args.indexOf("-ac") + 1]).toBe("2");
+    expect(args[args.indexOf("-af") + 1]).toBe("aresample=async=1:first_pts=0");
+  });
 });
 
 describe("buildBakeRemuxArgs", () => {

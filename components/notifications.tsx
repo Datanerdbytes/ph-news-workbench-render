@@ -60,11 +60,14 @@ const severityClasses: Record<string, string> = {
 };
 
 async function markRead(id: number | "all") {
-  await fetch("/api/notifications/read", {
+  const res = await fetch("/api/notifications/read", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(id === "all" ? { all: true } : { id }),
   });
+  // fetch only rejects on a network failure, so an error status has to be
+  // raised here — otherwise a failed write leaves the badge lying.
+  if (!res.ok) throw new Error(`Request failed (${res.status})`);
 }
 
 function mergeRows(
@@ -128,15 +131,35 @@ export function NotificationBell() {
   /** Highest notification id already seen — the watermark for toasting. */
   const maxSeenIdRef = useRef(0);
   const seededRef = useRef(false);
+  /**
+   * Bumped by every local mutation (mark read, mark all read). A refresh that
+   * was already in flight carries the pre-mutation count, so it is dropped
+   * when it lands instead of resurrecting a stale badge.
+   */
+  const mutationVersionRef = useRef(0);
+  /**
+   * Counts the mark-read writes currently in flight. A read that goes out
+   * while one is pending can still be answered with the pre-write count, so it
+   * is dropped — the refresh that follows the settled write restores the truth.
+   */
+  const pendingWritesRef = useRef(0);
 
   const refresh = useCallback(
     async (announce: boolean) => {
+      const version = mutationVersionRef.current;
+      const writePending = pendingWritesRef.current > 0;
       try {
         const res = await fetch(`/api/notifications?limit=${PAGE_SIZE}`, {
           cache: "no-store",
         });
         if (!res.ok) return;
         const data = (await res.json()) as NotificationsResponse;
+        // A local mutation landed while this request was in flight, so its
+        // count is older than what the panel already shows.
+        if (mutationVersionRef.current !== version) return;
+        // The request went out while a mark-read write was pending, so the
+        // server may have answered with the count from before that write.
+        if (writePending) return;
         const previousMax = maxSeenIdRef.current;
         setRows(data.rows);
         setUnread(data.unread);
@@ -202,6 +225,8 @@ export function NotificationBell() {
   async function loadMore() {
     if (loadingMore || !hasMore || !rows.length) return;
     setLoadingMore(true);
+    const version = mutationVersionRef.current;
+    const writePending = pendingWritesRef.current > 0;
     try {
       const res = await fetch(
         `/api/notifications?limit=${PAGE_SIZE}&before=${rows[rows.length - 1].id}`,
@@ -209,6 +234,11 @@ export function NotificationBell() {
       );
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data = (await res.json()) as NotificationsResponse;
+      // Same rules as refresh: a page fetched before a local mutation, or
+      // while one is pending, carries a stale count and must not overwrite
+      // the current badge.
+      if (mutationVersionRef.current !== version) return;
+      if (writePending) return;
       setRows((current) => mergeRows(current, data.rows));
       setHasMore(data.hasMore);
       setUnread(data.unread);
@@ -224,6 +254,10 @@ export function NotificationBell() {
 
   async function onRowClick(row: NotificationRow) {
     if (!row.readAt) {
+      // Invalidate any refresh already on the wire — its count predates this
+      // mutation.
+      mutationVersionRef.current += 1;
+      pendingWritesRef.current += 1;
       setRows((current) =>
         current.map((item) =>
           item.id === row.id
@@ -232,13 +266,23 @@ export function NotificationBell() {
         )
       );
       setUnread((value) => Math.max(0, value - 1));
-      void markRead(Number(row.id));
+      void markRead(Number(row.id))
+        .catch(() => undefined)
+        .finally(() => {
+          pendingWritesRef.current -= 1;
+          // The settled server state is authoritative — re-read it.
+          void refresh(false);
+        });
     }
     setOpen(false);
     if (row.link) router.push(row.link);
   }
 
   async function onMarkAll() {
+    // Invalidate any refresh already on the wire — its count predates this
+    // mutation and would put the badge back.
+    mutationVersionRef.current += 1;
+    pendingWritesRef.current += 1;
     setRows((current) =>
       current.map((item) =>
         item.readAt ? item : { ...item, readAt: new Date().toISOString() }
@@ -248,6 +292,10 @@ export function NotificationBell() {
     try {
       await markRead("all");
     } catch {
+      // The write failed — the refresh below restores the server's count.
+    } finally {
+      pendingWritesRef.current -= 1;
+      // The settled server state is authoritative — re-read it.
       void refresh(false);
     }
   }

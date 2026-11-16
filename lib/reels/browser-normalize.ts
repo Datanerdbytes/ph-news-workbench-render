@@ -3,9 +3,10 @@ import { loadFfmpegLibs } from "./ffmpeg-loader";
 const CORE_BASE = "https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm";
 
 /**
- * Mirror of the server transcode (H.264/AAC 1080×1920 faststart) but with a
- * faster x264 preset: the wasm encoder is single-threaded and CPU-bound, so
- * `medium` would take minutes on a phone-length clip.
+ * Mirror of the server transcode (H.264/AAC 1080×1920 faststart) with the same
+ * Facebook-safe audio/video spec: constant frame rate, stereo AAC at 48 kHz,
+ * and repaired audio timestamps. The wasm encoder is single-threaded and
+ * CPU-bound, so it uses a fast x264 preset.
  */
 export function buildBrowserTranscodeArgs(
   inputName: string,
@@ -24,10 +25,18 @@ export function buildBrowserTranscodeArgs(
     "veryfast",
     "-pix_fmt",
     "yuv420p",
+    "-fps_mode",
+    "cfr",
     "-c:a",
     "aac",
     "-b:a",
     "128k",
+    "-ar",
+    "48000",
+    "-ac",
+    "2",
+    "-af",
+    "aresample=async=1:first_pts=0",
     "-movflags",
     "+faststart",
     outputName,

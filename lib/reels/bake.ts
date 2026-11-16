@@ -192,41 +192,65 @@ export async function bakeReelAnimation(options: BakeOptions): Promise<Blob> {
   const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
   const effects = planEffects(attachments, duration, values);
 
-  await new Promise<void>((resolve) => {
-    const fps = 30;
-    const minFrameMs = 1000 / fps;
-    const start = performance.now();
-    let lastFrameTime = start;
-    let raf = 0;
-    const tick = () => {
-      const now = performance.now();
-      // Wall-clock time since the bake started — deterministic, independent of
-      // video.currentTime read jitter (was ~20–21 fps vs the 30 fps source).
-      const t = (now - start) / 1000;
-      if (t >= duration) {
+  let playbackError: Error | null = null;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const fps = 30;
+      const minFrameMs = 1000 / fps;
+      const start = performance.now();
+      let lastFrameTime = start;
+      let lastProgressAt = start;
+      let lastPlayhead = 0;
+      let raf = 0;
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
         cancelAnimationFrame(raf);
-        resolve();
-        return;
-      }
-      // Produce one frame per 30 fps slot, seeking the video explicitly so each
-      // frame renders at a deterministic time instead of drifting with RAF.
-      if (now - lastFrameTime >= minFrameMs) {
-        lastFrameTime = now;
-        video.currentTime = Math.min(t, duration);
-        if (duration) onProgress?.(Math.min(1, video.currentTime / duration));
-        ctx.clearRect(0, 0, DESIGN_W, DESIGN_H);
-        composeFrame(ctx, effects, video.currentTime, (zoom) =>
-          drawFootage(ctx, video, zoom)
-        );
-      }
+        if (error) reject(error);
+        else resolve();
+      };
+      const tick = () => {
+        const now = performance.now();
+        const playhead = video.currentTime;
+        // Draw the frame the element is presenting right now at 30 fps. Never
+        // assign video.currentTime here: every seek restarts audio decoding,
+        // and the captured soundtrack comes out choppy once Facebook plays it.
+        // Advance by a fixed frame step so sub-33ms callbacks keep the remainder.
+        if (now - lastFrameTime >= minFrameMs) {
+          do {
+            lastFrameTime += minFrameMs;
+          } while (now - lastFrameTime >= minFrameMs);
+          ctx.clearRect(0, 0, DESIGN_W, DESIGN_H);
+          composeFrame(ctx, effects, playhead, (zoom) =>
+            drawFootage(ctx, video, zoom)
+          );
+          if (duration) onProgress?.(Math.min(1, playhead / duration));
+        }
+        if (duration && playhead >= duration - 0.05) {
+          finish();
+          return;
+        }
+        // Playback stalls (buffering, a decoding error) would otherwise hang
+        // the bake forever now that no seek keeps the playhead moving.
+        if (playhead > lastPlayhead + 0.01) {
+          lastPlayhead = playhead;
+          lastProgressAt = now;
+        } else if (now - lastProgressAt > 15_000) {
+          finish(new Error('The video stopped playing during the bake.'));
+          return;
+        }
+        raf = requestAnimationFrame(tick);
+      };
       raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    video.onended = () => {
-      cancelAnimationFrame(raf);
-      resolve();
-    };
-  });
+      video.onended = () => finish();
+      video.onerror = () =>
+        finish(new Error('The video stopped playing during the bake.'));
+    });
+  } catch (error) {
+    playbackError =
+      error instanceof Error ? error : new Error('The bake was interrupted.');
+  }
 
   video.pause();
   if (recorder.state !== 'inactive') recorder.stop();
@@ -234,6 +258,7 @@ export async function bakeReelAnimation(options: BakeOptions): Promise<Blob> {
   stream.getTracks().forEach((track) => track.stop());
   await audioCtx.close().catch(() => {});
   video.src = '';
+  if (playbackError) throw playbackError;
   if (blob.size === 0) throw new Error('Recording produced no data.');
   return blob;
 }
