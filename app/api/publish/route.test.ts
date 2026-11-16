@@ -58,10 +58,11 @@ beforeEach(() => {
   targetsMock.mockResolvedValue(targets);
   publishMock.mockResolvedValue({ id: "post_1", permalink });
   mirrorMock.mockResolvedValue(undefined);
-  // 1) the connection scopes, 2) the draft the publish flips.
+  // 1) the connection scopes, 2) the story and its draft, 3) the draft flip.
   sqlMock
     .mockResolvedValueOnce([{ scopes: "pages_manage_posts" }])
-    .mockResolvedValueOnce([{ id: 42 }]);
+    .mockResolvedValueOnce([{ id: 7, draft_id: 42 }])
+    .mockResolvedValueOnce([]);
 });
 
 describe("POST /api/publish", () => {
@@ -103,7 +104,8 @@ describe("POST /api/publish", () => {
     sqlMock.mockReset();
     sqlMock
       .mockResolvedValueOnce([{ scopes: "pages_manage_posts" }])
-      .mockResolvedValueOnce([]);
+      // The story belongs to the workspace but has no draft yet.
+      .mockResolvedValueOnce([{ id: 7, draft_id: null }]);
 
     const response = await POST(
       post({ newsItemId: 7, message: "Behind the headline" })
@@ -113,6 +115,29 @@ describe("POST /api/publish", () => {
     expect(mirrorMock).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "post", newsItemId: 7, draftId: null })
     );
+  });
+
+  it("links no story the workspace does not own", async () => {
+    sqlMock.mockReset();
+    sqlMock
+      .mockResolvedValueOnce([{ scopes: "pages_manage_posts" }])
+      // The story belongs to another workspace: the lookup finds nothing.
+      .mockResolvedValueOnce([]);
+
+    const response = await POST(
+      post({ newsItemId: 999, message: "Behind the headline" })
+    );
+
+    // The post still reaches the Page...
+    expect(response.status).toBe(200);
+    expect(publishMock).toHaveBeenCalled();
+    // ...but nothing is linked to a foreign story, whose headline would
+    // otherwise surface in this workspace's Activity feed.
+    expect(mirrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({ newsItemId: null, draftId: null })
+    );
+    // No draft was flipped either.
+    expect(sqlMock).toHaveBeenCalledTimes(2);
   });
 
   it("mirrors nothing when the publish fails", async () => {
