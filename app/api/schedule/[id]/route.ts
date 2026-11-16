@@ -316,13 +316,24 @@ async function rescheduleOnFacebook(
 
   let moved = 0;
   for (const target of targets) {
-    const token = await resolvePageToken(row.workspace_id, target.pageId);
+    // The token lookup touches the database, so it can reject like any other
+    // call. Return the Pages already moved instead of throwing, or PATCH would
+    // keep the old local time while Facebook holds the new one.
+    let token: string | null = null;
+    try {
+      token = await resolvePageToken(row.workspace_id, target.pageId);
+    } catch {
+      return {
+        ok: false,
+        moved,
+        error: `The stored Page token could not be read, so this item may only have moved on some Pages.${partialMoveNote(moved, targets.length)} Reload the calendar to see where each Page stands.`,
+      };
+    }
     if (!token) {
       return {
         ok: false,
         moved,
-        error:
-          "The stored Page token is unreadable, so this item cannot be moved. Reconnect the Page, or move it in Meta Business Suite.",
+        error: `The stored Page token is unreadable, so this item cannot be moved.${partialMoveNote(moved, targets.length)} Reconnect the Page, or move it in Meta Business Suite.`,
       };
     }
 
@@ -336,8 +347,7 @@ async function rescheduleOnFacebook(
         return {
           ok: false,
           moved,
-          error:
-            "Facebook no longer holds this item in its scheduled queue — it may have already published. Reload the calendar to see where it stands.",
+          error: `Facebook no longer holds this item in its scheduled queue — it may have already published.${partialMoveNote(moved, targets.length)} Reload the calendar to see where it stands.`,
         };
       }
       await rescheduleFacebookScheduledPost(
@@ -352,17 +362,19 @@ async function rescheduleOnFacebook(
         error instanceof Error
           ? `Facebook refused to move this item: ${error.message}`
           : "Facebook refused to move this item.";
-      const partial =
-        moved > 0
-          ? ` It did move on ${moved} of ${targets.length} Pages, so those are now at the new time.`
-          : "";
       return {
         ok: false,
         moved,
-        error: `${reason}${partial} You can cancel it here and schedule it again.`,
+        error: `${reason}${partialMoveNote(moved, targets.length)} You can cancel it here and schedule it again.`,
       };
     }
   }
 
   return { ok: true, moved };
+}
+
+function partialMoveNote(moved: number, total: number) {
+  return moved > 0
+    ? ` It did move on ${moved} of ${total} Pages, so those are now at the new time.`
+    : "";
 }

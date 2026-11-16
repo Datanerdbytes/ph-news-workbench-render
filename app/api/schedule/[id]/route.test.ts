@@ -224,6 +224,44 @@ describe("PATCH /api/schedule/[id]", () => {
       expect(resolvePageTokenMock).not.toHaveBeenCalled();
       expect(rescheduleMock).not.toHaveBeenCalled();
     });
+
+    it("keeps the old time when a Page token cannot even be read", async () => {
+      sqlMock.mockResolvedValueOnce([facebookRow]);
+      resolvePageTokenMock.mockRejectedValueOnce(new Error("connection reset"));
+
+      const res = await PATCH(patchRequest({ scheduledFor: NEW_TIME }), params());
+      const data = await res.json();
+
+      expect(res.status).toBe(409);
+      expect(data.error).toContain("could not be read");
+      expect(rescheduleMock).not.toHaveBeenCalled();
+      expect(sqlMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("updates the row and warns when a later Page token lookup throws", async () => {
+      sqlMock
+        .mockResolvedValueOnce([
+          {
+            ...facebookRow,
+            facebook_post_ids: [
+              { id: "vid9", ok: true, page: { id: "pg1", name: "Page A" } },
+              { id: "vid10", ok: true, page: { id: "pg2", name: "Page B" } },
+            ],
+          },
+        ])
+        .mockResolvedValueOnce([{ id: 51, scheduled_for: NEW_TIME }]);
+      resolvePageTokenMock
+        .mockResolvedValueOnce("tok")
+        .mockRejectedValueOnce(new Error("connection reset"));
+
+      const res = await PATCH(patchRequest({ scheduledFor: NEW_TIME }), params());
+      const data = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(data.scheduled_for).toBe(NEW_TIME);
+      expect(data.warning).toContain("It did move on 1 of 2 Pages");
+      expect(data.warning).toContain("could not be read");
+    });
   });
 
   it("refuses a time outside the scheduling window before touching the row", async () => {
