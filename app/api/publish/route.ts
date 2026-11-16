@@ -13,6 +13,7 @@ import {
   notifyTokenInvalid,
   notifyWorkspace,
 } from '@/lib/notifications';
+import { recordNativeSchedule } from '@/lib/schedule-mirror';
 
 export const dynamic = 'force-dynamic';
 
@@ -99,13 +100,37 @@ export async function POST(request: Request) {
       images: parseImages(imageUrls),
     });
 
-    await sql`
+    const draftRows = (await sql`
       UPDATE drafts SET status = 'published'
       WHERE id = (
         SELECT id FROM drafts
         WHERE news_item_id = ${newsItemId} AND workspace_id = ${access.workspace.id}
         ORDER BY id DESC LIMIT 1
-      )`;
+      )
+      RETURNING id`) as unknown as { id: number }[];
+
+    // This route publishes straight away and used to leave no trace beyond
+    // the draft's status, so the Dashboard's published counters never saw a
+    // post made from the Story Queue. Mirroring it records the publish —
+    // linked to the draft, so the activity log keeps showing one entry for
+    // it rather than the draft and the event side by side.
+    await recordNativeSchedule({
+      workspaceId: access.workspace.id,
+      userId: access.user.id,
+      kind: 'post',
+      text: message,
+      scheduledFor: null,
+      results: [
+        {
+          page: { id: target.id, name: target.name },
+          ok: true,
+          id: post.id,
+          permalink: post.permalink,
+        },
+      ],
+      newsItemId,
+      draftId: draftRows[0]?.id ?? null,
+    });
 
     return NextResponse.json({
       id: post.id,

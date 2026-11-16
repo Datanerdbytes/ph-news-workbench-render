@@ -80,6 +80,15 @@ type PlatformStats = {
 
 type PlatformStatsByName = Record<DashboardPlatform, PlatformStats>;
 
+/** The part of the /api/analytics response the dashboard reads. */
+type AnalyticsResponse = {
+  platforms?: Array<{
+    platform?: string;
+    published?: PlatformStats["published"];
+    published30d?: PlatformStats["published30d"];
+  }>;
+};
+
 const PLATFORM_PILLS: Array<{ platform: DashboardPlatform; name: string }> = [
   { platform: "facebook", name: "Facebook" },
   { platform: "instagram", name: "Instagram" },
@@ -102,13 +111,7 @@ function emptyPlatformStats(): PlatformStatsByName {
 
 /** Keeps only the platforms the Dashboard knows, so a stray row cannot leak in. */
 function readPlatformStats(
-  rows:
-    | Array<{
-        platform?: string;
-        published?: PlatformStats["published"];
-        published30d?: PlatformStats["published30d"];
-      }>
-    | undefined
+  rows: AnalyticsResponse["platforms"]
 ): PlatformStatsByName {
   const stats = emptyPlatformStats();
 
@@ -303,7 +306,9 @@ export default function DashboardPage() {
           fetch("/api/activity?mergeByStory=false&dedupe=false&limit=10", {
             cache: "no-store",
           }),
-          fetch("/api/analytics", { cache: "no-store" }),
+          // A rejected stats request must not reject the whole load — the
+          // counters are their own failure.
+          fetch("/api/analytics", { cache: "no-store" }).catch(() => null),
         ]);
 
       if (!draftsRes.ok || !itemsRes.ok || !activitiesRes.ok) {
@@ -325,18 +330,17 @@ export default function DashboardPage() {
         Array.isArray(activityData) ? activityData : (activityData.rows ?? [])
       );
 
-      // The publishing counters are their own failure: a hiccup there must
-      // not take the activity log down with it. The cards show a dash
-      // instead of a fake zero.
-      if (analyticsRes.ok) {
-        const analyticsData = (await analyticsRes.json()) as {
-          platforms?: Array<{
-            platform?: string;
-            published?: PlatformStats["published"];
-            published30d?: PlatformStats["published30d"];
-          }>;
-        };
-        setPlatformStats(readPlatformStats(analyticsData?.platforms));
+      // The publishing counters are their own failure: a hiccup there (a
+      // network error, a 500, an unreadable body) must not take the
+      // activity log down with it. The cards show a dash instead of a fake
+      // zero.
+      const analyticsData = analyticsRes?.ok
+        ? ((await analyticsRes.json().catch(() => null)) as AnalyticsResponse | null)
+        : null;
+      const platforms = analyticsData?.platforms;
+
+      if (Array.isArray(platforms)) {
+        setPlatformStats(readPlatformStats(platforms));
         setStatsFailed(false);
       } else {
         setPlatformStats(emptyPlatformStats());

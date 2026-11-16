@@ -89,9 +89,10 @@ export async function GET(request: Request) {
       ${before ? sql`AND d.created_at <= to_timestamp(${before} / 1000.0)` : sql``}
       -- A published draft that a scheduled post already put on Facebook is the
       -- same publish recorded twice (the worker flips this exact draft's
-      -- status); the event row wins. Draft-grained, not story-grained: a
-      -- regenerated draft republished through /api/publish records no event,
-      -- so it stays visible even if the story was published before.
+      -- status); the event row wins. Draft-grained, not story-grained: only
+      -- the draft a publish actually flipped is replaced by its event, so a
+      -- regenerated draft for a story that was published before stays
+      -- visible.
       AND NOT (
         d.status = 'published'
         AND EXISTS (

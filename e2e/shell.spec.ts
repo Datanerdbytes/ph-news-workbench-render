@@ -9,21 +9,39 @@ test("renders the dashboard activity feed", async ({ page }) => {
 });
 
 test("renders the dashboard publishing stats", async ({ page }) => {
+  // Wait for the stats the page actually renders, not the zero state it
+  // paints before the response lands.
+  const analyticsResponse = page.waitForResponse((response) =>
+    response.url().includes("/api/analytics")
+  );
   await page.goto("/dashboard");
 
-  await expect(page.getByText("Total published")).toBeVisible();
-  // The 30-day hint only renders when /api/analytics answered. A broken
-  // platform query degrades the cards to a dash instead, so this is what
-  // catches a query that no longer runs.
-  await expect(page.getByText(/\d+ in the last 30 days/)).toBeVisible();
+  const res = await analyticsResponse;
+  expect(res.ok()).toBeTruthy();
+  const data = await res.json();
+  const facebook = data.platforms.find(
+    (entry: { platform: string }) => entry.platform === "facebook"
+  );
+  expect(facebook).toBeTruthy();
+
+  const totalCard = page.locator("article").filter({ hasText: "Total published" });
+  await expect(totalCard).toBeVisible();
+  await expect(
+    totalCard.getByText(String(facebook.published.total), { exact: true })
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      new RegExp(`${facebook.published30d.total} in the last 30 days`)
+    )
+  ).toBeVisible();
 
   // And the endpoint itself must answer with a platform breakdown — the
   // dashboard swallows a failed stats call on purpose, so only the
   // response catches a broken aggregation.
-  const res = await page.request.get("/api/analytics");
-  expect(res.ok()).toBeTruthy();
-  const data = await res.json();
-  expect(data.platforms).toHaveLength(4);
+  const apiRes = await page.request.get("/api/analytics");
+  expect(apiRes.ok()).toBeTruthy();
+  const apiData = await apiRes.json();
+  expect(apiData.platforms).toHaveLength(4);
 });
 
 test("renders the calendar with its scheduled sidebar", async ({ page }) => {
