@@ -216,8 +216,11 @@ export async function bakeReelAnimation(options: BakeOptions): Promise<Blob> {
         // Draw the frame the element is presenting right now at 30 fps. Never
         // assign video.currentTime here: every seek restarts audio decoding,
         // and the captured soundtrack comes out choppy once Facebook plays it.
+        // Advance by a fixed frame step so sub-33ms callbacks keep the remainder.
         if (now - lastFrameTime >= minFrameMs) {
-          lastFrameTime = now;
+          do {
+            lastFrameTime += minFrameMs;
+          } while (now - lastFrameTime >= minFrameMs);
           ctx.clearRect(0, 0, DESIGN_W, DESIGN_H);
           composeFrame(ctx, effects, playhead, (zoom) =>
             drawFootage(ctx, video, zoom)
