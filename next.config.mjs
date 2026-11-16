@@ -22,6 +22,11 @@ const nextConfig = {
   // Self-contained server bundle (.next/standalone + server.js) for the
   // Hugging Face Space Docker image — no node_modules needed at runtime.
   output: "standalone",
+  // Require the neon driver at runtime instead of bundling it: its config
+  // lives on module-level statics (neonConfig), which local development
+  // overrides via scripts/neon-local.mjs — bundling would create a second,
+  // unreachable instance.
+  serverExternalPackages: ["@neondatabase/serverless"],
   allowedDevOrigins,
 };
 
