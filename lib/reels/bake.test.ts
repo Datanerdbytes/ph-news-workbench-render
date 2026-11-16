@@ -195,6 +195,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("bakeReelAnimation", () => {
@@ -292,6 +293,43 @@ describe("bakeReelAnimation", () => {
 
     expect(blob.type).toBe("video/webm");
     expect(blob.size).toBeGreaterThan(0);
+  });
+
+  it("never seeks while recording — a seek per frame chopped the captured audio", async () => {
+    installBrowserStubs(() => Promise.resolve());
+
+    // Drive a few render ticks with a playhead that advances naturally, and
+    // record every assignment to the media element's playhead.
+    let ticks = 0;
+    let playhead = 0;
+    const writes: number[] = [];
+    Object.defineProperty(video, "currentTime", {
+      configurable: true,
+      get: () => playhead,
+      set: (value: number) => {
+        writes.push(value);
+        playhead = value;
+      },
+    });
+    vi.stubGlobal("requestAnimationFrame", (cb: () => void) => {
+      if (ticks++ < 6) {
+        playhead += 1;
+        cb();
+      }
+      return ticks;
+    });
+    let clock = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => (clock += 1000));
+
+    const blob = await bakeReelAnimation({
+      videoUrl: "blob:x",
+      attachments: [{ presetId: "headline", slot: "start", loop: false }],
+      values: {},
+    });
+
+    expect(blob.size).toBeGreaterThan(0);
+    // Only the initial rewind before playback may touch currentTime.
+    expect(writes).toEqual([0]);
   });
 
   it("bakes every attached slot effect into one recording", async () => {

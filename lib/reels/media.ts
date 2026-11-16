@@ -82,38 +82,56 @@ export async function probeVideoDurationSeconds(
 
 /**
  * Normalize uploaded reel videos to what Facebook and every browser expect:
- * H.264/AAC, exactly 1080×1920 (cover-cropped), faststart MP4.
+ * H.264/AAC, 1080×1920 cover-cropped, constant frame rate, stereo 48 kHz
+ * audio, faststart MP4. `aresample=async` bridges the timestamp gaps common in
+ * VFR downloads — those leave the soundtrack choppy once Facebook re-encodes.
+ * `veryfast` keeps the transcode inside the request budget on small servers.
  */
+export function buildReelTranscodeArgs(
+  inputPath: string,
+  outputPath: string
+): string[] {
+  return [
+    '-y',
+    '-v',
+    'error',
+    '-i',
+    inputPath,
+    '-vf',
+    'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920',
+    '-c:v',
+    'libx264',
+    '-crf',
+    '20',
+    '-preset',
+    'veryfast',
+    '-pix_fmt',
+    'yuv420p',
+    '-fps_mode',
+    'cfr',
+    '-c:a',
+    'aac',
+    '-b:a',
+    '128k',
+    '-ar',
+    '48000',
+    '-ac',
+    '2',
+    '-af',
+    'aresample=async=1:first_pts=0',
+    '-movflags',
+    '+faststart',
+    outputPath,
+  ];
+}
+
 export async function transcodeToReelFootage(
   inputPath: string,
   outputPath: string
 ): Promise<void> {
   const { code, output } = await run(
     'ffmpeg',
-    [
-      '-y',
-      '-v',
-      'error',
-      '-i',
-      inputPath,
-      '-vf',
-      'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920',
-      '-c:v',
-      'libx264',
-      '-crf',
-      '20',
-      '-preset',
-      'medium',
-      '-pix_fmt',
-      'yuv420p',
-      '-c:a',
-      'aac',
-      '-b:a',
-      '128k',
-      '-movflags',
-      '+faststart',
-      outputPath,
-    ],
+    buildReelTranscodeArgs(inputPath, outputPath),
     180_000
   );
   if (code !== 0) {
