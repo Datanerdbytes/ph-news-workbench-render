@@ -28,6 +28,7 @@ const KIND_LABELS: Record<string, string> = {
   video: "Video",
   reel: "Reel",
   live: "Live",
+  story: "Story",
   "instagram-post": "Instagram",
 };
 
@@ -35,6 +36,8 @@ const KIND_LABELS: Record<string, string> = {
 const SOURCE_LABELS: Record<string, string> = {
   facebook: "· published by Facebook",
   youtube: "· published by YouTube",
+  tiktok: "· published by TikTok",
+  instagram: "· published by Instagram",
 };
 
 function sourceLabel(source: string): string {

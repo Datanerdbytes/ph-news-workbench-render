@@ -11,6 +11,7 @@ import {
 import { parseScheduledPublishTime } from '@/lib/publishing/schedule';
 import { recordScheduleEvent } from '@/lib/schedule-events';
 import { instagramErrorResponse } from '@/lib/publishing/errors';
+import { recordNativeSchedule } from '@/lib/schedule-mirror';
 
 export const dynamic = 'force-dynamic';
 
@@ -152,6 +153,29 @@ export async function POST(request: Request) {
       accessToken: connection.accessToken,
       imageUrl,
       caption,
+    });
+
+    // Mirror the immediate publish — only the scheduled path writes a row
+    // today, so without this the Instagram counters never saw a post made
+    // straight from the composer.
+    await recordNativeSchedule({
+      workspaceId,
+      userId: access.user.id,
+      kind: 'instagram-post',
+      text: caption,
+      scheduledFor: null,
+      results: [
+        {
+          page: {
+            id: connection.account.id,
+            name: connection.account.username,
+          },
+          ok: true,
+          id: result.id,
+          permalink: result.permalink,
+        },
+      ],
+      platform: 'instagram',
     });
 
     return NextResponse.json(

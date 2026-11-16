@@ -8,6 +8,16 @@ test("renders the dashboard activity feed", async ({ page }) => {
   await expect(page.getByText("Loading your workspace…")).toBeHidden();
 });
 
+test("renders the dashboard publishing stats", async ({ page }) => {
+  await page.goto("/dashboard");
+
+  await expect(page.getByText("Total published")).toBeVisible();
+  // The 30-day hint only renders when /api/analytics answered. A broken
+  // platform query degrades the cards to a dash instead, so this is what
+  // catches a query that no longer runs.
+  await expect(page.getByText(/\d+ in the last 30 days/)).toBeVisible();
+});
+
 test("renders the calendar with its scheduled sidebar", async ({ page }) => {
   await page.goto("/calendar");
   await expect(page.getByRole("heading", { name: "Calendar", exact: true }))

@@ -11,11 +11,13 @@ vi.mock("@/lib/publishing/instagram", () => ({
   resolveInstagramAccount: vi.fn(),
 }));
 vi.mock("@/lib/schedule-events", () => ({ recordScheduleEvent: vi.fn() }));
+vi.mock("@/lib/schedule-mirror", () => ({ recordNativeSchedule: vi.fn() }));
 
 import { sql } from "@/lib/db";
 import { requireWorkspace } from "@/lib/session";
 import { assertStagedBlob } from "@/lib/blob";
 import { recordScheduleEvent } from "@/lib/schedule-events";
+import { recordNativeSchedule } from "@/lib/schedule-mirror";
 import {
   publishInstagramImagePost,
   resolveInstagramAccount,
@@ -28,6 +30,7 @@ const stageMock = assertStagedBlob as unknown as Mock;
 const resolveMock = resolveInstagramAccount as unknown as Mock;
 const publishMock = publishInstagramImagePost as unknown as Mock;
 const eventMock = recordScheduleEvent as unknown as Mock;
+const mirrorMock = recordNativeSchedule as unknown as Mock;
 
 const connection = {
   ok: true as const,
@@ -66,10 +69,11 @@ beforeEach(() => {
     permalink: "https://www.instagram.com/p/xyz",
   });
   sqlMock.mockResolvedValue([{ id: 55, scheduled_for: "2026-11-15T09:00:00.000Z" }]);
+  mirrorMock.mockResolvedValue(undefined);
 });
 
 describe("POST /api/instagram/posts", () => {
-  it("publishes immediately and never touches the schedule table", async () => {
+  it("publishes immediately and mirrors the publish instead of scheduling it", async () => {
     const response = await POST(post(stagedBody));
 
     expect(response.status).toBe(201);
@@ -79,8 +83,25 @@ describe("POST /api/instagram/posts", () => {
       imageUrl: stagedBody.imageUrl,
       caption: "Behind the headline",
     });
+    // The mirror owns the row — the route itself never writes the table.
     expect(sqlMock).not.toHaveBeenCalled();
     expect(eventMock).not.toHaveBeenCalled();
+    expect(mirrorMock).toHaveBeenCalledWith({
+      workspaceId: "ws_1",
+      userId: "u1",
+      kind: "instagram-post",
+      text: "Behind the headline",
+      scheduledFor: null,
+      results: [
+        {
+          page: { id: "ig1", name: "iamwowie_" },
+          ok: true,
+          id: "ig_media_1",
+          permalink: "https://www.instagram.com/p/xyz",
+        },
+      ],
+      platform: "instagram",
+    });
     const data = (await response.json()) as { scheduledFor: string | null };
     expect(data.scheduledFor).toBeUndefined();
   });

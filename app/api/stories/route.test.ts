@@ -84,7 +84,7 @@ describe("POST /api/stories", () => {
       workspaceId: "ws_1",
       userId: "u1",
       kind: "story",
-      text: "",
+      text: "Story",
       scheduledFor: null,
       results,
     });
@@ -107,5 +107,15 @@ describe("POST /api/stories", () => {
     expect(mirrorMock).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "story", results: failed })
     );
+  });
+
+  it("records nothing when no Page was selected", async () => {
+    publishMock.mockResolvedValue({ targets: [], results: [] });
+
+    await POST(post());
+
+    // Nothing was attempted, so there is no outcome to record — a 'failed'
+    // row would blame Facebook for a no-op.
+    expect(mirrorMock).not.toHaveBeenCalled();
   });
 });

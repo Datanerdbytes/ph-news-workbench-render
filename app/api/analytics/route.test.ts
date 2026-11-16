@@ -87,6 +87,11 @@ describe("GET /api/analytics", () => {
     expect(text).toContain("source = 'tiktok'");
     expect(text).toContain("kind = 'instagram-post'");
 
+    // Feed posts are 'post' + 'photo'; only Instagram counts its own
+    // 'instagram-post' rows as posts.
+    expect(text).toContain("kind IN ('post', 'photo')");
+    expect(text).toContain("platform = 'instagram' AND kind = 'instagram-post'");
+
     // The 30-day hint rides on updated_at — publish time has no column.
     expect(text).toContain("updated_at > now() - interval '30 days'");
   });

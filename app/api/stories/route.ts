@@ -41,15 +41,20 @@ export async function POST(request: Request) {
    * the mirror swallows its own failures, so a broken row never undoes a
    * story that is already live.
    */
-  const recordStory = (results: CrosspostResult[]) =>
-    recordNativeSchedule({
+  const recordStory = (results: CrosspostResult[]) => {
+    // Nothing was attempted (no Page was selected), so there is no outcome
+    // to record — a 'failed' row would blame Facebook for a no-op.
+    if (!results.length) return;
+    return recordNativeSchedule({
       workspaceId: access.workspace.id,
       userId: access.user.id,
       kind: 'story',
-      text: '',
+      // A story carries no caption, so the row needs a title of its own.
+      text: 'Story',
       scheduledFor: null,
       results,
     });
+  };
 
   // Videos spool to disk; photos (≤20 MB) stay in memory. request.formData()
   // buffered the whole upload in the heap — the Render 512 MB OOM.

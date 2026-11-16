@@ -100,6 +100,11 @@ export async function POST(request: Request) {
 
     // Mirror the publish so the workspace keeps a row for it — without this
     // the per-platform counters never saw a TikTok post.
+    //
+    // TikTok answers with `status: 'processing'` and can still refuse the
+    // video afterwards. Nothing polls that outcome (the row is written as
+    // published), so a video that fails processing still counts as
+    // published — the count is a publish-attempt count, not a reach count.
     await recordNativeSchedule({
       workspaceId,
       userId: access.user.id,

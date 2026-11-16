@@ -14,6 +14,10 @@ import { recordScheduleEvent } from '@/lib/schedule-events';
  * `status.publishAt`.
  * TikTok publishes mirror here as well (`platform:'tiktok'`), and Facebook
  * Stories land as kind `'story'`.
+ * Instagram has no scheduling API, so only its immediate publishes reach
+ * this module (`platform:'instagram'`, kind `'instagram-post'`); the
+ * scheduled ones are written directly by the IG route and published by the
+ * local worker.
  */
 export type NativeScheduleKind =
   | 'post'
@@ -21,10 +25,15 @@ export type NativeScheduleKind =
   | 'video'
   | 'reel'
   | 'live'
-  | 'story';
+  | 'story'
+  | 'instagram-post';
 
 /** Platforms that schedule on their own (mirrored as `source` on the row). */
-export type NativeSchedulePlatform = 'facebook' | 'youtube' | 'tiktok';
+export type NativeSchedulePlatform =
+  | 'facebook'
+  | 'youtube'
+  | 'tiktok'
+  | 'instagram';
 
 export type NativePublishResult = {
   page: { id: string; name: string };
@@ -41,6 +50,7 @@ export const NATIVE_KIND_LABELS: Record<NativeScheduleKind, string> = {
   reel: 'Reel',
   live: 'Live',
   story: 'Story',
+  'instagram-post': 'Instagram post',
 };
 
 /** Treat anything within this window as "publish now" rather than scheduled. */
@@ -52,6 +62,7 @@ const DEFAULT_REJECT_MESSAGES: Record<NativeSchedulePlatform, string> = {
   facebook: "Facebook rejected the publish on every selected Page.",
   youtube: "YouTube rejected the publish on every selected target.",
   tiktok: "TikTok rejected the publish on every selected target.",
+  instagram: "Instagram rejected the publish on every selected account.",
 };
 
 /**

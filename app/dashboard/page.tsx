@@ -415,7 +415,6 @@ export default function DashboardPage() {
   const published = stories.filter(
     (story) => story.status === "published"
   ).length;
-  const recent = drafts.slice(0, 5);
   const firstName = session?.user?.name?.split(/\s+/)[0];
 
   const stats = platformStats[platform];

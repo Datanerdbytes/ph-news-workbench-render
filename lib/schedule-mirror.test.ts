@@ -238,6 +238,33 @@ describe("recordNativeSchedule", () => {
     });
   });
 
+  it("mirrors immediate Instagram publishes as source='instagram' rows", async () => {
+    await recordNativeSchedule({
+      workspaceId: "ws1",
+      userId: "u1",
+      kind: "instagram-post",
+      text: "Behind the headline",
+      scheduledFor: null,
+      results: [
+        {
+          page: { id: "ig1", name: "iamwowie_" },
+          ok: true,
+          id: "ig_media_1",
+          permalink: "https://www.instagram.com/p/xyz",
+        },
+      ],
+      platform: "instagram",
+    });
+
+    expect(insertValues()[6]).toBe("instagram-post");
+    expect(insertValues()[7]).toBe("instagram");
+    expect(insertValues()[5]).toBe("published");
+    expect(events()[0]).toMatchObject({
+      event: "published",
+      metadata: { kind: "instagram-post", executor: "instagram" },
+    });
+  });
+
   it("never lets a recording failure fail the publish", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     sqlMock.mockRejectedValue(new Error("connection refused"));

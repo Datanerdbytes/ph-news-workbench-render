@@ -66,7 +66,10 @@ async function platformPublishCounts(workspaceId: string) {
   const rows = (await sql`
     SELECT platform,
            count(*)::int AS total,
-           count(*) FILTER (WHERE kind IN ('post', 'photo', 'instagram-post'))::int AS post,
+           count(*) FILTER (
+             WHERE kind IN ('post', 'photo')
+                OR (platform = 'instagram' AND kind = 'instagram-post')
+           )::int AS post,
            count(*) FILTER (WHERE kind = 'reel')::int AS reel,
            count(*) FILTER (WHERE kind = 'live')::int AS live,
            count(*) FILTER (WHERE kind = 'story')::int AS story,
@@ -115,7 +118,9 @@ export async function GET(request: Request) {
   if (!access) return unauthorized();
   const workspaceId = access.workspace.id;
 
-  const totals = (await sql`
+  // The three reads are independent — one round-trip each, in parallel.
+  const [totals, daily, platforms] = await Promise.all([
+    sql`
     SELECT
       (SELECT count(*)::int FROM drafts
         WHERE workspace_id = ${workspaceId}) AS drafts,
@@ -131,9 +136,8 @@ export async function GET(request: Request) {
         WHERE workspace_id = ${workspaceId}) AS tokens,
       (SELECT coalesce(sum(estimated_cost), 0)::float8 FROM drafts
         WHERE workspace_id = ${workspaceId}) AS cost
-  `) as unknown as TotalsRow[];
-
-  const daily = (await sql`
+  ` as unknown as Promise<TotalsRow[]>,
+    sql`
     SELECT to_char(day, 'YYYY-MM-DD') AS day,
            sum(drafts)::int AS drafts,
            sum(published)::int AS published,
@@ -164,10 +168,11 @@ export async function GET(request: Request) {
     ) buckets
     GROUP BY day
     ORDER BY day
-  `) as unknown as DailyRow[];
+  ` as unknown as Promise<DailyRow[]>,
+    platformPublishCounts(workspaceId),
+  ]);
 
   const row = totals[0];
-  const platforms = await platformPublishCounts(workspaceId);
 
   return NextResponse.json(
     {
