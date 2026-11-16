@@ -4,7 +4,9 @@ import { expect, test } from "@playwright/test";
 // draft ("can't type"), and (2) replies must populate the field, not stay in
 // the chat — even when the field starts empty ("write me a caption").
 test("Ask AI accepts typing without a draft selected", async ({ page }) => {
-  await page.goto("/");
+  // The compose workspace moved from / to /compose when the Story Queue got
+  // its own page; the assistant lives there.
+  await page.goto("/compose");
 
   await page.getByRole("button", { name: "Ask AI" }).click();
   const panel = page.getByRole("dialog", { name: "AI assistant" });
