@@ -146,19 +146,19 @@ describe("GET /api/analytics", () => {
     expect(data.daily).toEqual([dailyRow]);
   });
 
-  it("subtracts the posts that also published their draft", async () => {
-    mockQueries([facebookRow]);
+  it("counts a post that did not publish a draft on its own", async () => {
+    // Nothing links a published post to a published draft — no overlap to
+    // subtract, so every post counts.
+    sqlMock.mockReset();
+    sqlMock
+      .mockResolvedValueOnce([{ ...totalsRow, linked_published: 0 }])
+      .mockResolvedValueOnce([dailyRow])
+      .mockResolvedValueOnce([facebookRow]);
 
     const res = await GET(new Request("http://localhost/api/analytics"));
-    expect(res.status).toBe(200);
+    const data = await res.json();
 
-    // The query has to find the overlap: published posts whose draft is
-    // published too.
-    const totalsQuery = queryText(sqlMock.mock.calls[0]);
-    expect(totalsQuery).toContain("linked_published");
-    expect(totalsQuery).toContain("sp.draft_id IS NOT NULL");
-    expect(totalsQuery).toContain("d.id = sp.draft_id");
-    expect(totalsQuery).toContain("d.status = 'published'");
+    expect(data.totals.published).toBe(5);
   });
 
   it("zero-fills every platform when nothing has been published yet", async () => {

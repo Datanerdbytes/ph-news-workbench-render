@@ -135,8 +135,11 @@ export async function GET(request: Request) {
       -- A publish that flipped a draft is one publish written down twice:
       -- the draft and the scheduled post. Both the scheduled worker and
       -- POST /api/publish link the two, so the overlap is subtracted and
-      -- the total counts publishes rather than rows.
-      (SELECT count(*)::int FROM scheduled_posts sp
+      -- the total counts publishes rather than rows. The overlap is counted
+      -- in drafts, not in posts: a draft flipped by two publishes is still
+      -- one draft, so counting post rows would subtract more than the draft
+      -- side ever added.
+      (SELECT count(DISTINCT sp.draft_id)::int FROM scheduled_posts sp
         WHERE sp.workspace_id = ${workspaceId}
           AND sp.status = 'published'
           AND sp.draft_id IS NOT NULL
