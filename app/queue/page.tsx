@@ -1,9 +1,18 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { ChevronDown, Newspaper, RefreshCw, Rss, Search, Trash2 } from 'lucide-react';
+import {
+  ArrowUpRight,
+  ChevronDown,
+  Loader2,
+  Newspaper,
+  Plus,
+  RefreshCw,
+  Rss,
+  Search,
+  Trash2,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from 'cn';
 import { AppFrame } from '@/components/app-frame';
@@ -14,6 +23,7 @@ import { Input } from '@/components/ui/input';
 import { statusMeta } from '@/components/status-pill';
 import { formatDomain, formatLongDate, timeAgo } from '@/lib/format';
 import {
+  fetchQueueItem,
   fetchQueuePage,
   type FeedCounts,
   type QueueCounts,
@@ -107,6 +117,9 @@ export default function QueuePage() {
   const [refreshing, setRefreshing] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [rowDeleting, setRowDeleting] = useState<number | null>(null);
+  // The story currently being added to Compose — drives the row's spinner
+  // and keeps the other Add buttons idle while one is in flight.
+  const [addingId, setAddingId] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -202,6 +215,25 @@ export default function QueuePage() {
     } finally {
       setDeleting(false);
       setRowDeleting(null);
+    }
+  }
+
+  // "Add" opens the story in Compose. The single-item fetch is the request
+  // the spinner covers: it validates the story still exists (and warms the
+  // deep link the compose page will resolve) before the navigation starts.
+  async function addToCompose(item: QueueItem) {
+    if (addingId !== null) return;
+    setAddingId(item.id);
+    try {
+      const fresh = await fetchQueueItem(item.id);
+      if (!fresh) throw new Error('Story not found');
+      router.push(`/compose?item=${item.id}`);
+    } catch (error) {
+      toast.error('Could not open the story in Compose', {
+        description:
+          error instanceof Error ? error.message : 'Please try again.',
+      });
+      setAddingId(null);
     }
   }
 
@@ -390,18 +422,13 @@ export default function QueuePage() {
                 <div className="flex flex-col gap-2.5">
                   {filtered.map((item) => {
                     const meta = statusMeta(item.status);
+                    const adding = addingId === item.id;
                     return (
                       <div
                         key={item.id}
-                        className="group relative rounded-xl border border-border/80 bg-card paper-shadow-sm transition-colors hover:border-border"
+                        className="group rounded-xl border border-border/80 bg-card paper-shadow-sm transition-colors hover:border-border"
                       >
-                        <Link
-                          href={`/compose?item=${item.id}`}
-                          className={cn(
-                            'block rounded-xl px-5 py-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
-                            item.draft_id && 'pr-12'
-                          )}
-                        >
+                        <div className="px-5 py-4">
                           <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                             <span
                               className={cn('size-1.5 rounded-full', meta.dot)}
@@ -418,7 +445,7 @@ export default function QueuePage() {
                               </span>
                             )}
                           </div>
-                          <h2 className="mt-1.5 font-heading text-[17px] leading-snug tracking-[-0.01em] text-foreground/90 group-hover:text-foreground">
+                          <h2 className="mt-1.5 font-heading text-[17px] leading-snug tracking-[-0.01em] text-foreground/90">
                             {item.title}
                           </h2>
                           {item.summary && (
@@ -426,18 +453,48 @@ export default function QueuePage() {
                               {item.summary}
                             </p>
                           )}
-                        </Link>
-                        {item.draft_id ? (
-                          <ConfirmIconButton
-                            onConfirm={() => deleteDraftFor(item)}
-                            idleLabel={`Delete draft for ${item.title}`}
-                            armedLabel="Click again to delete this draft"
-                            title="Delete draft"
-                            disabled={rowDeleting === item.id || deleting}
-                            className="tap-target absolute right-3 top-3 rounded-md p-1.5 text-muted-foreground/70 transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-40"
-                            icon={<Trash2 className="size-3.5" aria-hidden />}
-                          />
-                        ) : null}
+                          <div className="mt-3 flex items-center justify-end gap-2">
+                            <a
+                              href={item.link}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                            >
+                              Read original
+                              <ArrowUpRight className="size-3" aria-hidden />
+                            </a>
+                            {item.draft_id ? (
+                              <ConfirmIconButton
+                                onConfirm={() => deleteDraftFor(item)}
+                                idleLabel={`Delete draft for ${item.title}`}
+                                armedLabel="Click again to delete this draft"
+                                title="Delete draft"
+                                disabled={rowDeleting === item.id || deleting}
+                                className="tap-target rounded-md p-1.5 text-muted-foreground/70 transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-40"
+                                icon={<Trash2 className="size-3.5" aria-hidden />}
+                              />
+                            ) : null}
+                            <Button
+                              size="sm"
+                              variant="brand"
+                              onClick={() => void addToCompose(item)}
+                              disabled={addingId !== null}
+                              aria-busy={adding}
+                              aria-label={`Add "${item.title}" to Compose`}
+                              className="min-w-[76px]"
+                            >
+                              {adding ? (
+                                <Loader2
+                                  className="size-3.5 animate-spin"
+                                  aria-hidden
+                                />
+                              ) : (
+                                <Plus className="size-3.5" aria-hidden />
+                              )}
+                              {adding ? 'Adding…' : 'Add'}
+                            </Button>
+                          </div>
+                        </div>
                       </div>
                     );
                   })}
