@@ -195,18 +195,6 @@ export default function InstagramPage() {
             icon={<PlatformMark platform="instagram" className="size-4" />}
             title="Instagram post"
             badge="Feed"
-            aside={
-              <div className="space-y-2">
-                <p>
-                  Publishes to the linked professional account of your primary
-                  Facebook Page.
-                </p>
-                <p className="text-muted-foreground">
-                  Square 1:1 media works best. Captions up to{' '}
-                  {CAPTION_MAX.toLocaleString()} characters.
-                </p>
-              </div>
-            }
           >
             <div>
               <FieldLabel htmlFor="ig-image" hint="JPEG · PNG · WebP · ≤8 MB">

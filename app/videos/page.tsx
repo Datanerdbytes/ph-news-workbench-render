@@ -324,9 +324,6 @@ export default function VideosPage() {
               placeholder={'{"geo_locations":{"countries":["PH"]}}'}
               className={`${textareaClass} font-mono text-xs`}
             />
-            <p className="mt-1 text-[10px] text-muted-foreground">
-              Passed as feed_targeting, the same targeting format as Meta ads.
-            </p>
           </div>
 
           <PageSelector
@@ -363,11 +360,11 @@ export default function VideosPage() {
                   ? 'Schedule video'
                   : 'Publish video'}
             </Button>
-            <span className="text-[10px] text-muted-foreground">
-              {file
-                ? `${(file.size / (1024 * 1024)).toFixed(1)} MB · uploads in 4 MB chunks`
-                : 'Chunked upload — large files are fine.'}
-            </span>
+            {file && (
+              <span className="text-[10px] text-muted-foreground">
+                {(file.size / (1024 * 1024)).toFixed(1)} MB
+              </span>
+            )}
           </div>
 
             <ResultList results={results ?? []} />

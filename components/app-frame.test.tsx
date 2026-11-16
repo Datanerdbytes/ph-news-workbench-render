@@ -369,7 +369,8 @@ describe("AppFrame platform nav", () => {
 
     const facebook = groups.get("Facebook Page")!;
     for (const [label, href] of [
-      ["Story Queue", "/"],
+      ["Story Queue", "/queue"],
+      ["Compose", "/compose"],
       ["Post", "/post"],
       ["Photos", "/photos"],
       ["Videos", "/videos"],

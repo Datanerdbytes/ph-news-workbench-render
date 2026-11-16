@@ -281,10 +281,6 @@ export default function PhotosPage() {
           event.target.value = '';
         }}
       />
-      <p className="mt-1 text-[10px] text-muted-foreground">
-        JPEG, PNG, or WebP under 10 MB. One image posts to /photos; several upload
-        unattached and publish through /feed with attached_media.
-      </p>
     </div>
   );
 
@@ -324,16 +320,6 @@ export default function PhotosPage() {
               icon={<Images className="size-4" />}
               title="Photo post"
               badge="1–10 images"
-              aside={
-                <>
-                  <p className="font-semibold text-secondary-foreground">How it posts</p>
-                  <p>
-                    A single image posts on its own. Multiple images are staged
-                    quietly first, then attached together as one album post.
-                  </p>
-                  <p>Scheduled posts go live at the time you pick.</p>
-                </>
-              }
             >
               {imagePicker}
               <div>
@@ -384,11 +370,11 @@ export default function PhotosPage() {
                         ? 'Schedule post'
                         : 'Publish post'}
                 </Button>
-                <span className="text-[10px] text-muted-foreground">
-                  {images.length > 1
-                    ? `${images.length} images in one carousel-style feed post.`
-                    : 'Publishes to the selected Page(s).'}
-                </span>
+                {images.length > 1 && (
+                  <span className="text-[10px] text-muted-foreground">
+                    {images.length} images in one carousel-style feed post.
+                  </span>
+                )}
               </div>
               <ResultList results={results ?? []} />
             </ComposerCard>
@@ -397,19 +383,6 @@ export default function PhotosPage() {
               <ComposerCard
                 icon={<ImagePlus className="size-4" />}
                 title="Add photos to an album"
-                aside={
-                  <>
-                    <p className="font-semibold text-secondary-foreground">Album upload</p>
-                    <p>
-                      Each photo is uploaded to the selected album. Albums belong to the
-                      primary Page, so crossposting does not apply here.
-                    </p>
-                    <p>
-                      Meta removed album creation from the Graph API — create albums on
-                      Facebook directly and they will appear in this list.
-                    </p>
-                  </>
-                }
               >
                 <div>
                   <FieldLabel htmlFor="album-select" hint="Primary Page">

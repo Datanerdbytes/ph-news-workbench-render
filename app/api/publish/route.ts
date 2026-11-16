@@ -10,6 +10,11 @@ import {
   redactTokens,
 } from '@/lib/facebook';
 import {
+  downloadVideoFromUrl,
+  publishPageVideo,
+} from '@/lib/publishing/videos';
+import { readMp4DurationSecondsFromFile } from '@/lib/reel-meta';
+import {
   notifyTokenInvalid,
   notifyWorkspace,
 } from '@/lib/notifications';
@@ -109,12 +114,56 @@ export async function POST(request: Request) {
       : typeof body?.imageUrl === 'string'
         ? [body.imageUrl]
         : [];
-    const post = await publishPagePost({
-      pageId: target.id,
-      accessToken: target.accessToken,
-      message,
-      images: parseImages(imageUrls),
-    });
+    const videoUrl =
+      typeof body?.videoUrl === 'string' && body.videoUrl ? body.videoUrl : null;
+
+    let published: { id: string; permalink: string | null };
+    let kind: 'post' | 'video' = 'post';
+    if (videoUrl) {
+      // A video attachment turns the post into a video publish with the
+      // message as the video's description — Facebook has no text-plus-video
+      // feed type. The video streams from storage to a temp file (never the
+      // heap) and is gone the moment the publish settles.
+      const downloaded = await downloadVideoFromUrl(videoUrl);
+      try {
+        const type = downloaded.upload.type;
+        if (!type.includes('video/mp4') && !type.includes('video/quicktime')) {
+          return NextResponse.json(
+            { error: 'Attach an MP4 or MOV video.' },
+            { status: 400 }
+          );
+        }
+        const duration = await readMp4DurationSecondsFromFile(
+          downloaded.upload.path
+        );
+        if (duration !== null && duration > 45 * 60) {
+          return NextResponse.json(
+            {
+              error: `Facebook videos must be 45 minutes or shorter. This video is ${Math.round(duration / 60)} minutes.`,
+            },
+            { status: 400 }
+          );
+        }
+        const video = await publishPageVideo({
+          pageId: target.id,
+          accessToken: target.accessToken,
+          description: message,
+          video: downloaded.upload,
+        });
+        published = video;
+        kind = 'video';
+      } finally {
+        await downloaded.cleanup();
+      }
+    } else {
+      const post = await publishPagePost({
+        pageId: target.id,
+        accessToken: target.accessToken,
+        message,
+        images: parseImages(imageUrls),
+      });
+      published = post;
+    }
 
     if (story?.draft_id) {
       await sql`
@@ -131,15 +180,15 @@ export async function POST(request: Request) {
     await recordNativeSchedule({
       workspaceId: access.workspace.id,
       userId: access.user.id,
-      kind: 'post',
+      kind,
       text: message,
       scheduledFor: null,
       results: [
         {
           page: { id: target.id, name: target.name },
           ok: true,
-          id: post.id,
-          permalink: post.permalink,
+          id: published.id,
+          permalink: published.permalink,
         },
       ],
       newsItemId: story?.id ?? null,
@@ -147,8 +196,8 @@ export async function POST(request: Request) {
     });
 
     return NextResponse.json({
-      id: post.id,
-      permalink: post.permalink,
+      id: published.id,
+      permalink: published.permalink,
       page: { id: target.id, name: target.name },
     });
   } catch (error) {

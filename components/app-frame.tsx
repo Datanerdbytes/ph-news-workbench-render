@@ -25,6 +25,7 @@ import {
   Rss,
   Settings,
   Sparkles,
+  SquarePen,
   UserPlus,
   Users,
   Video,
@@ -78,14 +79,15 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     items: [
       { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
       { href: "/downloads", label: "Downloads", icon: Download },
-      { href: "/calendar", label: "Calendar", icon: CalendarDays },
+      { href: "/calendar", label: "Content Calendar", icon: CalendarDays },
       { href: "/status", label: "Drafts", icon: FileText },
     ],
   },
   {
     title: "Facebook Page",
     items: [
-      { href: "/", label: "Story Queue", icon: Newspaper, exact: true, facebookOnly: true },
+      { href: "/queue", label: "Story Queue", icon: Newspaper, facebookOnly: true },
+      { href: "/compose", label: "Compose", icon: SquarePen, facebookOnly: true },
       { href: "/post", label: "Post", icon: PenLine, facebookOnly: true },
       { href: "/photos", label: "Photos", icon: Images, facebookOnly: true },
       { href: "/videos", label: "Videos", icon: Film, facebookOnly: true },
@@ -165,6 +167,8 @@ function isActivePath(pathname: string, item: NavItem) {
 
 function pageLabel(pathname: string) {
   if (pathname === "/") return "Story Queue";
+  if (pathname.startsWith("/queue")) return "Story Queue";
+  if (pathname.startsWith("/compose")) return "Compose";
   if (pathname.startsWith("/dashboard")) return "Dashboard";
   if (pathname.startsWith("/status") || pathname.startsWith("/drafts"))
     return "Drafts";
@@ -173,7 +177,7 @@ function pageLabel(pathname: string) {
   if (pathname.startsWith("/analytics")) return "Analytics";
   if (pathname.startsWith("/team")) return "Team";
   if (pathname.startsWith("/settings")) return "Settings";
-  if (pathname.startsWith("/calendar")) return "Calendar";
+  if (pathname.startsWith("/calendar")) return "Content Calendar";
   if (pathname.startsWith("/post")) return "Post";
   if (pathname.startsWith("/photos")) return "Photos";
   if (pathname.startsWith("/videos")) return "Videos";
@@ -439,7 +443,7 @@ export function AppFrame({
 
           {showFacebookTools ? (
             <Link
-              href="/"
+              href="/queue"
               className="flex h-9 items-center justify-center gap-1.5 rounded-lg bg-brand text-[12.5px] font-semibold text-brand-foreground shadow-sm transition-colors hover:bg-brand-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
             >
               <Plus className="size-4" aria-hidden />
@@ -887,11 +891,11 @@ function PlatformQuickNav({
 
 function StoryQueueQuickLink() {
   const pathname = usePathname();
-  const active = pathname === "/";
+  const active = pathname.startsWith("/queue");
 
   return (
     <Link
-      href="/"
+      href="/queue"
       aria-label="Story Queue"
       aria-current={active ? "page" : undefined}
       title="Story Queue"

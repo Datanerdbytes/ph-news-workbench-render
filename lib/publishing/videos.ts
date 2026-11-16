@@ -1,4 +1,9 @@
-import { open } from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
+import { mkdtemp, open, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import {
   FacebookApiError,
   graphPostForm,
@@ -140,4 +145,100 @@ export async function publishPageVideo({
   }
 
   return { id: session.video_id, permalink };
+}
+
+export type DownloadedVideo = {
+  upload: VideoUpload;
+  /** Removes the temp file. Safe to call more than once. */
+  cleanup: () => Promise<void>;
+};
+
+/**
+ * Stream a hosted video (e.g. a staged Blob URL) to a temp file and hand it
+ * to publishPageVideo. Bytes flow straight to disk so a 1 GB video never
+ * touches the heap, and the size cap is enforced mid-stream.
+ */
+export async function downloadVideoFromUrl(
+  url: string,
+  filename = 'video.mp4',
+): Promise<DownloadedVideo> {
+  // The URL comes from the request body, so the server fetch must not become
+  // a probe of the internal network: block loopback/private/link-local hosts
+  // and allow only http(s).
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error('The attached video URL is not allowed.');
+  }
+  const host = parsed.hostname.toLowerCase();
+  const privateHost =
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.internal') ||
+    host.endsWith('.local') ||
+    host === '0.0.0.0' ||
+    /^127\./.test(host) ||
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^169\.254\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    /^\[::1\]$/.test(host) ||
+    /^\[f[cd]/i.test(host);
+  if (privateHost) {
+    throw new Error('The attached video URL is not allowed.');
+  }
+
+  // Staged storage URLs respond directly (2xx) — anything redirecting is
+  // suspicious, so redirects are refused rather than followed: following one
+  // would let a public URL bounce the server fetch onto a private host.
+  const res = await fetch(url, { redirect: 'manual' });
+  if (!res.ok || !res.body) {
+    throw new Error('The attached video could not be read from storage.');
+  }
+  // And the whole transfer is bounded — a slow-trickle server must not be
+  // able to park the scheduler on this download forever.
+  const deadline = AbortSignal.timeout(5 * 60_000);
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'ph-video-'));
+  const filePath = path.join(dir, filename);
+  let cleaned = false;
+  const cleanup = async () => {
+    if (cleaned) return;
+    cleaned = true;
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  };
+
+  let size = 0;
+  try {
+    const counter = new Transform({
+      transform(chunk, _enc, cb) {
+        size += (chunk as Uint8Array).byteLength;
+        if (size > MAX_VIDEO_BYTES) {
+          cb(new Error('Videos must be 1 GB or smaller.'));
+          return;
+        }
+        cb(null, chunk);
+      },
+    });
+    await pipeline(res.body as never, counter, createWriteStream(filePath), {
+      signal: deadline,
+    });
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+
+  if (size === 0) {
+    await cleanup();
+    throw new Error('The attached video could not be read from storage.');
+  }
+
+  return {
+    upload: {
+      path: filePath,
+      size,
+      type: res.headers.get('content-type') || 'video/mp4',
+      filename,
+    },
+    cleanup,
+  };
 }

@@ -27,6 +27,10 @@ vi.mock("@/lib/publishing/instagram", () => ({
   resolveInstagramAccount: vi.fn(),
 }));
 vi.mock("@/lib/blob", () => ({ deleteStagedBlobs: vi.fn() }));
+vi.mock("@/lib/publishing/videos", () => ({
+  downloadVideoFromUrl: vi.fn(),
+  publishPageVideo: vi.fn(),
+}));
 vi.mock("@/lib/youtube", () => ({
   ensureFreshYouTubeToken: vi.fn(),
   fetchYouTubeVideoStatus: vi.fn(),
@@ -50,6 +54,10 @@ import {
   resolveInstagramAccount,
 } from "@/lib/publishing/instagram";
 import { deleteStagedBlobs } from "@/lib/blob";
+import {
+  downloadVideoFromUrl,
+  publishPageVideo,
+} from "@/lib/publishing/videos";
 import {
   ensureFreshYouTubeToken,
   fetchYouTubeVideoStatus,
@@ -1039,5 +1047,139 @@ describe("recoverStaleReschedules", () => {
     expect(deleteCalls()).toHaveLength(0);
     expect(events()).toEqual([]);
     expect(releaseCalls()).toHaveLength(1);
+  });
+});
+
+describe("publishDuePosts video posts", () => {
+  it("publishes the staged video with the post text as its description", async () => {
+    useDb({
+      claim: [
+        claimedRow({
+          kind: "video",
+          image_url: "https://blob.example/v1.mp4",
+          page_id: "pg2",
+          text: "Story text",
+        }),
+      ],
+    });
+    vi.mocked(getPrimaryPage).mockResolvedValue({
+      pageId: "pg1",
+      token: "tok",
+    });
+    vi.mocked(resolvePageToken).mockResolvedValue("tok2");
+    const cleanup = vi.fn();
+    const upload = {
+      path: "/tmp/v.mp4",
+      size: 10,
+      type: "video/mp4",
+      filename: "v1.mp4",
+    };
+    vi.mocked(downloadVideoFromUrl).mockResolvedValue({
+      upload,
+      cleanup,
+    });
+    vi.mocked(publishPageVideo).mockResolvedValue({
+      id: "fb_v1",
+      permalink: null,
+    });
+
+    await expect(
+      publishDuePosts({ source: "scheduler" })
+    ).resolves.toEqual({ due: 1, published: 1, failed: 0, synced: 0 });
+
+    expect(downloadVideoFromUrl).toHaveBeenCalledWith(
+      "https://blob.example/v1.mp4"
+    );
+    expect(publishPageVideo).toHaveBeenCalledWith({
+      pageId: "pg2",
+      accessToken: "tok2",
+      description: "Story text",
+      video: upload,
+    });
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(deleteStagedBlobs).toHaveBeenCalledWith([
+      "https://blob.example/v1.mp4",
+    ]);
+    expect(events().map((event) => event.event)).toEqual([
+      "claimed",
+      "published",
+    ]);
+  });
+
+  it("publishes to the primary Page when the row picked none", async () => {
+    useDb({
+      claim: [
+        claimedRow({
+          kind: "video",
+          image_url: "https://blob.example/v1.mp4",
+          text: "Story text",
+        }),
+      ],
+    });
+    vi.mocked(getPrimaryPage).mockResolvedValue({
+      pageId: "pg1",
+      token: "tok",
+    });
+    vi.mocked(downloadVideoFromUrl).mockResolvedValue({
+      upload: {
+        path: "/tmp/v.mp4",
+        size: 10,
+        type: "video/mp4",
+        filename: "v1.mp4",
+      },
+      cleanup: vi.fn(),
+    });
+    vi.mocked(publishPageVideo).mockResolvedValue({
+      id: "fb_v1",
+      permalink: null,
+    });
+
+    await publishDuePosts({ source: "scheduler" });
+
+    expect(resolvePageToken).not.toHaveBeenCalled();
+    expect(publishPageVideo).toHaveBeenCalledWith(
+      expect.objectContaining({ pageId: "pg1", accessToken: "tok" })
+    );
+  });
+
+  it("fails when no Page is connected", async () => {
+    useDb({
+      claim: [
+        claimedRow({
+          kind: "video",
+          image_url: "https://blob.example/v1.mp4",
+        }),
+      ],
+      // The claim returns the post-claim attempt count: 3 = exhausted, so
+      // the row fails instead of requeueing for another try.
+      claimRow: [{ id: 1, attempts: 3 }],
+    });
+    vi.mocked(getPrimaryPage).mockResolvedValue(null);
+
+    await expect(
+      publishDuePosts({ source: "scheduler" })
+    ).resolves.toEqual({ due: 1, published: 0, failed: 1, synced: 0 });
+
+    expect(downloadVideoFromUrl).not.toHaveBeenCalled();
+    expect(events().map((event) => event.event)).toEqual(["claimed", "failed"]);
+  });
+
+  it("fails when the staged file is missing", async () => {
+    useDb({
+      claim: [claimedRow({ kind: "video", image_url: null })],
+      claimRow: [{ id: 1, attempts: 3 }],
+    });
+    vi.mocked(getPrimaryPage).mockResolvedValue({
+      pageId: "pg1",
+      token: "tok",
+    });
+
+    await expect(
+      publishDuePosts({ source: "scheduler" })
+    ).resolves.toEqual({ due: 1, published: 0, failed: 1, synced: 0 });
+
+    expect(downloadVideoFromUrl).not.toHaveBeenCalled();
+    expect(publishPageVideo).not.toHaveBeenCalled();
+    expect(deleteStagedBlobs).not.toHaveBeenCalled();
   });
 });

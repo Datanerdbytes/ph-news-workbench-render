@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { requireOwner, unauthorized } from '@/lib/session';
-import { feedParser, ingestFeed } from '@/lib/feeds';
+import { feedParser, ingestFeed, resolveFeedUrl, describeFeedError, FeedFetchError } from '@/lib/feeds';
 import { randomUUID } from 'crypto';
 
 type FeedRow = {
@@ -80,9 +80,32 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Invalid URL format' }, { status: 400 });
     }
 
-    // Check if feed already exists for this workspace
+    // Resolve the URL before parsing: follow HTML pages to their advertised
+    // feed and surface reachability problems as specific errors instead of a
+    // generic "could not parse" failure.
+    let resolvedUrl = trimmedUrl;
+    try {
+      resolvedUrl = await resolveFeedUrl(trimmedUrl);
+    } catch (resolveError) {
+      console.error(JSON.stringify({
+        route: 'sources',
+        event: 'resolve_error',
+        workspaceId: access.workspace.id,
+        url: trimmedUrl,
+        error: resolveError instanceof Error ? resolveError.message : String(resolveError),
+      }));
+      const message = resolveError instanceof FeedFetchError
+        ? resolveError.message
+        : describeFeedError(resolveError);
+      return NextResponse.json({ error: message }, { status: 400 });
+    }
+
+    // The resolved feed URL may differ from what was submitted (e.g. a
+    // homepage that advertises /feed/), so check both for duplicates.
     const existing = await sql`
-      SELECT id FROM feeds WHERE workspace_id = ${access.workspace.id} AND url = ${trimmedUrl}
+      SELECT id FROM feeds
+      WHERE workspace_id = ${access.workspace.id}
+        AND url = ANY(${[trimmedUrl, resolvedUrl]})
     `;
     if (existing.length > 0) {
       return NextResponse.json({ error: 'This feed is already added to your workspace' }, { status: 409 });
@@ -93,8 +116,8 @@ export async function POST(request: Request) {
     let previewItems: Array<{ title: string; link: string; published_at: string | null }> = [];
 
     try {
-      const feed = await feedParser.parseURL(trimmedUrl);
-      feedTitle = feed.title?.trim() || parsedUrl.hostname;
+      const feed = await feedParser.parseURL(resolvedUrl);
+      feedTitle = feed.title?.trim() || new URL(resolvedUrl).hostname;
 
       // Get first 3 items for preview
       previewItems = (feed.items ?? []).slice(0, 3).map(item => ({
@@ -108,17 +131,16 @@ export async function POST(request: Request) {
         event: 'parse_error',
         workspaceId: access.workspace.id,
         url: trimmedUrl,
+        resolvedUrl,
         error: parseError instanceof Error ? parseError.message : String(parseError),
       }));
-      return NextResponse.json({
-        error: 'Could not parse feed. Please check the URL and ensure it is a valid RSS/Atom feed.',
-      }, { status: 400 });
+      return NextResponse.json({ error: describeFeedError(parseError) }, { status: 400 });
     }
 
     // Insert the new feed
     const result = await sql`
       INSERT INTO feeds (workspace_id, url, title, enabled, created_at)
-      VALUES (${access.workspace.id}, ${trimmedUrl}, ${feedTitle}, true, now())
+      VALUES (${access.workspace.id}, ${resolvedUrl}, ${feedTitle}, true, now())
       RETURNING id, workspace_id, url, title, last_fetched_at, error_message, enabled, created_at
     `;
 
@@ -127,7 +149,7 @@ export async function POST(request: Request) {
     // Trigger initial ingest for this feed
     try {
       await ingestFeed(
-        { id: newFeed.id, workspace_id: access.workspace.id, url: trimmedUrl, title: feedTitle },
+        { id: newFeed.id, workspace_id: access.workspace.id, url: resolvedUrl, title: feedTitle },
         { correlationId: randomUUID(), trigger: 'initial' },
       );
     } catch (ingestError) {

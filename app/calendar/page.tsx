@@ -585,12 +585,7 @@ export default function CalendarPage() {
             <p className="text-[9.5px] font-bold uppercase tracking-[0.15em] text-brand">
               Workspace
             </p>
-            <h1 className="page-title mt-1.5">Calendar</h1>
-            <p className="mt-1.5 max-w-2xl text-[12.5px] leading-relaxed text-muted-foreground">
-              Everything scheduled in this workspace — drafts queued by the
-              Story Queue and posts, photos, videos, reels and live streams
-              scheduled on Facebook.
-            </p>
+            <h1 className="page-title mt-1.5">Content Calendar</h1>
           </div>
 
           <div className="flex flex-wrap items-center justify-end gap-2">

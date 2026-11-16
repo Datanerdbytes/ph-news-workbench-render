@@ -25,6 +25,10 @@ import {
 import { getPrimaryPage, resolvePageToken } from "@/lib/facebook-page-token";
 import { deleteStagedBlobs } from "@/lib/blob";
 import {
+  downloadVideoFromUrl,
+  publishPageVideo,
+} from "@/lib/publishing/videos";
+import {
   publishInstagramImagePost,
   resolveInstagramAccount,
   type InstagramAccountResolution,
@@ -62,6 +66,7 @@ type ClaimedRow = {
   image_url: string | null;
   image_urls: unknown;
   kind: string;
+  page_id: string | null;
   attempts: number;
 };
 
@@ -88,7 +93,7 @@ export async function publishDuePosts(
   // cannot let an overlapping sweep double-publish a waiting row.
   const due = (await sql`
     SELECT id, workspace_id, news_item_id, draft_id, text,
-           image_url, image_urls, kind, attempts
+           image_url, image_urls, kind, page_id, attempts
     FROM scheduled_posts
     WHERE status = 'scheduled' AND scheduled_for <= now()
       AND source = 'local'
@@ -133,6 +138,40 @@ export async function publishDuePosts(
       let mediaId: string;
       if (post.kind === "instagram-post") {
         mediaId = await publishScheduledInstagramPost(post);
+      } else if (post.kind === "video") {
+        // A scheduled video carries its staged file URL in image_url —
+        // stream it to a temp file (never the heap) and publish it with the
+        // post text as the video's description. It goes to the Page picked
+        // at schedule time, falling back to the primary Page.
+        const primary = await getPrimaryPage(post.workspace_id);
+        if (!primary) {
+          throw new Error("This workspace has no connected Facebook Page.");
+        }
+        let pageId = primary.pageId;
+        let token = primary.token;
+        if (post.page_id) {
+          const scoped = await resolvePageToken(post.workspace_id, post.page_id);
+          if (!scoped) {
+            throw new Error("That Page is not connected to this workspace.");
+          }
+          pageId = post.page_id;
+          token = scoped;
+        }
+        if (!post.image_url) {
+          throw new Error("The scheduled video is missing its file.");
+        }
+        const downloaded = await downloadVideoFromUrl(post.image_url);
+        try {
+          const video = await publishPageVideo({
+            pageId,
+            accessToken: token,
+            description: stripMarkdown(post.text),
+            video: downloaded.upload,
+          });
+          mediaId = video.id;
+        } finally {
+          await downloaded.cleanup();
+        }
       } else {
         const primary = await getPrimaryPage(post.workspace_id);
         if (!primary) {
@@ -163,8 +202,11 @@ export async function publishDuePosts(
         WHERE id = ${post.id}`;
 
       // Only now is cleanup safe: the retry path can no longer need the
-      // staged image. Best-effort — an orphaned blob is harmless.
-      if (post.kind === "instagram-post" && post.image_url) {
+      // staged media. Best-effort — an orphaned blob is harmless.
+      if (
+        (post.kind === "instagram-post" || post.kind === "video") &&
+        post.image_url
+      ) {
         try {
           await deleteStagedBlobs([post.image_url]);
         } catch {

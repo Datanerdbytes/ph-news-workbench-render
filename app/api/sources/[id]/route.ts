@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { requireOwner, unauthorized } from '@/lib/session';
-import { ingestFeed } from '@/lib/feeds';
+import { ingestFeed, describeFeedError } from '@/lib/feeds';
 import { randomUUID } from 'crypto';
 
 interface RouteParams {
@@ -172,8 +172,7 @@ export async function POST(request: Request, { params }: RouteParams) {
       return NextResponse.json({ ingested, skipped });
     } catch (error) {
       // ingestFeed already recorded the error on the feed row and logged it
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return NextResponse.json({ error: errorMessage }, { status: 500 });
+      return NextResponse.json({ error: describeFeedError(error) }, { status: 500 });
     }
   } catch (error) {
     console.error(JSON.stringify({

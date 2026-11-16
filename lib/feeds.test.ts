@@ -9,7 +9,15 @@ vi.mock("rss-parser", () => ({
 }));
 
 import { sql } from "@/lib/db";
-import { feedParser, ingestFeed, type IngestableFeed } from "@/lib/feeds";
+import {
+  describeFeedError,
+  extractFeedLink,
+  feedParser,
+  ingestFeed,
+  resolveFeedUrl,
+  FeedFetchError,
+  type IngestableFeed,
+} from "@/lib/feeds";
 
 const sqlMock = sql as unknown as Mock;
 const parseURL = feedParser.parseURL as unknown as Mock;
@@ -120,7 +128,7 @@ describe("ingestFeed", () => {
     expect(pubDate).toBeNull();
   });
 
-  it("records the error on the feed row and rethrows", async () => {
+  it("records a user-facing error on the feed row and rethrows the raw one", async () => {
     parseURL.mockRejectedValue(new Error("network down"));
 
     await expect(
@@ -130,7 +138,122 @@ describe("ingestFeed", () => {
     const errorUpdate = sqlMock.mock.calls.find((call) =>
       (call[0] as TemplateStringsArray).join(" ").includes("error_message")
     );
-    expect(errorUpdate![1]).toBe("network down");
-    expect(vi.mocked(console.error).mock.calls[0][0]).toContain("feed_error");
+    expect(errorUpdate![1]).toMatch(/Could not read the feed/);
+    expect(vi.mocked(console.error).mock.calls[0][0]).toContain("network down");
+  });
+});
+
+describe("describeFeedError", () => {
+  it.each([
+    [new Error("Status code 403"), /refused the request/],
+    [new Error("Status code 404"), /HTTP 404/],
+    [new Error("Status code 404"), /\/feed or \/rss/],
+    [new Error("Status code 503"), /server error/],
+    [new Error("Status code 429"), /HTTP 429/],
+    [new Error("Request timed out after 15000ms"), /timed out/],
+    [new Error("Too many redirects"), /redirected too many times/],
+    [new Error("Unclosed root tag"), /did not return a valid RSS\/Atom feed/],
+    [new Error("Feed not recognized as RSS 1 or 2."), /did not return a valid RSS\/Atom feed/],
+  ])("maps %s to a specific message", (error, expected) => {
+    expect(describeFeedError(error)).toMatch(expected);
+  });
+
+  it("maps DNS failures to a typo hint", () => {
+    const error = Object.assign(new Error("fetch failed"), {
+      cause: Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }),
+    });
+    expect(describeFeedError(error)).toMatch(/could not be reached/);
+  });
+
+  it("maps connection failures to a retry hint", () => {
+    const error = Object.assign(new Error("fetch failed"), {
+      cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+    });
+    expect(describeFeedError(error)).toMatch(/connection .* failed/);
+  });
+
+  it("falls back to a generic message", () => {
+    expect(describeFeedError(new Error("something else"))).toMatch(/Could not read the feed/);
+  });
+});
+
+describe("extractFeedLink", () => {
+  it("resolves a relative advertised feed URL and ignores other links", () => {
+    const html =
+      `<html><head><link rel="stylesheet" href="/style.css">` +
+      `<link rel="alternate" type="application/rss+xml" title="Feed" href="/feed/"></head></html>`;
+    expect(extractFeedLink(html, "https://example.com/")).toBe("https://example.com/feed/");
+  });
+
+  it("handles attribute order, single quotes and entities", () => {
+    const html = `<LINK HREF='/a.rss?x=1&amp;y=2' TYPE='application/atom+xml' REL='alternate'>`;
+    expect(extractFeedLink(html, "https://example.com/")).toBe(
+      "https://example.com/a.rss?x=1&y=2"
+    );
+  });
+
+  it("returns null for pages without a feed link", () => {
+    expect(extractFeedLink(`<link rel="stylesheet" href="/s.css">`, "https://example.com/")).toBeNull();
+  });
+});
+
+describe("resolveFeedUrl", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns the URL unchanged when it already serves XML", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response("<rss><channel/></rss>", { headers: { "content-type": "application/rss+xml" } })
+    ));
+    await expect(resolveFeedUrl("https://example.com/feed.xml")).resolves.toBe(
+      "https://example.com/feed.xml"
+    );
+  });
+
+  it("discovers the advertised feed on an HTML page", async () => {
+    const html =
+      `<html><head><link rel="alternate" type="application/rss+xml" href="/feed/"></head>` +
+      `<body>hi</body></html>`;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } })
+    ));
+    await expect(resolveFeedUrl("https://example.com/")).resolves.toBe("https://example.com/feed/");
+  });
+
+  it("returns the original URL when the page advertises nothing", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response("<html><body>plain</body></html>", { headers: { "content-type": "text/html" } })
+    ));
+    await expect(resolveFeedUrl("https://example.com/")).resolves.toBe("https://example.com/");
+  });
+
+  it("sniffs XML served with a non-XML content type", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response('<?xml version="1.0"?><rss version="2.0"><channel/></rss>', {
+        headers: { "content-type": "application/octet-stream" },
+      })
+    ));
+    await expect(resolveFeedUrl("https://example.com/feed")).resolves.toBe(
+      "https://example.com/feed"
+    );
+  });
+
+  it("throws a user-facing error on 403", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("blocked", { status: 403 })));
+    const error = await resolveFeedUrl("https://example.com/feed/").catch((e) => e);
+    expect(error).toBeInstanceOf(FeedFetchError);
+    expect(error.message).toMatch(/refused the request/);
+  });
+
+  it("throws a user-facing error on DNS failure", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(
+      Object.assign(new Error("fetch failed"), {
+        cause: Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }),
+      })
+    ));
+    const error = await resolveFeedUrl("https://nope.example/").catch((e) => e);
+    expect(error).toBeInstanceOf(FeedFetchError);
+    expect(error.message).toMatch(/could not be reached/);
   });
 });
