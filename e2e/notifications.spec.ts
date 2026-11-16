@@ -23,6 +23,9 @@ test("shows the unread badge, lists rows, and marks all read", async ({
 
   await page.getByRole("button", { name: "Mark all read" }).click();
   await expect(
+    page.getByRole("button", { name: "Mark all read" })
+  ).toBeHidden();
+  await expect(
     page.getByRole("button", { name: "Notifications", exact: true })
   ).toBeVisible();
 });
