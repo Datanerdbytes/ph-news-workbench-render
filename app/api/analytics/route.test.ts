@@ -31,6 +31,7 @@ const totalsRow = {
   published: 1,
   scheduled: 2,
   scheduled_published: 4,
+  linked_published: 2,
   failed: 0,
   tokens: 10,
   cost: 0.5,
@@ -134,13 +135,30 @@ describe("GET /api/analytics", () => {
 
     expect(data.totals).toEqual({
       drafts: 3,
-      published: 5,
+      // 1 published draft + 4 published posts − 2 that also flipped their
+      // draft: one publish, counted once.
+      published: 3,
       scheduled: 2,
       failed: 0,
       tokens: 10,
       cost: 0.5,
     });
     expect(data.daily).toEqual([dailyRow]);
+  });
+
+  it("subtracts the posts that also published their draft", async () => {
+    mockQueries([facebookRow]);
+
+    const res = await GET(new Request("http://localhost/api/analytics"));
+    expect(res.status).toBe(200);
+
+    // The query has to find the overlap: published posts whose draft is
+    // published too.
+    const totalsQuery = queryText(sqlMock.mock.calls[0]);
+    expect(totalsQuery).toContain("linked_published");
+    expect(totalsQuery).toContain("sp.draft_id IS NOT NULL");
+    expect(totalsQuery).toContain("d.id = sp.draft_id");
+    expect(totalsQuery).toContain("d.status = 'published'");
   });
 
   it("zero-fills every platform when nothing has been published yet", async () => {

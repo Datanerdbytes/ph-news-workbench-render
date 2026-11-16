@@ -9,6 +9,8 @@ type TotalsRow = {
   published: number;
   scheduled: number;
   scheduled_published: number;
+  /** Published posts that also flipped their draft — the double-counted overlap. */
+  linked_published: number;
   failed: number;
   tokens: number;
   cost: number;
@@ -130,6 +132,20 @@ export async function GET(request: Request) {
         WHERE workspace_id = ${workspaceId} AND status = 'scheduled') AS scheduled,
       (SELECT count(*)::int FROM scheduled_posts
         WHERE workspace_id = ${workspaceId} AND status = 'published') AS scheduled_published,
+      -- A publish that flipped a draft is one publish written down twice:
+      -- the draft and the scheduled post. Both the scheduled worker and
+      -- POST /api/publish link the two, so the overlap is subtracted and
+      -- the total counts publishes rather than rows.
+      (SELECT count(*)::int FROM scheduled_posts sp
+        WHERE sp.workspace_id = ${workspaceId}
+          AND sp.status = 'published'
+          AND sp.draft_id IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM drafts d
+            WHERE d.id = sp.draft_id
+              AND d.workspace_id = ${workspaceId}
+              AND d.status = 'published'
+          )) AS linked_published,
       (SELECT count(*)::int FROM scheduled_posts
         WHERE workspace_id = ${workspaceId} AND status = 'failed') AS failed,
       (SELECT coalesce(sum(input_tokens + output_tokens), 0)::int FROM drafts
@@ -178,7 +194,11 @@ export async function GET(request: Request) {
     {
       totals: {
         drafts: row?.drafts ?? 0,
-        published: (row?.published ?? 0) + (row?.scheduled_published ?? 0),
+        // A publish linked to a draft is counted once, not twice.
+        published:
+          (row?.published ?? 0) +
+          (row?.scheduled_published ?? 0) -
+          (row?.linked_published ?? 0),
         scheduled: row?.scheduled ?? 0,
         failed: row?.failed ?? 0,
         tokens: row?.tokens ?? 0,
