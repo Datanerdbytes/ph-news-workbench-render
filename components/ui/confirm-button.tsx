@@ -76,6 +76,7 @@ export function ConfirmButton({
   icon,
   confirmLabel = "Confirm",
   busyLabel = "Working…",
+  busyIcon,
   cancelLabel = "Cancel",
   variant = "ghost",
   size = "sm",
@@ -86,7 +87,10 @@ export function ConfirmButton({
   children: ReactNode;
   icon?: ReactNode;
   confirmLabel?: string;
+  /** Accessible name while pending; also the visible label unless `busyIcon` replaces it. */
   busyLabel?: string;
+  /** Shown instead of `busyLabel` while pending — e.g. a spinner. */
+  busyIcon?: ReactNode;
   cancelLabel?: string;
   variant?: ButtonVariant;
   size?: ButtonSize;
@@ -140,6 +144,7 @@ export function ConfirmButton({
         size={size}
         className={className}
         disabled={pending}
+        aria-label={pending ? busyLabel : undefined}
         onClick={() => void confirm()}
         onKeyDown={(event: ReactKeyboardEvent<HTMLButtonElement>) => {
           if (event.key === "Escape") {
@@ -148,8 +153,8 @@ export function ConfirmButton({
           }
         }}
       >
-        {icon}
-        {pending ? busyLabel : confirmLabel}
+        {pending ? (busyIcon ?? icon) : icon}
+        {pending ? (busyIcon ? null : busyLabel) : confirmLabel}
       </Button>
       <Button
         type="button"

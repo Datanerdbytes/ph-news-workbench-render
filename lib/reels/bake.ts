@@ -1,7 +1,8 @@
 import {
-  effectLocalTime,
+  effectRenderer,
   getPreset,
   planEffects,
+  plannedFrames,
   type PlannedEffect,
   type PresetValues,
   type ReelAttachment,
@@ -68,8 +69,9 @@ export type BakeOptions = {
 /**
  * Draws one composited frame: the footage (with every active camera zoom
  * multiplied in), then each active overlay in attachment order. Looped
- * effects repeat — effectLocalTime returns null across each gap between
- * repeats, skipping them for that frame. Exported for tests.
+ * effects play their cycle again every `duration` seconds, each pass following
+ * the previous one, and stop once the closing effect starts. Exported for
+ * tests.
  */
 export function composeFrame(
   ctx: CanvasRenderingContext2D,
@@ -78,23 +80,16 @@ export function composeFrame(
   drawFootage: (zoom: number) => void
 ): void {
   let zoom = 1;
-  const frames: { effect: PlannedEffect; local: number }[] = [];
-  for (const effect of effects) {
-    const local = effectLocalTime(
-      videoTime,
-      effect.start,
-      effect.preset.duration,
-      effect.loop
-    );
-    if (local == null) continue;
-    frames.push({ effect, local });
+  const frames = plannedFrames(effects, videoTime);
+  for (const { effect, local } of frames) {
     if (effect.preset.scale) zoom *= effect.preset.scale(local);
   }
   drawFootage(zoom);
   for (const { effect, local } of frames) {
-    if (!effect.preset.draw) continue;
+    const draw = effectRenderer(effect);
+    if (!draw) continue;
     ctx.save();
-    effect.preset.draw(ctx, local, effect.preset.duration, effect.values);
+    draw(ctx, local, effect.preset.duration, effect.values);
     ctx.restore();
   }
 }

@@ -1,15 +1,36 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CalendarDays, ChevronLeft, ChevronRight, Clock, Loader2, Play, X } from "lucide-react";
+import {
+  CalendarClock,
+  CalendarDays,
+  ChevronLeft,
+  ChevronRight,
+  Clock,
+  Loader2,
+  Play,
+  X,
+} from "lucide-react";
 import { toast } from "sonner";
 import { AppFrame } from "@/components/app-frame";
 import { Button } from "@/components/ui/button";
-import { ConfirmIconButton } from "@/components/ui/confirm-button";
+import { ConfirmButton } from "@/components/ui/confirm-button";
 import { ErrorState } from "@/components/ui/error-state";
+import { Input } from "@/components/ui/input";
+import { Modal } from "@/components/ui/modal";
 import { StatusPill } from "@/components/status-pill";
 import { cn } from "cn";
 import { formatDateTime } from "@/lib/format";
+import {
+  FACEBOOK_SCHEDULE_MAX_MS,
+  MAX_SCHEDULE_MS,
+  MIN_SCHEDULE_MS,
+  resolveScheduledFor,
+} from "@/lib/publishing/schedule";
+
+// Shared "request in flight" marker: the action buttons swap their text for
+// this so a busy state never depends on reading copy.
+const SPINNER = <Loader2 className="size-3.5 animate-spin" aria-hidden />;
 
 type ScheduledPost = {
   id: number;
@@ -68,6 +89,207 @@ function timeLabel(value: string) {
   });
 }
 
+/** Labeled cancel control shared by every per-post surface on the calendar. */
+function CancelButton({
+  post,
+  onCancel,
+}: {
+  post: ScheduledPost;
+  onCancel: (id: number) => Promise<void> | void;
+}) {
+  return (
+    <ConfirmButton
+      variant="outline"
+      size="sm"
+      onConfirm={() => onCancel(post.id)}
+      confirmLabel="Click again to cancel"
+      busyLabel="Canceling…"
+      busyIcon={SPINNER}
+      icon={<X className="size-3.5" aria-hidden />}
+      className="h-8 shrink-0 rounded-[6px] border-destructive/30 px-2 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive"
+    >
+      {post.source === "facebook" ? "Cancel on Facebook" : "Cancel post"}
+    </ConfirmButton>
+  );
+}
+
+/** Opens the reschedule dialog — local queues and Facebook-held schedules. */
+function RescheduleButton({
+  post,
+  onReschedule,
+}: {
+  post: ScheduledPost;
+  onReschedule: (post: ScheduledPost) => void;
+}) {
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      className="h-8 shrink-0 rounded-[6px] px-2 text-[11px]"
+      onClick={() => onReschedule(post)}
+    >
+      <CalendarClock className="size-3.5" aria-hidden />
+      Reschedule
+    </Button>
+  );
+}
+
+/** Reschedule calls the workspace owns; platform-held queues can't be moved. */
+function canReschedule(post: ScheduledPost) {
+  return (
+    post.status === "scheduled" &&
+    (post.source === "local" || post.source === "facebook")
+  );
+}
+
+function toLocalInput(date: Date) {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** How far out a row's platform accepts a schedule; locals take the full window. */
+function scheduleMaxMs(post: ScheduledPost) {
+  return post.source === "facebook"
+    ? Math.min(FACEBOOK_SCHEDULE_MAX_MS, MAX_SCHEDULE_MS)
+    : MAX_SCHEDULE_MS;
+}
+
+/**
+ * Picker bounds in the same window the composers use (10 minutes to 75 days),
+ * shortened to Meta's 29-day cap for Facebook-held rows; the min is rounded up
+ * a minute so a value the field offers stays valid.
+ */
+function rescheduleBounds(now: number, post: ScheduledPost) {
+  const min = Math.ceil((now + MIN_SCHEDULE_MS + 60_000) / 60_000) * 60_000;
+  return {
+    min: toLocalInput(new Date(min)),
+    max: toLocalInput(new Date(now + scheduleMaxMs(post))),
+  };
+}
+
+/** Keep the current slot when it is still schedulable; otherwise offer tomorrow 9:00. */
+function rescheduleInitialValue(post: ScheduledPost, now: number) {
+  const current = toLocalInput(new Date(post.scheduled_for));
+  const outOfWindow =
+    new Date(current).getTime() - now > scheduleMaxMs(post);
+  if (!outOfWindow && !resolveScheduledFor(current, new Date(now)).error) {
+    return current;
+  }
+  const tomorrow = new Date(now + 24 * 60 * 60 * 1000);
+  tomorrow.setHours(9, 0, 0, 0);
+  return toLocalInput(tomorrow);
+}
+
+function RescheduleForm({
+  post,
+  now,
+  inputRef,
+  onCancel,
+  onSave,
+}: {
+  post: ScheduledPost;
+  now: number;
+  inputRef: React.RefObject<HTMLInputElement>;
+  onCancel: () => void;
+  onSave: (iso: string) => Promise<void>;
+}) {
+  const [value, setValue] = useState(() => rescheduleInitialValue(post, now));
+  const [saving, setSaving] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const bounds = rescheduleBounds(now, post);
+  const resolution = resolveScheduledFor(value, new Date(now));
+  const message = failure ?? resolution.error;
+  // Only a validation error keeps the button disabled — a failed request may
+  // be retried as-is, and editing the time clears the stale failure.
+  const blocked = Boolean(resolution.error);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (resolution.iso === null) return;
+    setSaving(true);
+    setFailure(null);
+    try {
+      await onSave(resolution.iso);
+    } catch (error) {
+      setFailure(
+        error instanceof Error
+          ? error.message
+          : "The post could not be rescheduled. Please try again."
+      );
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form onSubmit={(event) => void submit(event)} className="mt-1">
+      <p className="mt-2 line-clamp-2 text-[12.5px] leading-snug text-muted-foreground">
+        {post.news_title ?? post.text}
+      </p>
+      <p className="mt-1 text-[11px] text-muted-foreground">
+        Currently {formatDateTime(post.scheduled_for)}
+      </p>
+      <label
+        htmlFor="reschedule-when"
+        className="mt-3 block text-[11px] font-semibold"
+      >
+        New date and time
+      </label>
+      <Input
+        ref={inputRef}
+        id="reschedule-when"
+        type="datetime-local"
+        min={bounds.min}
+        max={bounds.max}
+        value={value}
+        disabled={saving}
+        aria-invalid={Boolean(message)}
+        aria-describedby={message ? "reschedule-error" : undefined}
+        onChange={(event) => {
+          setValue(event.target.value);
+          setFailure(null);
+        }}
+        className="mt-1.5 h-9"
+      />
+      {message && (
+        <p
+          id="reschedule-error"
+          role="alert"
+          className="mt-1 text-[11px] text-destructive"
+        >
+          {message}
+        </p>
+      )}
+      <div className="mt-4 flex justify-end gap-2">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={onCancel}
+          disabled={saving}
+        >
+          Keep current time
+        </Button>
+        <Button
+          type="submit"
+          size="sm"
+          disabled={saving || blocked}
+          aria-label={saving ? "Rescheduling…" : undefined}
+        >
+          {saving ? (
+            SPINNER
+          ) : (
+            <>
+              <CalendarClock className="size-3.5" aria-hidden />
+              Reschedule
+            </>
+          )}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
 /**
  * Full-detail row for the day panel and the mobile agenda — the month-grid
  * chips truncate and hide content behind hover-only tooltips, so every
@@ -76,9 +298,11 @@ function timeLabel(value: string) {
 function CalendarPostRow({
   post,
   onCancel,
+  onReschedule,
 }: {
   post: ScheduledPost;
-  onCancel: (id: number) => void;
+  onCancel: (id: number) => Promise<void> | void;
+  onReschedule: (post: ScheduledPost) => void;
 }) {
   return (
     <div className="flex items-start justify-between gap-3">
@@ -106,14 +330,12 @@ function CalendarPostRow({
         )}
       </div>
       {post.status === "scheduled" && (
-        <ConfirmIconButton
-          onConfirm={() => onCancel(post.id)}
-          idleLabel="Cancel scheduled post"
-          armedLabel="Click again to cancel this scheduled post"
-          busyIcon={<Loader2 className="size-3.5 animate-spin" aria-hidden />}
-          className="tap-target rounded-md p-1.5 text-muted-foreground/70 transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-40"
-          icon={<X className="size-3.5" aria-hidden />}
-        />
+        <div className="flex shrink-0 items-center gap-1.5">
+          {canReschedule(post) && (
+            <RescheduleButton post={post} onReschedule={onReschedule} />
+          )}
+          <CancelButton post={post} onCancel={onCancel} />
+        </div>
       )}
     </div>
   );
@@ -131,8 +353,25 @@ export default function CalendarPage() {
   // Day panel: key of the day whose posts are expanded below the grid
   // (chips and "+N more" open it; chips alone truncate and hide the rest).
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [reschedule, setReschedule] = useState<{
+    post: ScheduledPost;
+    token: number;
+  } | null>(null);
+  // Each opening gets its own token so a request can only close the dialog it
+  // was started from — even when the same post is reopened.
+  const rescheduleSeq = useRef(0);
+  const rescheduleInputRef = useRef<HTMLInputElement>(null);
   const detailRef = useRef<HTMLDivElement>(null);
   const hadDaySelected = useRef(false);
+  // A Dashboard hand-off arrives as ?post=<id>. Focus that post — jump to its
+  // month, open its day panel and highlight it — instead of dropping the user
+  // on the month grid with nothing singled out.
+  const [focusPostId] = useState<number | null>(() => {
+    if (typeof window === "undefined") return null;
+    const id = Number(new URLSearchParams(window.location.search).get("post"));
+    return Number.isInteger(id) && id > 0 ? id : null;
+  });
+  const focusResolved = useRef(false);
   // One shared clock for every "is it due yet?" comparison in the render —
   // refreshed on the same minute cadence as load().
   const [now, setNow] = useState(() => Date.now());
@@ -167,6 +406,24 @@ export default function CalendarPage() {
     }, 60_000);
     return () => clearInterval(timer);
   }, [load]);
+
+  useEffect(() => {
+    if (focusResolved.current || loading || loadError || !focusPostId) return;
+    // Resolve the hand-off once, after the first fetch: switch to the post's
+    // month and open its day panel. A stale id (canceled elsewhere) is only
+    // reported, never retried.
+    focusResolved.current = true;
+    const focused = posts.find((post) => post.id === focusPostId);
+    if (!focused) {
+      toast("That scheduled post is no longer on the calendar.");
+      return;
+    }
+    const when = new Date(focused.scheduled_for);
+    // The target month and day only exist once the fetch has landed.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCursor(new Date(when.getFullYear(), when.getMonth(), 1));
+    setSelectedDay(dayKey(when));
+  }, [focusPostId, loadError, loading, posts]);
 
   const byDay = useMemo(() => {
     const map = new Map<string, ScheduledPost[]>();
@@ -287,6 +544,39 @@ export default function CalendarPage() {
     toast.success("Scheduled post canceled");
   }
 
+  async function reschedulePost(id: number, iso: string, token: number) {
+    const res = await fetch(`/api/schedule/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ scheduledFor: iso }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      throw new Error(
+        data?.error ?? "The post could not be rescheduled. Please try again."
+      );
+    }
+    const movedTo: string = data?.scheduled_for ?? iso;
+    setPosts((current) =>
+      current.map((post) =>
+        post.id === id ? { ...post, scheduled_for: movedTo } : post
+      )
+    );
+    // Close only the dialog instance this request started — another post, or
+    // the same post reopened while the move was in flight, keeps its input.
+    setReschedule((current) => (current?.token === token ? null : current));
+    if (typeof data?.warning === "string" && data.warning) {
+      toast.warning("Moved on some Pages", { description: data.warning });
+    } else {
+      toast.success("Scheduled post moved");
+    }
+  }
+
+  function openReschedule(post: ScheduledPost) {
+    rescheduleSeq.current += 1;
+    setReschedule({ post, token: rescheduleSeq.current });
+  }
+
   return (
     <AppFrame>
       <div className="mx-auto w-full max-w-[1240px] px-4 py-6 sm:px-6 lg:py-7">
@@ -347,12 +637,10 @@ export default function CalendarPage() {
                   ? "Publish every overdue scheduled post now"
                   : "Nothing is due right now"
               }
+              aria-label={runningDue ? "Publishing due posts" : undefined}
             >
-              <Play
-                className={cn("size-3.5", runningDue && "animate-pulse")}
-                aria-hidden
-              />
-              {runningDue ? "Publishing…" : "Publish due now"}
+              {runningDue ? SPINNER : <Play className="size-3.5" aria-hidden />}
+              {runningDue ? null : "Publish due now"}
             </Button>
           </div>
         </div>
@@ -372,8 +660,19 @@ export default function CalendarPage() {
                 {[...monthPosts]
                   .sort((a, b) => a.scheduled_for.localeCompare(b.scheduled_for))
                   .map((post) => (
-                    <li key={post.id} className="px-1 py-2.5">
-                      <CalendarPostRow post={post} onCancel={cancelPost} />
+                    <li
+                      key={post.id}
+                      className={cn(
+                        "px-1 py-2.5",
+                        focusPostId === post.id &&
+                          "-mx-1 rounded-md bg-brand-soft/40 px-2"
+                      )}
+                    >
+                      <CalendarPostRow
+                        post={post}
+                        onCancel={cancelPost}
+                        onReschedule={openReschedule}
+                      />
                     </li>
                   ))}
               </ul>
@@ -500,9 +799,17 @@ export default function CalendarPage() {
                     {selectedPosts.map((post) => (
                       <li
                         key={post.id}
-                        className="rounded-lg border border-border bg-card px-3 py-2.5"
+                        className={cn(
+                          "rounded-lg border border-border bg-card px-3 py-2.5",
+                          focusPostId === post.id &&
+                            "border-brand/50 bg-brand-soft/30 ring-1 ring-brand/25"
+                        )}
                       >
-                        <CalendarPostRow post={post} onCancel={cancelPost} />
+                        <CalendarPostRow
+                          post={post}
+                          onCancel={cancelPost}
+                          onReschedule={openReschedule}
+                        />
                       </li>
                     ))}
                   </ul>
@@ -535,41 +842,44 @@ export default function CalendarPage() {
                     const late =
                       new Date(post.scheduled_for).getTime() <= now;
                     return (
-                      <li key={post.id} className="group px-4 py-3">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <p
-                              className={cn(
-                                "flex items-center gap-1.5 text-[10.5px] font-semibold",
-                                late
-                                  ? "text-destructive"
-                                  : "text-muted-foreground"
-                              )}
-                            >
-                              <Clock className="size-3" aria-hidden />
-                              {late ? "Overdue · " : ""}
-                              {formatDateTime(post.scheduled_for)}
-                            </p>
-                            <p className="mt-1 flex items-center gap-1.5 text-[9.5px] font-bold uppercase tracking-[0.12em] text-brand">
-                              {KIND_LABELS[post.kind] ?? post.kind}
-                              <span className="font-medium normal-case tracking-normal text-muted-foreground">
-                                {sourceLabel(post.source)}
-                              </span>
-                            </p>
-                            <p className="mt-1 line-clamp-2 text-[12px] leading-snug">
-                              {post.news_title ?? post.text}
-                            </p>
-                          </div>
-                          <ConfirmIconButton
-                            onConfirm={() => cancelPost(post.id)}
-                            idleLabel="Cancel scheduled post"
-                            armedLabel="Click again to cancel this scheduled post"
-                            busyIcon={
-                              <Loader2 className="size-3.5 animate-spin" aria-hidden />
-                            }
-                            className="tap-target rounded-md p-1.5 text-muted-foreground/70 transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-40"
-                            icon={<X className="size-3.5" aria-hidden />}
-                          />
+                      <li
+                        key={post.id}
+                        className={cn(
+                          "group px-4 py-3",
+                          focusPostId === post.id && "bg-brand-soft/40"
+                        )}
+                      >
+                        <div className="min-w-0">
+                          <p
+                            className={cn(
+                              "flex items-center gap-1.5 text-[10.5px] font-semibold",
+                              late
+                                ? "text-destructive"
+                                : "text-muted-foreground"
+                            )}
+                          >
+                            <Clock className="size-3" aria-hidden />
+                            {late ? "Overdue · " : ""}
+                            {formatDateTime(post.scheduled_for)}
+                          </p>
+                          <p className="mt-1 flex items-center gap-1.5 text-[9.5px] font-bold uppercase tracking-[0.12em] text-brand">
+                            {KIND_LABELS[post.kind] ?? post.kind}
+                            <span className="font-medium normal-case tracking-normal text-muted-foreground">
+                              {sourceLabel(post.source)}
+                            </span>
+                          </p>
+                          <p className="mt-1 line-clamp-2 text-[12px] leading-snug">
+                            {post.news_title ?? post.text}
+                          </p>
+                        </div>
+                        <div className="mt-2 flex justify-end gap-1.5">
+                          {canReschedule(post) && (
+                            <RescheduleButton
+                              post={post}
+                              onReschedule={openReschedule}
+                            />
+                          )}
+                          <CancelButton post={post} onCancel={cancelPost} />
                         </div>
                       </li>
                     );
@@ -616,6 +926,26 @@ export default function CalendarPage() {
           </aside>
         </div>
       </div>
+
+      <Modal
+        open={reschedule !== null}
+        onClose={() => setReschedule(null)}
+        title="Reschedule post"
+        initialFocusRef={rescheduleInputRef}
+      >
+        {reschedule && (
+          <RescheduleForm
+            key={reschedule.post.id}
+            post={reschedule.post}
+            now={now}
+            inputRef={rescheduleInputRef}
+            onCancel={() => setReschedule(null)}
+            onSave={(iso) =>
+              reschedulePost(reschedule.post.id, iso, reschedule.token)
+            }
+          />
+        )}
+      </Modal>
     </AppFrame>
   );
 }

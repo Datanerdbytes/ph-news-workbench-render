@@ -1,6 +1,24 @@
 // Meta rejects Page post schedules outside this window.
 export const MIN_SCHEDULE_MS = 10 * 60 * 1000;
 export const MAX_SCHEDULE_MS = 75 * 24 * 60 * 60 * 1000;
+/**
+ * Meta accepts a scheduled_publish_time at most 30 days out (29 for reels),
+ * narrower than the workspace's own 75-day window. Rows Facebook holds must
+ * stay inside it or the platform refuses the schedule.
+ */
+export const FACEBOOK_SCHEDULE_MAX_MS = 29 * 24 * 60 * 60 * 1000;
+export const FACEBOOK_SCHEDULE_TOO_FAR_ERROR =
+  'Facebook only accepts schedules up to 29 days ahead. Pick an earlier time.';
+
+/** Narrower window for rows Facebook holds; undefined when it fits. */
+export function facebookScheduleWindowError(
+  date: Date,
+  now: number = Date.now()
+): string | undefined {
+  return date.getTime() - now > FACEBOOK_SCHEDULE_MAX_MS
+    ? FACEBOOK_SCHEDULE_TOO_FAR_ERROR
+    : undefined;
+}
 
 export const SCHEDULE_MISSING_ERROR = 'Pick a date and time to schedule.';
 export const SCHEDULE_INVALID_ERROR = 'Pick a valid date and time to schedule.';

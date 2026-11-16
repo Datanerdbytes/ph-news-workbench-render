@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
-  LOOP_GAP_SECONDS,
   PRESET_CATEGORIES,
   REEL_PRESETS,
   SLOT_ORDER,
   attachmentsFromSlots,
+  breaking,
   defaultPresetValues,
-  effectLocalTime,
+  effectLocals,
   getPreset,
   planEffects,
+  plannedFrames,
   slotStart,
   punchzoom,
 } from "./presets";
@@ -101,39 +102,95 @@ describe("slotStart", () => {
   });
 });
 
-describe("effectLocalTime", () => {
+describe("effectLocals", () => {
   const start = 2;
   const duration = 3;
 
-  it("returns null before the effect starts", () => {
-    expect(effectLocalTime(1.9, start, duration, false)).toBeNull();
+  it("draws nothing before the effect starts", () => {
+    expect(effectLocals(1.9, start, duration, false)).toEqual([]);
   });
 
-  it("returns local time inside the effect window", () => {
-    expect(effectLocalTime(2.5, start, duration, false)).toBe(0.5);
-    expect(effectLocalTime(5, start, duration, false)).toBe(3);
+  it("draws a single play inside its window", () => {
+    expect(effectLocals(2.5, start, duration, false)).toEqual([0.5]);
+    expect(effectLocals(5, start, duration, false)).toEqual([3]);
   });
 
-  it("returns null after a single play finishes", () => {
-    expect(effectLocalTime(5.1, start, duration, false)).toBeNull();
+  it("draws nothing after a single play finishes", () => {
+    expect(effectLocals(5.1, start, duration, false)).toEqual([]);
   });
 
-  it("loops back to zero after each duration + gap cycle", () => {
-    const cycle = duration + LOOP_GAP_SECONDS;
-    expect(effectLocalTime(start + cycle, start, duration, true)).toBeCloseTo(0, 6);
-    expect(effectLocalTime(start + cycle + 1, start, duration, true)).toBeCloseTo(1, 6);
+  it("restarts every duration, one pass at a time", () => {
+    expect(effectLocals(start + 3, start, duration, true)).toEqual([0]);
+    expect(effectLocals(start + 3.5, start, duration, true)).toEqual([0.5]);
+    expect(effectLocals(start + 7.25, start, duration, true)).toEqual([1.25]);
   });
 
-  it("returns null across the gap between looped repeats", () => {
-    expect(
-      effectLocalTime(start + duration + LOOP_GAP_SECONDS / 2, start, duration, true)
-    ).toBeNull();
+  it("never draws two passes at once — the next follows the previous", () => {
+    for (let t = start; t < start + 3 * duration; t += 0.1) {
+      expect(effectLocals(t, start, duration, true)).toHaveLength(1);
+    }
+  });
+
+  it("hands off on the boundary without a blank frame from rounding", () => {
+    const before = effectLocals(start + duration - 0.001, start, duration, true);
+    expect(before).toHaveLength(1);
+    expect(before[0]).toBeCloseTo(duration - 0.001, 6);
+    expect(effectLocals(start + duration + 0.001, start, duration, true)[0]).toBeCloseTo(
+      0.001,
+      6
+    );
+  });
+
+  it("stops looping at the closing effect's start", () => {
+    expect(effectLocals(start + 10, start, duration, true, start + 8)).toEqual([]);
+    // A single play ignores the cutoff — only loops are cut.
+    expect(effectLocals(start + 1.5, start, duration, false, start + 1)).toEqual([
+      1.5,
+    ]);
   });
 
   it("does not loop when loop is false even after the cycle length", () => {
+    expect(effectLocals(start + duration + 1, start, duration, false)).toEqual([]);
+  });
+});
+
+describe("plannedFrames", () => {
+  it("stops a looped start effect once the end card opens", () => {
+    const effects = planEffects(
+      [
+        { presetId: "headline", slot: "start", loop: true },
+        { presetId: "endcard", slot: "end", loop: false },
+      ],
+      30
+    );
+    const endcardStart = effects[1].start;
+    const before = plannedFrames(effects, endcardStart - 1);
+    expect(before.some(({ effect }) => effect.preset.id === "headline")).toBe(true);
+    const during = plannedFrames(effects, endcardStart + 0.5);
+    expect(during.map(({ effect }) => effect.preset.id)).toEqual(["endcard"]);
+  });
+
+  it("keeps a streamed banner rolling past its own duration", () => {
+    const effects = planEffects(
+      [{ presetId: "breaking", slot: "start", loop: true }],
+      60
+    );
+    const t = breaking.duration + 2.5;
+    expect(plannedFrames(effects, t).map(({ local }) => local)).toEqual([t]);
+  });
+
+  it("cuts a streamed banner when the end card opens", () => {
+    const effects = planEffects(
+      [
+        { presetId: "breaking", slot: "start", loop: true },
+        { presetId: "endcard", slot: "end", loop: false },
+      ],
+      30
+    );
+    const endcardStart = effects[1].start;
     expect(
-      effectLocalTime(start + duration + LOOP_GAP_SECONDS + 1, start, duration, false)
-    ).toBeNull();
+      plannedFrames(effects, endcardStart + 0.5).map(({ effect }) => effect.preset.id)
+    ).toEqual(["endcard"]);
   });
 });
 
