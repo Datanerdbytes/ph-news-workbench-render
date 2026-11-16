@@ -144,24 +144,6 @@ export default function TikTokPage() {
             icon={<PlatformMark platform="tiktok" className="size-4" />}
             title="TikTok direct post"
             badge="Video"
-            aside={
-              <div className="space-y-2">
-                <p>
-                  TikTok pulls the staged file straight from the workbench URL
-                  when the post opens (PULL_FROM_URL).
-                </p>
-                {sandbox ? (
-                  <p className="text-muted-foreground">
-                    Sandbox approval: posts land as private (only you) until
-                    TikTok clears the Content Posting API for this app.
-                  </p>
-                ) : (
-                  <p className="text-muted-foreground">
-                    Public posting is approved for this app.
-                  </p>
-                )}
-              </div>
-            }
           >
             <div>
               <FieldLabel htmlFor="tt-video" hint="MP4 · MOV · ≤1 GB staged">

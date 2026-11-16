@@ -54,7 +54,7 @@ test("renders the dashboard publishing stats", async ({ page }) => {
 
 test("renders the calendar with its scheduled sidebar", async ({ page }) => {
   await page.goto("/calendar");
-  await expect(page.getByRole("heading", { name: "Calendar", exact: true }))
+  await expect(page.getByRole("heading", { name: "Content Calendar", exact: true }))
     .toBeVisible();
   await expect(page.getByRole("heading", { name: "Scheduled" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Today" })).toBeVisible();

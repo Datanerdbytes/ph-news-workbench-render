@@ -47,14 +47,14 @@ export function FacebookPreview({
         <span
           className={
             connected
-              ? "flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-facebook"
+              ? "flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-success"
               : "flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground"
           }
         >
           <span
             className={
               connected
-                ? "size-1.5 rounded-full bg-facebook"
+                ? "size-1.5 rounded-full bg-success"
                 : "size-1.5 rounded-full bg-brand"
             }
           />

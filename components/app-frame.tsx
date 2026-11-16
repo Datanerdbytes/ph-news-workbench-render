@@ -79,7 +79,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     items: [
       { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
       { href: "/downloads", label: "Downloads", icon: Download },
-      { href: "/calendar", label: "Calendar", icon: CalendarDays },
+      { href: "/calendar", label: "Content Calendar", icon: CalendarDays },
       { href: "/status", label: "Drafts", icon: FileText },
     ],
   },
@@ -177,7 +177,7 @@ function pageLabel(pathname: string) {
   if (pathname.startsWith("/analytics")) return "Analytics";
   if (pathname.startsWith("/team")) return "Team";
   if (pathname.startsWith("/settings")) return "Settings";
-  if (pathname.startsWith("/calendar")) return "Calendar";
+  if (pathname.startsWith("/calendar")) return "Content Calendar";
   if (pathname.startsWith("/post")) return "Post";
   if (pathname.startsWith("/photos")) return "Photos";
   if (pathname.startsWith("/videos")) return "Videos";

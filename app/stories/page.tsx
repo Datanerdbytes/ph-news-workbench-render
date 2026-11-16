@@ -293,9 +293,6 @@ export default function StoriesPage() {
                 <Sparkles className="size-3.5" aria-hidden />
                 {busy ? 'Publishing…' : 'Publish story'}
               </Button>
-              <span className="text-[10px] text-muted-foreground">
-                Publishes immediately — Stories have no native scheduling window.
-              </span>
             </div>
 
             <ResultList results={results ?? []} />

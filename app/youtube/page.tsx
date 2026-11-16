@@ -176,18 +176,6 @@ export default function YouTubePage() {
             icon={<PlatformMark platform="youtube" className="size-4" />}
             title="YouTube upload"
             badge="Video"
-            aside={
-              <div className="space-y-2">
-                <p>
-                  Uploads publish straight from the browser-stage to YouTube&apos;s
-                  resumable upload endpoint.
-                </p>
-                <p className="text-muted-foreground">
-                  Upload quota is ~6 videos per day on Google&apos;s default
-                  allocation — it resets at midnight Pacific.
-                </p>
-              </div>
-            }
           >
             <div>
               <FieldLabel htmlFor="yt-video" hint="MP4 · MOV · ≤1 GB staged">
