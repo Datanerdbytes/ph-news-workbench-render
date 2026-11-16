@@ -394,6 +394,20 @@ describe("isFacebookStillScheduled", () => {
     fetchMock().mockResolvedValue(graphError(190, "Session expired"));
     await expect(isFacebookStillScheduled("pg1", "ctr1", "tok")).resolves.toBeNull();
   });
+
+  it("treats a truncated queue as unknown rather than released", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          data: [{ id: "pg1_other" }],
+          paging: { next: "https://graph.example/next" },
+        })
+      )
+    );
+
+    await expect(isFacebookStillScheduled("pg1", "ctr1", "tok")).resolves.toBeNull();
+  });
 });
 
 describe("fetchPageTopPosts", () => {

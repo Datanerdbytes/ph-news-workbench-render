@@ -731,11 +731,10 @@ export async function isFacebookStillScheduled(
   accessToken: string
 ): Promise<boolean | null> {
   try {
-    const body = await graphGet<{ data?: Array<{ id?: string }> }>(
-      `${pageId}/scheduled_posts`,
-      { fields: 'id', limit: '100' },
-      accessToken
-    );
+    const body = await graphGet<{
+      data?: Array<{ id?: string }>;
+      paging?: { next?: string };
+    }>(`${pageId}/scheduled_posts`, { fields: "id", limit: "100" }, accessToken);
     const compound = `${pageId}_${postId}`;
     for (const entry of body.data ?? []) {
       if (!entry.id) continue;
@@ -747,7 +746,9 @@ export async function isFacebookStillScheduled(
         return true;
       }
     }
-    return false;
+    // Later pages are not read, so absence here is not proof the item was
+    // released. Callers treat null as "unknown" and fall through to Graph.
+    return body.paging?.next ? null : false;
   } catch {
     return null;
   }
