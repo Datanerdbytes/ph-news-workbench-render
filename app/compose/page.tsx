@@ -224,12 +224,6 @@ function ComposeWorkspace() {
     if (selected?.draft_id) void loadSavedDraft(selected);
   }, [selectedId, selected, loadSavedDraft]);
 
-  function selectItem(item: QueueItem) {
-    if (selected?.id === item.id) return;
-    selectionRef.current = item.id;
-    setSelected(item);
-  }
-
   async function generateDraft() {
     if (!selected) return;
     setDrafting(true);

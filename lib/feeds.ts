@@ -41,7 +41,7 @@ export function describeFeedError(error: unknown): string {
   const code = errorCode(error);
 
   if (/status code 40[13]/i.test(raw)) {
-    return 'The site refused the request (HTTP 403). Some news sites block automated feed readers, so their feeds cannot be added.';
+    return 'The site refused the request (HTTP 401/403). Some news sites block automated feed readers, so their feeds cannot be added.';
   }
   if (/status code (404|410)/i.test(raw)) {
     return 'No feed was found at this URL (HTTP 404). Double-check the URL — if you pasted a website address, try its feed URL (often /feed or /rss).';
