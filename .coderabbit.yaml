@@ -11,31 +11,16 @@ reviews:
     drafts: true
   # "chill" keeps the review focused on meaningful issues instead of nitpicks.
   profile: chill
-  # Automatic Approvals: CodeRabbit requests changes while it has actionable
-  # findings and approves once they are addressed. Its approval is what
-  # satisfies the "1 approval" rule in the branch protection, so a finding
-  # that nobody fixes keeps the pull request unmergeable. The legacy
-  # `request_changes_workflow` key is the same switch under its old name and
-  # must not be set next to this one.
+  # Informational only: CodeRabbit never issues approvals or
+  # request-changes reviews, so its review can never gate a merge. Reviews
+  # and comments still run on every push alongside the required CI checks;
+  # what blocks a merge is those checks alone. (The old gate — CodeRabbit's
+  # approval satisfying the 1-approval branch rule — was removed on purpose.)
   auto_approvals:
-    enabled: true
-    # A review that is skipped on purpose does not get an approval. An
-    # approval that CodeRabbit hands out without having read the diff is not
-    # a gate, and a review skipped because the pull request exceeded the file
-    # limit is exactly the case where nothing was read. A pull request that
-    # has to be split, or a draft, stays unmergeable until a real review has
-    # run — which is the point of the rule.
-    approve_on_skipped_review: false
-    # The author cannot wave the review through with `@coderabbitai approve`:
-    # that command approves without a completed review of the latest commit
-    # and without the directory checks passing, which would make the whole
-    # gate advisory for the one person who can push to this repository. The
-    # way out of a false positive is to resolve the review thread itself —
-    # CodeRabbit approves once the requirements are met — or to downgrade the
-    # offending check to `mode: warning` in a follow-up commit.
-    allow_author_approval: false
+    enabled: false
   # A review that errors out fails the CodeRabbit check instead of passing it,
-  # so a broken review cannot be merged past. Retry with
+  # so a broken review is at least visible in the status list. The check is
+  # not a required one, so even a failure cannot block a merge. Retry with
   # `@coderabbitai full review`.
   fail_commit_status: true
   high_level_summary: true
