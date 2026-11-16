@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConfirmButton, ConfirmIconButton } from "./confirm-button";
 
@@ -56,6 +56,36 @@ describe("ConfirmButton (text mode)", () => {
     resolve();
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Delete" })).toBeEnabled()
+    );
+  });
+
+  it("swaps the busy label for a busy icon, keeping the name for screen readers", async () => {
+    let resolve!: () => void;
+    const onConfirm = vi.fn(
+      () => new Promise<void>((res) => (resolve = res))
+    );
+    render(
+      <ConfirmButton
+        onConfirm={onConfirm}
+        busyLabel="Canceling…"
+        busyIcon={<span data-testid="spinner" />}
+      >
+        Cancel post
+      </ConfirmButton>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel post" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    const busy = screen.getByRole("button", { name: "Canceling…" });
+    expect(busy).toBeDisabled();
+    expect(within(busy).getByTestId("spinner")).toBeInTheDocument();
+    // The spinner replaces the copy — no busy text left in the button.
+    expect(busy.textContent).toBe("");
+
+    resolve();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Cancel post" })).toBeEnabled()
     );
   });
 

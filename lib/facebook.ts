@@ -688,6 +688,37 @@ export async function cancelFacebookScheduledPost(
 }
 
 /**
+ * Move an item Facebook is holding in its scheduled queue. The unpublished
+ * post/video node accepts a new `scheduled_publish_time`; reel and video
+ * containers are only addressable in their compound `{page-id}_{post-id}`
+ * form, so try that first and fall back to the bare id.
+ */
+export async function rescheduleFacebookScheduledPost(
+  postId: string,
+  accessToken: string,
+  scheduledPublishTime: number,
+  pageId?: string | null
+): Promise<void> {
+  const fields = { scheduled_publish_time: String(scheduledPublishTime) };
+  if (pageId && !postId.includes('_')) {
+    let compoundError: unknown;
+    try {
+      await graphPost(`${pageId}_${postId}`, fields, accessToken);
+      return;
+    } catch (error) {
+      compoundError = error;
+    }
+    try {
+      await graphPost(postId, fields, accessToken);
+      return;
+    } catch {
+      throw compoundError;
+    }
+  }
+  await graphPost(postId, fields, accessToken);
+}
+
+/**
  * Whether Facebook is still holding a scheduled item in its own queue
  * (`/{page-id}/scheduled_posts`). Reel and video container nodes cannot be
  * read directly — a bare GET is refused with code 12, and the compound node

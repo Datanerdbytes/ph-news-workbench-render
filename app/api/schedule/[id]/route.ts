@@ -2,9 +2,11 @@ import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { requireWorkspace, unauthorized } from "@/lib/session";
 import { recordScheduleEvent } from "@/lib/schedule-events";
+import { scheduleWindowError, FACEBOOK_SCHEDULE_MAX_MS } from "@/lib/publishing/schedule";
 import {
   cancelFacebookScheduledPost,
   isFacebookStillScheduled,
+  rescheduleFacebookScheduledPost,
 } from "@/lib/facebook";
 import { resolvePageToken } from "@/lib/facebook-page-token";
 
@@ -17,9 +19,17 @@ type TargetRow = {
   kind: string;
   source: string;
   status: string;
+  scheduled_for: string;
   facebook_post_id: string | null;
   facebook_post_ids: unknown;
   page_id: string | null;
+};
+
+const PLATFORM_LABELS: Record<string, string> = {
+  facebook: "Facebook",
+  youtube: "YouTube",
+  tiktok: "TikTok",
+  instagram: "Instagram",
 };
 
 type PageResult = {
@@ -96,6 +106,144 @@ export async function DELETE(
 }
 
 /**
+ * Move a scheduled post to a new time. Workspace-queued rows (source
+ * 'local') only need the local update; Facebook-held rows get their
+ * `scheduled_publish_time` moved on Facebook first. Other platforms expose no
+ * way to move an accepted schedule, so those can only be canceled and
+ * scheduled again.
+ */
+export async function PATCH(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const access = await requireWorkspace(request);
+  if (!access) return unauthorized();
+
+  const { id } = await params;
+  const body = await request.json().catch(() => null);
+  const scheduledFor = new Date(String(body?.scheduledFor ?? ""));
+  if (Number.isNaN(scheduledFor.getTime())) {
+    return NextResponse.json(
+      { error: "Pick a date and time to reschedule to." },
+      { status: 400 }
+    );
+  }
+  const windowError = scheduleWindowError(scheduledFor);
+  if (windowError) {
+    return NextResponse.json({ error: windowError }, { status: 400 });
+  }
+
+  const rows = (await sql`
+    SELECT id, workspace_id, news_item_id, kind, source, status, scheduled_for,
+           facebook_post_id, facebook_post_ids, page_id
+    FROM scheduled_posts
+    WHERE id = ${id} AND workspace_id = ${access.workspace.id}
+  `) as unknown as TargetRow[];
+
+  const row = rows[0];
+  if (!row) {
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
+  if (row.status !== "scheduled") {
+    return NextResponse.json(
+      { error: "Only a scheduled post can be rescheduled." },
+      { status: 409 }
+    );
+  }
+  if (
+    row.source === "facebook" &&
+    scheduledFor.getTime() - Date.now() > FACEBOOK_SCHEDULE_MAX_MS
+  ) {
+    return NextResponse.json(
+      {
+        error:
+          "Facebook only accepts schedules up to 29 days ahead. Pick an earlier time.",
+      },
+      { status: 400 }
+    );
+  }
+
+  let warning: string | undefined;
+  if (row.source === "facebook") {
+    const moved = await rescheduleOnFacebook(
+      row,
+      Math.floor(scheduledFor.getTime() / 1000)
+    );
+    if (!moved.ok) {
+      // A refusal before any Page moved leaves the row alone. Once a Page has
+      // accepted the new time, the row must follow it or the calendar would
+      // keep showing a time Facebook no longer holds.
+      if (moved.moved === 0) {
+        return NextResponse.json({ error: moved.error }, { status: 409 });
+      }
+      warning = moved.error;
+    }
+  } else if (row.source !== "local") {
+    const platform = PLATFORM_LABELS[row.source] ?? "the platform";
+    return NextResponse.json(
+      {
+        error: `${platform} is holding this post in its own queue and the app cannot move an existing schedule there. Cancel it, then schedule it again at the new time.`,
+      },
+      { status: 409 }
+    );
+  }
+
+  const updated = (await sql`
+    UPDATE scheduled_posts
+    SET scheduled_for = ${scheduledFor.toISOString()}, updated_at = now()
+    WHERE id = ${id}
+      AND workspace_id = ${access.workspace.id}
+      AND status = 'scheduled'
+    RETURNING id, scheduled_for`) as unknown as {
+    id: number;
+    scheduled_for: string;
+  }[];
+
+  if (!updated.length) {
+    return NextResponse.json(
+      {
+        error:
+          "The post changed while it was being rescheduled. Reload the calendar and try again.",
+      },
+      { status: 409 }
+    );
+  }
+
+  await recordScheduleEvent({
+    workspaceId: access.workspace.id,
+    scheduledPostId: row.id,
+    newsItemId: row.news_item_id,
+    event: "rescheduled",
+    source: "calendar",
+    actorUserId: access.user.id,
+    metadata: { from: row.scheduled_for, to: scheduledFor.toISOString() },
+  });
+
+  return NextResponse.json(
+    warning ? { ...updated[0], warning } : updated[0]
+  );
+}
+
+/** Every Page that accepted this scheduled action, with the per-Page id. */
+function facebookTargets(row: TargetRow) {
+  const perPage = Array.isArray(row.facebook_post_ids)
+    ? (row.facebook_post_ids as PageResult[]).filter(
+        (entry) => entry?.ok && entry.id
+      )
+    : [];
+
+  if (perPage.length) {
+    return perPage.map((entry) => ({
+      pageId: entry.page?.id ?? null,
+      postId: entry.id!,
+    }));
+  }
+  return row.facebook_post_id
+    ? [{ pageId: row.page_id, postId: row.facebook_post_id }]
+    : [];
+}
+
+/**
  * Cancel a Facebook-held scheduled item. One scheduled action can cover
  * several Pages, so every Page that took it is canceled in turn; the first
  * failure stops the loop and is reported back to the user.
@@ -103,17 +251,7 @@ export async function DELETE(
 async function cancelOnFacebook(
   row: TargetRow
 ): Promise<{ ok: boolean; error?: string }> {
-  const perPage = Array.isArray(row.facebook_post_ids)
-    ? (row.facebook_post_ids as PageResult[]).filter(
-        (entry) => entry?.ok && entry.id
-      )
-    : [];
-
-  const targets = perPage.length
-    ? perPage.map((entry) => ({ pageId: entry.page?.id ?? null, postId: entry.id! }))
-    : row.facebook_post_id
-      ? [{ pageId: row.page_id, postId: row.facebook_post_id }]
-      : [];
+  const targets = facebookTargets(row);
 
   if (!targets.length) {
     return {
@@ -157,4 +295,76 @@ async function cancelOnFacebook(
   }
 
   return { ok: true };
+}
+
+/**
+ * Move the schedule Facebook is holding, across every Page that accepted it.
+ * Returns how many Pages the new time reached so the caller can decide
+ * whether the local row should follow a partial move.
+ */
+async function rescheduleOnFacebook(
+  row: TargetRow,
+  scheduledPublishTime: number
+): Promise<{ ok: boolean; moved: number; error?: string }> {
+  const targets = facebookTargets(row);
+  if (!targets.length) {
+    return {
+      ok: false,
+      moved: 0,
+      error:
+        "This item is scheduled on Facebook but the app has no id for it, so it cannot be moved here. Move it in Meta Business Suite.",
+    };
+  }
+
+  let moved = 0;
+  for (const target of targets) {
+    const token = await resolvePageToken(row.workspace_id, target.pageId);
+    if (!token) {
+      return {
+        ok: false,
+        moved,
+        error:
+          "The stored Page token is unreadable, so this item cannot be moved. Reconnect the Page, or move it in Meta Business Suite.",
+      };
+    }
+
+    try {
+      // A row the sync has not caught up with may already be published;
+      // moving then is refused by Facebook. Say so instead of guessing.
+      const held = target.pageId
+        ? await isFacebookStillScheduled(target.pageId, target.postId, token)
+        : null;
+      if (held === false) {
+        return {
+          ok: false,
+          moved,
+          error:
+            "Facebook no longer holds this item in its scheduled queue — it may have already published. Reload the calendar to see where it stands.",
+        };
+      }
+      await rescheduleFacebookScheduledPost(
+        target.postId,
+        token,
+        scheduledPublishTime,
+        target.pageId
+      );
+      moved += 1;
+    } catch (error) {
+      const reason =
+        error instanceof Error
+          ? `Facebook refused to move this item: ${error.message}`
+          : "Facebook refused to move this item.";
+      const partial =
+        moved > 0
+          ? ` It did move on ${moved} of ${targets.length} Pages, so those are now at the new time.`
+          : "";
+      return {
+        ok: false,
+        moved,
+        error: `${reason}${partial} You can cancel it here and schedule it again.`,
+      };
+    }
+  }
+
+  return { ok: true, moved };
 }

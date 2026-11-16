@@ -18,6 +18,7 @@ import {
   isFacebookVideoPublished,
   parseImages,
   redactTokens,
+  rescheduleFacebookScheduledPost,
   selectPage,
   type ConnectedFacebookPage,
 } from "./facebook";
@@ -322,6 +323,47 @@ describe("cancelFacebookScheduledPost", () => {
     expect(lastRequestedUrl(mock).pathname).toBe("/v23.0/ctr1");
 
     await cancelFacebookScheduledPost("pg1_ctr1", "tok", "pg1");
+    expect(lastRequestedUrl(mock).pathname).toBe("/v23.0/pg1_ctr1");
+    expect(mock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("rescheduleFacebookScheduledPost", () => {
+  it("posts the new time to the compound container id first", async () => {
+    const mock = fetchMock().mockResolvedValue(jsonResponse({ success: true }));
+    await rescheduleFacebookScheduledPost("ctr1", "tok", 1794823260, "pg1");
+    expect(mock).toHaveBeenCalledTimes(1);
+    expect(lastRequestedUrl(mock).pathname).toBe("/v23.0/pg1_ctr1");
+    const body = mock.mock.calls[0][1].body as FormData;
+    expect(body.get("scheduled_publish_time")).toBe("1794823260");
+  });
+
+  it("falls back to the bare id when the compound form is refused", async () => {
+    const mock = fetchMock()
+      .mockResolvedValueOnce(graphError(12, "singular statuses API is deprecated"))
+      .mockResolvedValueOnce(jsonResponse({ success: true }));
+    await rescheduleFacebookScheduledPost("ctr1", "tok", 1794823260, "pg1");
+    expect(mock).toHaveBeenCalledTimes(2);
+    expect(lastRequestedUrl(mock).pathname).toBe("/v23.0/ctr1");
+  });
+
+  it("surfaces the compound-form error when both attempts fail", async () => {
+    fetchMock()
+      .mockResolvedValueOnce(graphError(12, "compound failed"))
+      .mockResolvedValueOnce(graphError(100, "bare failed"));
+    await expect(
+      rescheduleFacebookScheduledPost("ctr1", "tok", 1794823260, "pg1")
+    ).rejects.toThrow("compound failed");
+  });
+
+  it("uses the bare id without a page and for already-compound ids", async () => {
+    const mock = fetchMock().mockImplementation(async () =>
+      jsonResponse({ success: true })
+    );
+    await rescheduleFacebookScheduledPost("ctr1", "tok", 1794823260, null);
+    expect(lastRequestedUrl(mock).pathname).toBe("/v23.0/ctr1");
+
+    await rescheduleFacebookScheduledPost("pg1_ctr1", "tok", 1794823260, "pg1");
     expect(lastRequestedUrl(mock).pathname).toBe("/v23.0/pg1_ctr1");
     expect(mock).toHaveBeenCalledTimes(2);
   });

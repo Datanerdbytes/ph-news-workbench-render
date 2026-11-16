@@ -3,6 +3,7 @@ import { sql } from "@/lib/db";
 export type ScheduleEvent =
   | "scheduled"
   | "canceled"
+  | "rescheduled"
   | "claimed"
   | "retrying"
   | "published"

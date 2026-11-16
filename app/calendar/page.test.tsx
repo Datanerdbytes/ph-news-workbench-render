@@ -59,17 +59,51 @@ const published: Row = {
   error_message: null,
 };
 
+const localPost: Row = {
+  id: 51,
+  text: "Queued by the Story Queue",
+  scheduled_for: "2026-11-20T09:00:00.000Z",
+  status: "scheduled",
+  kind: "post",
+  source: "local",
+  news_title: null,
+  error_message: null,
+};
+
+const youtubePost: Row = {
+  id: 52,
+  text: "Short scheduled to YouTube",
+  scheduled_for: "2026-11-22T09:00:00.000Z",
+  status: "scheduled",
+  kind: "reel",
+  source: "youtube",
+  news_title: null,
+  error_message: null,
+};
+
 function respond(rows: Row[], deleted = true) {
-  fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
-    const url = String(input);
-    if (url === "/api/schedule") {
-      return { ok: true, json: async () => rows };
+  fetchMock.mockImplementation(
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/schedule") {
+        return { ok: true, json: async () => rows };
+      }
+      if (url.startsWith("/api/schedule/")) {
+        if (init?.method === "PATCH") {
+          const body = JSON.parse(String(init.body));
+          return {
+            ok: true,
+            json: async () => ({
+              id: Number(url.split("/").pop()),
+              scheduled_for: body.scheduledFor,
+            }),
+          };
+        }
+        return { ok: deleted, json: async () => ({ deleted }) };
+      }
+      return { ok: false, json: async () => ({ error: "unexpected" }) };
     }
-    if (url.startsWith("/api/schedule/")) {
-      return { ok: deleted, json: async () => ({ deleted }) };
-    }
-    return { ok: false, json: async () => ({ error: "unexpected" }) };
-  });
+  );
 }
 
 async function flush() {
@@ -162,5 +196,229 @@ describe("CalendarPage Dashboard hand-off", () => {
     expect(
       within(sidebar).getAllByRole("button", { name: "Cancel on Facebook" })
     ).toHaveLength(1);
+  });
+});
+
+describe("CalendarPage reschedule", () => {
+  it("moves a workspace-scheduled post through PATCH", async () => {
+    respond([localPost]);
+
+    render(<CalendarPage />);
+    await flush();
+
+    const sidebar = screen
+      .getByRole("heading", { name: "Scheduled" })
+      .closest("section")!;
+    fireEvent.click(
+      within(sidebar).getByRole("button", { name: "Reschedule" })
+    );
+
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("New date and time"), {
+      target: { value: "2026-11-21T10:30" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Reschedule" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/schedule/51",
+        expect.objectContaining({ method: "PATCH" })
+      )
+    );
+    const patchCall = fetchMock.mock.calls.find(
+      ([, init]) => init?.method === "PATCH"
+    )!;
+    expect(JSON.parse(String(patchCall[1].body))).toEqual({
+      scheduledFor: new Date("2026-11-21T10:30").toISOString(),
+    });
+    await waitFor(() =>
+      expect(toastMock.success).toHaveBeenCalledWith("Scheduled post moved")
+    );
+  });
+
+  it("offers reschedule on Facebook-held schedules", async () => {
+    respond([reel]);
+
+    render(<CalendarPage />);
+    await flush();
+
+    expect(
+      screen.getAllByRole("button", { name: "Reschedule" }).length
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getAllByRole("button", { name: "Cancel on Facebook" }).length
+    ).toBeGreaterThan(0);
+  });
+
+  it("hides reschedule for platforms that cannot move a schedule", async () => {
+    respond([youtubePost]);
+
+    render(<CalendarPage />);
+    await flush();
+
+    expect(
+      screen.queryByRole("button", { name: "Reschedule" })
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows a spinner instead of text while the move is in flight", async () => {
+    let finishPatch!: (value: unknown) => void;
+    fetchMock.mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/schedule") {
+          return { ok: true, json: async () => [localPost] };
+        }
+        if (init?.method === "PATCH") {
+          return new Promise((resolve) => {
+            finishPatch = resolve;
+          });
+        }
+        return { ok: true, json: async () => ({ deleted: true }) };
+      }
+    );
+
+    render(<CalendarPage />);
+    await flush();
+
+    const sidebar = screen
+      .getByRole("heading", { name: "Scheduled" })
+      .closest("section")!;
+    fireEvent.click(
+      within(sidebar).getByRole("button", { name: "Reschedule" })
+    );
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Reschedule" }));
+
+    const busy = await within(dialog).findByRole("button", {
+      name: "Rescheduling…",
+    });
+    expect(busy).toBeDisabled();
+    // Icon only: the busy state is a spinner, not copy.
+    expect(busy.textContent).toBe("");
+
+    finishPatch({
+      ok: true,
+      json: async () => ({
+        id: 51,
+        scheduled_for: new Date("2026-11-21T10:30").toISOString(),
+      }),
+    });
+    await waitFor(() =>
+      expect(toastMock.success).toHaveBeenCalledWith("Scheduled post moved")
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+  });
+
+  it("surfaces a platform refusal inside the dialog", async () => {
+    fetchMock.mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/schedule") {
+          return { ok: true, json: async () => [localPost] };
+        }
+        if (init?.method === "PATCH") {
+          return {
+            ok: false,
+            json: async () => ({
+              error: "That queue cannot move an existing schedule.",
+            }),
+          };
+        }
+        return { ok: true, json: async () => ({ deleted: true }) };
+      }
+    );
+
+    render(<CalendarPage />);
+    await flush();
+
+    const sidebar = screen
+      .getByRole("heading", { name: "Scheduled" })
+      .closest("section")!;
+    fireEvent.click(
+      within(sidebar).getByRole("button", { name: "Reschedule" })
+    );
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Reschedule" }));
+
+    expect(
+      await within(dialog).findByText("That queue cannot move an existing schedule.")
+    ).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("warns after a partial multi-Page move", async () => {
+    const warning =
+      "Facebook refused to move this item: (#10) permission denied. It did move on 1 of 2 Pages, so those are now at the new time.";
+    fetchMock.mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/schedule") {
+          return { ok: true, json: async () => [reel] };
+        }
+        if (init?.method === "PATCH") {
+          return {
+            ok: true,
+            json: async () => ({
+              id: 49,
+              scheduled_for: new Date("2026-12-05T10:30").toISOString(),
+              warning,
+            }),
+          };
+        }
+        return { ok: true, json: async () => ({ deleted: true }) };
+      }
+    );
+
+    render(<CalendarPage />);
+    await flush();
+
+    const sidebar = screen
+      .getByRole("heading", { name: "Scheduled" })
+      .closest("section")!;
+    fireEvent.click(
+      within(sidebar).getByRole("button", { name: "Reschedule" })
+    );
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("New date and time"), {
+      target: { value: "2026-12-05T10:30" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Reschedule" }));
+
+    await waitFor(() =>
+      expect(toastMock.warning).toHaveBeenCalledWith(
+        "Moved on some Pages",
+        { description: warning }
+      )
+    );
+    expect(toastMock.success).not.toHaveBeenCalledWith("Scheduled post moved");
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+  });
+
+  it("caps a Facebook row's picker at Meta's 29-day window", async () => {
+    respond([reel]);
+
+    render(<CalendarPage />);
+    await flush();
+
+    const sidebar = screen
+      .getByRole("heading", { name: "Scheduled" })
+      .closest("section")!;
+    fireEvent.click(
+      within(sidebar).getByRole("button", { name: "Reschedule" })
+    );
+    const dialog = await screen.findByRole("dialog");
+    const input = within(dialog).getByLabelText(
+      "New date and time"
+    ) as HTMLInputElement;
+    const pad = (value: number) => String(value).padStart(2, "0");
+    const cap = new Date(Date.parse("2026-11-16T08:00:00Z") + 29 * 24 * 60 * 60 * 1000);
+    expect(input.max).toBe(
+      `${cap.getFullYear()}-${pad(cap.getMonth() + 1)}-${pad(cap.getDate())}T${pad(cap.getHours())}:${pad(cap.getMinutes())}`
+    );
   });
 });
