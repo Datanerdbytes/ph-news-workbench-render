@@ -13,6 +13,7 @@ import {
   notifyTokenInvalid,
   notifyWorkspace,
 } from '@/lib/notifications';
+import { recordNativeSchedule } from '@/lib/schedule-mirror';
 
 export const dynamic = 'force-dynamic';
 
@@ -65,6 +66,22 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'newsItemId is required.' }, { status: 400 });
   }
 
+  // Resolve the story and the draft this publish belongs to BEFORE the
+  // external call. Two things depend on picking them here: a draft
+  // regenerated while Facebook is answering must not be the one marked
+  // published, and only a story this workspace owns may be linked to the
+  // publish — the Activity feed joins news_items without a workspace
+  // predicate, so a foreign story id would leak its headline.
+  const [story] = (await sql`
+    SELECT n.id, d.id AS draft_id
+    FROM news_items n
+    LEFT JOIN drafts d
+      ON d.news_item_id = n.id AND d.workspace_id = ${access.workspace.id}
+    WHERE n.id = ${newsItemId} AND n.workspace_id = ${access.workspace.id}
+    ORDER BY d.id DESC
+    LIMIT 1
+  `) as unknown as { id: number; draft_id: number | null }[];
+
   // Optional target page — falls back to the workspace default (primary)
   // page, then to the legacy connection, matching every other composer.
   const requestedPageId =
@@ -99,13 +116,35 @@ export async function POST(request: Request) {
       images: parseImages(imageUrls),
     });
 
-    await sql`
-      UPDATE drafts SET status = 'published'
-      WHERE id = (
-        SELECT id FROM drafts
-        WHERE news_item_id = ${newsItemId} AND workspace_id = ${access.workspace.id}
-        ORDER BY id DESC LIMIT 1
-      )`;
+    if (story?.draft_id) {
+      await sql`
+        UPDATE drafts SET status = 'published'
+        WHERE id = ${story.draft_id}`;
+    }
+
+    // This route publishes straight away and used to leave no trace beyond
+    // the draft's status, so the Dashboard's published counters never saw a
+    // post made from the Story Queue. Mirroring it records the publish —
+    // linked to the story and the draft it published, so the activity log
+    // keeps one entry for it rather than the draft and the event side by
+    // side.
+    await recordNativeSchedule({
+      workspaceId: access.workspace.id,
+      userId: access.user.id,
+      kind: 'post',
+      text: message,
+      scheduledFor: null,
+      results: [
+        {
+          page: { id: target.id, name: target.name },
+          ok: true,
+          id: post.id,
+          permalink: post.permalink,
+        },
+      ],
+      newsItemId: story?.id ?? null,
+      draftId: story?.draft_id ?? null,
+    });
 
     return NextResponse.json({
       id: post.id,

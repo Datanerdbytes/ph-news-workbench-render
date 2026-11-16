@@ -5,7 +5,51 @@ test("renders the dashboard activity feed", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "Activity log" })
   ).toBeVisible();
-  await expect(page.getByText("Loading your workspace…")).toBeHidden();
+  // While the route hydrates the DOM can briefly hold two copies of the
+  // page, so the loading copy is located without insisting on a single
+  // match — the question is whether it is still visible.
+  await expect(page.getByText("Loading your workspace…").first()).toBeHidden();
+});
+
+test("renders the dashboard publishing stats", async ({ page }) => {
+  // Wait for the stats the page actually renders, not the zero state it
+  // paints before the response lands.
+  const analyticsResponse = page.waitForResponse((response) =>
+    response.url().includes("/api/analytics")
+  );
+  await page.goto("/dashboard");
+
+  const res = await analyticsResponse;
+  expect(res.ok()).toBeTruthy();
+  const data = await res.json();
+  const facebook = data.platforms.find(
+    (entry: { platform: string }) => entry.platform === "facebook"
+  );
+  expect(facebook).toBeTruthy();
+
+  // Same as above: the hydrating DOM can hold two copies, so nothing here
+  // may insist on a single match.
+  const totalCard = page
+    .locator("article")
+    .filter({ hasText: "Total published" })
+    .first();
+  await expect(totalCard).toBeVisible();
+  await expect(
+    totalCard.getByText(String(facebook.published.total), { exact: true })
+  ).toBeVisible();
+  await expect(
+    page
+      .getByText(new RegExp(`${facebook.published30d.total} in the last 30 days`))
+      .first()
+  ).toBeVisible();
+
+  // And the endpoint itself must answer with a platform breakdown — the
+  // dashboard swallows a failed stats call on purpose, so only the
+  // response catches a broken aggregation.
+  const apiRes = await page.request.get("/api/analytics");
+  expect(apiRes.ok()).toBeTruthy();
+  const apiData = await apiRes.json();
+  expect(apiData.platforms).toHaveLength(4);
 });
 
 test("renders the calendar with its scheduled sidebar", async ({ page }) => {

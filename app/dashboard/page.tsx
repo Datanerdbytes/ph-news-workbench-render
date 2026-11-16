@@ -9,11 +9,14 @@ import {
   Circle,
   Clock,
   FileText,
+  Images,
   Loader2,
-  Newspaper,
+  Play,
+  Radio,
   RefreshCw,
   RotateCcw,
-  TriangleAlert,
+  Send,
+  Video,
 } from "lucide-react";
 import { toast } from "sonner";
 import { AppFrame } from "@/components/app-frame";
@@ -60,6 +63,82 @@ type Activity = {
   scheduledPostId?: number | null;
   metadata?: Record<string, unknown> | null;
 };
+
+/** The platforms the Dashboard can report published counts for. */
+type DashboardPlatform = "facebook" | "instagram" | "youtube" | "tiktok";
+
+type PlatformStats = {
+  published: {
+    total: number;
+    post: number;
+    reel: number;
+    live: number;
+    story: number;
+  };
+  published30d: { total: number };
+};
+
+type PlatformStatsByName = Record<DashboardPlatform, PlatformStats>;
+
+/** The part of the /api/analytics response the dashboard reads. */
+type AnalyticsResponse = {
+  platforms?: Array<{
+    platform?: string;
+    published?: PlatformStats["published"];
+    published30d?: PlatformStats["published30d"];
+  }>;
+};
+
+const PLATFORM_PILLS: Array<{ platform: DashboardPlatform; name: string }> = [
+  { platform: "facebook", name: "Facebook" },
+  { platform: "instagram", name: "Instagram" },
+  { platform: "youtube", name: "YouTube" },
+  { platform: "tiktok", name: "TikTok" },
+];
+
+function emptyPlatformStats(): PlatformStatsByName {
+  const empty = (): PlatformStats => ({
+    published: { total: 0, post: 0, reel: 0, live: 0, story: 0 },
+    published30d: { total: 0 },
+  });
+  return {
+    facebook: empty(),
+    instagram: empty(),
+    youtube: empty(),
+    tiktok: empty(),
+  };
+}
+
+/** Keeps only the platforms the Dashboard knows, so a stray row cannot leak in. */
+function readPlatformStats(
+  rows: AnalyticsResponse["platforms"]
+): PlatformStatsByName {
+  const stats = emptyPlatformStats();
+
+  for (const row of rows ?? []) {
+    const name = row?.platform;
+    if (
+      name !== "facebook" &&
+      name !== "instagram" &&
+      name !== "youtube" &&
+      name !== "tiktok"
+    ) {
+      continue;
+    }
+    stats[name] = {
+      published: {
+        total: row.published?.total ?? 0,
+        post: row.published?.post ?? 0,
+        reel: row.published?.reel ?? 0,
+        live: row.published?.live ?? 0,
+        story: row.published?.story ?? 0,
+      },
+      published30d: { total: row.published30d?.total ?? 0 },
+    };
+  }
+
+  return stats;
+}
 
 const PLANNED = [
   { platform: "instagram" as const, name: "Instagram", gate: "Meta App Review" },
@@ -122,12 +201,95 @@ function RetryButton({
   );
 }
 
+/**
+ * The stat cards for the selected platform. Every platform leads with the
+ * all-time total; the format cards follow the formats that platform's
+ * pipeline actually tracks — no zero-cards for formats it never records.
+ */
+function platformStatCards(
+  platform: DashboardPlatform,
+  stats: PlatformStats,
+  failed: boolean
+): Array<{ label: string; value: number; hint: string; icon: typeof FileText }> {
+  const total: {
+    label: string;
+    value: number;
+    hint: string;
+    icon: typeof FileText;
+  } = {
+    label: "Total published",
+    value: stats.published.total,
+    hint: failed
+      ? "Publishing stats unavailable"
+      : `${stats.published30d.total} in the last 30 days`,
+    icon: Send,
+  };
+
+  if (platform === "instagram") {
+    return [
+      total,
+      {
+        label: "Post",
+        value: stats.published.post,
+        hint: "Feed posts",
+        icon: FileText,
+      },
+    ];
+  }
+
+  if (platform === "youtube" || platform === "tiktok") {
+    // These platforms only track one format, so their total IS the video
+    // count — the card names the format instead of repeating the total.
+    return [
+      total,
+      {
+        label: "Videos",
+        value: stats.published.total,
+        hint: "Published videos",
+        icon: Video,
+      },
+    ];
+  }
+
+  return [
+    total,
+    {
+      label: "Post",
+      value: stats.published.post,
+      hint: "Feed posts",
+      icon: FileText,
+    },
+    {
+      label: "Reels",
+      value: stats.published.reel,
+      hint: "Short-form reels",
+      icon: Play,
+    },
+    {
+      label: "Live",
+      value: stats.published.live,
+      hint: "Live broadcasts",
+      icon: Radio,
+    },
+    {
+      label: "Stories",
+      value: stats.published.story,
+      hint: "Story posts",
+      icon: Images,
+    },
+  ];
+}
+
 export default function DashboardPage() {
   const connection = useFacebookConnection();
   const { data: session } = authClient.useSession();
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [stories, setStories] = useState<Story[]>([]);
   const [activities, setActivities] = useState<Activity[]>([]);
+  const [platform, setPlatform] = useState<DashboardPlatform>("facebook");
+  const [platformStats, setPlatformStats] =
+    useState<PlatformStatsByName>(emptyPlatformStats);
+  const [statsFailed, setStatsFailed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -137,11 +299,17 @@ export default function DashboardPage() {
 
   const load = useCallback(async () => {
     try {
-      const [draftsRes, itemsRes, activitiesRes] = await Promise.all([
-        fetch("/api/drafts", { cache: "no-store" }),
-        fetch("/api/items", { cache: "no-store" }),
-        fetch("/api/activity?mergeByStory=false&dedupe=false&limit=10", { cache: "no-store" }),
-      ]);
+      const [draftsRes, itemsRes, activitiesRes, analyticsRes] =
+        await Promise.all([
+          fetch("/api/drafts", { cache: "no-store" }),
+          fetch("/api/items", { cache: "no-store" }),
+          fetch("/api/activity?mergeByStory=false&dedupe=false&limit=10", {
+            cache: "no-store",
+          }),
+          // A rejected stats request must not reject the whole load — the
+          // counters are their own failure.
+          fetch("/api/analytics", { cache: "no-store" }).catch(() => null),
+        ]);
 
       if (!draftsRes.ok || !itemsRes.ok || !activitiesRes.ok) {
         throw new Error("Could not load the workspace.");
@@ -161,6 +329,24 @@ export default function DashboardPage() {
       setActivities(
         Array.isArray(activityData) ? activityData : (activityData.rows ?? [])
       );
+
+      // The publishing counters are their own failure: a hiccup there (a
+      // network error, a 500, an unreadable body) must not take the
+      // activity log down with it. The cards show a dash instead of a fake
+      // zero.
+      const analyticsData = analyticsRes?.ok
+        ? ((await analyticsRes.json().catch(() => null)) as AnalyticsResponse | null)
+        : null;
+      const platforms = analyticsData?.platforms;
+
+      if (Array.isArray(platforms)) {
+        setPlatformStats(readPlatformStats(platforms));
+        setStatsFailed(false);
+      } else {
+        setPlatformStats(emptyPlatformStats());
+        setStatsFailed(true);
+      }
+
       if (!Array.isArray(activityData)) {
         setNextCursor(
           typeof activityData.nextCursor === "number"
@@ -229,19 +415,14 @@ export default function DashboardPage() {
   }
 
   const ready = drafts.filter((draft) => draft.status === "drafted").length;
-  const failed = drafts.filter((draft) => draft.status === "failed").length;
   const pending = stories.filter((story) => story.status === "pending").length;
   const published = stories.filter(
     (story) => story.status === "published"
   ).length;
-  const recent = drafts.slice(0, 5);
   const firstName = session?.user?.name?.split(/\s+/)[0];
 
-  // Activity stats
-  const scheduledCount = activities.filter((a) => a.type === "schedule" && a.event === "scheduled").length;
-  const publishedCount = activities.filter((a) => a.type === "schedule" && a.event === "published").length;
-  const draftCount = activities.filter((a) => a.type === "draft").length;
-  const failedCount = activities.filter((a) => a.type === "schedule" && a.event === "failed").length;
+  const stats = platformStats[platform];
+  const statCards = platformStatCards(platform, stats, statsFailed);
 
   const steps = [
     {
@@ -337,29 +518,50 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        <div className="mt-5 grid grid-cols-2 gap-2.5 xl:grid-cols-4">
-          <StatCard
-            label="Waiting for review"
-            value={ready}
-            hint="Drafts waiting for review"
-            icon={FileText}
-            loading={loading || loadError}
-          />
-          <StatCard
-            label="Stories in queue"
-            value={pending}
-            hint={`${stories.length} tracked in total`}
-            icon={Newspaper}
-            loading={loading || loadError}
-          />
-          <StatCard
-            label="Failed drafts"
-            value={failed}
-            hint={failed ? "Needs attention" : "No failures"}
-            icon={TriangleAlert}
-            loading={loading || loadError}
-            tone={failed ? "text-destructive" : undefined}
-          />
+        <div
+          className="mt-5 flex flex-wrap items-center gap-2"
+          role="group"
+          aria-label="Publishing platform"
+        >
+          <span className="mr-1 text-[10px] font-bold uppercase tracking-[0.13em] text-muted-foreground">
+            Platform
+          </span>
+          {PLATFORM_PILLS.map((pill) => {
+            const active = platform === pill.platform;
+            return (
+              <button
+                key={pill.platform}
+                type="button"
+                onClick={() => setPlatform(pill.platform)}
+                aria-pressed={active}
+                className={cn(
+                  "inline-flex items-center gap-2 rounded-full border px-2.5 py-1.5 text-[11.5px] font-semibold transition-colors",
+                  active
+                    ? "border-transparent bg-ink text-paper"
+                    : "border-border bg-card text-muted-foreground hover:bg-surface-2 hover:text-foreground"
+                )}
+              >
+                <PlatformMark
+                  platform={pill.platform}
+                  className="size-4 rounded-[5px]"
+                />
+                {pill.name}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 gap-2.5 xl:grid-cols-6">
+          {statCards.map((card) => (
+            <StatCard
+              key={card.label}
+              label={card.label}
+              value={card.value}
+              hint={card.hint}
+              icon={card.icon}
+              loading={loading || loadError || statsFailed}
+            />
+          ))}
           <article className="panel col-span-2 p-4 xl:col-span-1">
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-bold uppercase tracking-[0.13em] text-muted-foreground">

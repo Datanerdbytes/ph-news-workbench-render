@@ -175,6 +175,96 @@ describe("recordNativeSchedule", () => {
     );
   });
 
+  it("mirrors TikTok publishes as source='tiktok' rows", async () => {
+    await recordNativeSchedule({
+      workspaceId: "ws1",
+      userId: "u1",
+      kind: "video",
+      text: "Newsroom cut",
+      scheduledFor: null,
+      results: [
+        {
+          page: { id: "tt_1", name: "@dailybuzz" },
+          ok: true,
+          id: "tt_video_1",
+          permalink: "https://www.tiktok.com/@dailybuzz/video/tt_video_1",
+        },
+      ],
+      platform: "tiktok",
+    });
+
+    expect(insertValues()[7]).toBe("tiktok");
+    expect(insertValues()[8]).toBe("tt_video_1");
+    expect(insertValues()[10]).toBe("tt_1");
+    expect(insertValues()[5]).toBe("published");
+    expect(events()[0]).toMatchObject({
+      event: "published",
+      metadata: { executor: "tiktok", kind: "video" },
+    });
+  });
+
+  it("uses a platform-neutral failure message for TikTok", async () => {
+    await recordNativeSchedule({
+      workspaceId: "ws1",
+      userId: "u1",
+      kind: "video",
+      text: "x",
+      scheduledFor: null,
+      results: [failedResult()],
+      platform: "tiktok",
+    });
+
+    expect(insertValues()[11]).toBe(
+      "TikTok rejected the publish on every selected target."
+    );
+  });
+
+  it("records Facebook stories as kind='story'", async () => {
+    await recordNativeSchedule({
+      workspaceId: "ws1",
+      userId: "u1",
+      kind: "story",
+      text: "",
+      scheduledFor: null,
+      results: [okResult("story_1")],
+    });
+
+    expect(insertValues()[6]).toBe("story");
+    expect(insertValues()[7]).toBe("facebook");
+    expect(insertValues()[5]).toBe("published");
+    expect(events()[0]).toMatchObject({
+      event: "published",
+      metadata: { kind: "story", executor: "facebook" },
+    });
+  });
+
+  it("mirrors immediate Instagram publishes as source='instagram' rows", async () => {
+    await recordNativeSchedule({
+      workspaceId: "ws1",
+      userId: "u1",
+      kind: "instagram-post",
+      text: "Behind the headline",
+      scheduledFor: null,
+      results: [
+        {
+          page: { id: "ig1", name: "iamwowie_" },
+          ok: true,
+          id: "ig_media_1",
+          permalink: "https://www.instagram.com/p/xyz",
+        },
+      ],
+      platform: "instagram",
+    });
+
+    expect(insertValues()[6]).toBe("instagram-post");
+    expect(insertValues()[7]).toBe("instagram");
+    expect(insertValues()[5]).toBe("published");
+    expect(events()[0]).toMatchObject({
+      event: "published",
+      metadata: { kind: "instagram-post", executor: "instagram" },
+    });
+  });
+
   it("never lets a recording failure fail the publish", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     sqlMock.mockRejectedValue(new Error("connection refused"));
