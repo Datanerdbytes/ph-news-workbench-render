@@ -9,11 +9,15 @@ import {
   CalendarClock,
   Copy,
   ImagePlus,
+  Loader2,
   Newspaper,
   PenLine,
+  Play,
   RefreshCw,
   Sparkles,
   Trash2,
+  TriangleAlert,
+  Upload,
   X,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -25,8 +29,11 @@ import { useFacebookConnection } from '@/components/facebook-connection';
 import { FacebookPreview } from '@/components/facebook-preview';
 import {
   ComposerCard,
+  FieldLabel,
+  FilePicker,
   PageSelector,
   defaultScheduleValue,
+  mediaFileError,
   scheduleBounds,
   useManagedPages,
   useScheduleClock,
@@ -43,21 +50,29 @@ import {
   timeAgo,
   wordCount,
 } from '@/lib/format';
+import { stageUpload } from '@/lib/stage-client';
+import { deleteStagedBlob } from '@/lib/blob-cleanup';
 import { fetchQueueItem, fetchQueuePage, type QueueItem } from '@/lib/story-queue';
+import {
+  MediaPreviewCard,
+  MediaPreviewMedia,
+} from '@/components/publishing/media-preview-card';
+
+const MAX_MESSAGE_LENGTH = 5000;
+const MAX_IMAGES = 10;
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 1024 * 1024 * 1024;
+const ALLOWED_IMAGE_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
 
 type DraftStats = {
   inputTokens: number;
   outputTokens: number;
   estimatedCost: number;
 };
-
-const MAX_IMAGES = 10;
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
-const ALLOWED_IMAGE_TYPES = new Set([
-  'image/jpeg',
-  'image/png',
-  'image/webp',
-]);
 
 function WorkspaceSkeleton() {
   return (
@@ -116,6 +131,16 @@ function ComposeWorkspace() {
   const [images, setImages] = useState<string[]>([]);
   const [imagesBusy, setImagesBusy] = useState(false);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  // Optional video attachment — one media type per post: attaching a video
+  // clears the images, attaching an image clears the video. The file stages
+  // straight from the browser to storage; publish/schedule reference the URL.
+  const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [videoPreviewUrl, setVideoPreviewUrl] = useState<string | null>(null);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [videoStaging, setVideoStaging] = useState(false);
+  const [videoStagingFailed, setVideoStagingFailed] = useState(false);
+  const [videoPct, setVideoPct] = useState<number | null>(null);
+  const [videoPreviewFailed, setVideoPreviewFailed] = useState(false);
   const selectionRef = useRef<number | null>(null);
   const [itemsLoading, setItemsLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -211,6 +236,47 @@ function ComposeWorkspace() {
     }
   }, []);
 
+  // One media type per post: a video attachment replaces the images, and
+  // picking an image drops the video (plus its staged blob).
+  function applyVideoFile(next: File | null) {
+    if (videoPreviewUrl) URL.revokeObjectURL(videoPreviewUrl);
+    if (videoUrl) deleteStagedBlob(videoUrl);
+    setVideoFile(next);
+    setVideoPreviewUrl(next ? URL.createObjectURL(next) : null);
+    setVideoUrl(null);
+    setVideoPct(null);
+    setVideoStagingFailed(false);
+    setVideoPreviewFailed(false);
+    if (next) {
+      setImages([]);
+      void stageVideo(next);
+    }
+  }
+
+  async function stageVideo(file: File) {
+    setVideoStaging(true);
+    try {
+      const staged = await stageUpload(
+        `compose/${Date.now()}-${file.name.replace(/[^\w.-]+/g, '_')}`,
+        file,
+        {
+          contentType: file.type,
+          onUploadProgress: ({ percentage }) => setVideoPct(Math.round(percentage)),
+        },
+      );
+      setVideoUrl(staged.url);
+    } catch (error) {
+      setVideoStagingFailed(true);
+      toast.error('Video staging failed', {
+        description:
+          error instanceof Error ? error.message : 'The video could not be staged.',
+      });
+    } finally {
+      setVideoStaging(false);
+      setVideoPct(null);
+    }
+  }
+
   useEffect(() => {
     if (selectedId === lastLoadedIdRef.current) return;
     lastLoadedIdRef.current = selectedId ?? null;
@@ -218,6 +284,7 @@ function ComposeWorkspace() {
     setDraft('');
     setStats(null);
     setImages([]);
+    applyVideoFile(null);
     setConfirmDelete(false);
     setScheduleOpen(false);
     setDraftLoadFailed(false);
@@ -295,6 +362,8 @@ function ComposeWorkspace() {
   async function addImages(files: FileList | File[]) {
     const picked = Array.from(files);
     if (!picked.length) return;
+    // One media type per post — picking images drops an attached video.
+    if (videoFile || videoUrl) applyVideoFile(null);
 
     const room = MAX_IMAGES - images.length;
     if (room <= 0) {
@@ -344,6 +413,8 @@ function ComposeWorkspace() {
 
   async function schedulePost() {
     if (!selected || !draft.trim()) return;
+    // A video must finish staging before the post can be scheduled.
+    if (videoFile && !videoUrl) return;
     const schedule = resolveScheduledFor(scheduledFor);
     if (schedule.iso === null) {
       setScheduleError(schedule.error);
@@ -360,7 +431,7 @@ function ComposeWorkspace() {
           newsItemId: selected.id,
           draftId: selected.draft_id ?? undefined,
           text: draft,
-          imageUrls: images,
+          ...(videoUrl ? { videoUrl } : { imageUrls: images }),
           scheduledFor: schedule.iso,
           pageId: pages.selected[0],
         }),
@@ -402,6 +473,7 @@ function ComposeWorkspace() {
         setDraft('');
         setStats(null);
         setImages([]);
+        applyVideoFile(null);
         setConfirmDelete(false);
       }
       await load();
@@ -420,6 +492,8 @@ function ComposeWorkspace() {
 
   async function publish() {
     if (!selected || !draft.trim()) return;
+    // A video must finish staging before the post can go out.
+    if (videoFile && !videoUrl) return;
 
     if (!facebook.scopes.includes('pages_manage_posts')) {
       toast.error('Publishing permission missing', {
@@ -437,7 +511,7 @@ function ComposeWorkspace() {
         body: JSON.stringify({
           newsItemId: selected.id,
           message: draft,
-          imageUrls: images,
+          ...(videoUrl ? { videoUrl } : { imageUrls: images }),
           pageId: pages.selected[0],
         }),
       });
@@ -641,59 +715,122 @@ function ComposeWorkspace() {
                   </div>
 
                   <div className="border-t border-border/60 px-5 py-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      {images.map((source, index) => (
-                        <div
-                          key={`${index}-${source.slice(-24)}`}
-                          className="group relative"
+                    {videoFile ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background/60 px-2 py-1 text-[11px] font-medium">
+                          <Play className="size-3 text-brand" aria-hidden />
+                          <span className="max-w-[260px] truncate">
+                            {videoFile.name}
+                          </span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => applyVideoFile(null)}
+                          aria-label="Remove video"
+                          className="tap-target grid size-6 place-items-center rounded-full border border-border bg-card text-faint shadow-sm transition-colors hover:border-destructive/40 hover:text-destructive"
                         >
-                          <img
-                            src={imageSrc(source)}
-                            alt={`Attachment ${index + 1}`}
-                            className="size-16 rounded-md border border-border object-cover"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => removeImage(index)}
-                            aria-label={`Remove attachment ${index + 1}`}
-                            className="tap-target absolute -right-1.5 -top-1.5 grid size-6 place-items-center rounded-full border border-border bg-card text-faint shadow-sm transition-colors hover:border-destructive/40 hover:text-destructive"
+                          <X className="size-3" aria-hidden />
+                        </button>
+                        <span className="ml-auto inline-flex items-center gap-1.5 text-[10px] tabular-nums text-muted-foreground">
+                          {videoStaging ? (
+                            <>
+                              <Loader2
+                                className="size-3 animate-spin"
+                                aria-hidden
+                              />
+                              {videoPct != null
+                                ? `Staging ${videoPct}%…`
+                                : 'Staging video…'}
+                            </>
+                          ) : videoStagingFailed ? (
+                            <span className="text-destructive">
+                              Staging failed
+                            </span>
+                          ) : videoUrl ? (
+                            'Video ready'
+                          ) : (
+                            'Staging…'
+                          )}
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap items-center gap-2">
+                        {images.map((source, index) => (
+                          <div
+                            key={`${index}-${source.slice(-24)}`}
+                            className="group relative"
                           >
-                            <X className="size-3" aria-hidden />
-                          </button>
-                        </div>
-                      ))}
-                      <button
-                        type="button"
-                        onClick={() => imageInputRef.current?.click()}
-                        disabled={imagesBusy || images.length >= MAX_IMAGES}
-                        aria-label="Add images to the post"
-                        title={`Attach up to ${MAX_IMAGES} images`}
-                        className="grid size-16 place-items-center rounded-md border border-dashed border-border text-faint transition-colors hover:border-brand/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        {imagesBusy ? (
-                          <RefreshCw
-                            className="size-4 animate-spin"
-                            aria-hidden
-                          />
-                        ) : (
-                          <ImagePlus className="size-4" aria-hidden />
-                        )}
-                      </button>
-                      <input
-                        ref={imageInputRef}
-                        type="file"
-                        accept="image/jpeg,image/png,image/webp"
-                        multiple
-                        tabIndex={-1}
-                        className="sr-only"
-                        onChange={(event) =>
-                          void addImages(event.target.files ?? [])
-                        }
-                      />
-                      <span className="ml-auto text-[10px] tabular-nums text-muted-foreground">
-                        {images.length}/{MAX_IMAGES} images
-                      </span>
-                    </div>
+                            <img
+                              src={imageSrc(source)}
+                              alt={`Attachment ${index + 1}`}
+                              className="size-16 rounded-md border border-border object-cover"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => removeImage(index)}
+                              aria-label={`Remove attachment ${index + 1}`}
+                              className="tap-target absolute -right-1.5 -top-1.5 grid size-6 place-items-center rounded-full border border-border bg-card text-faint shadow-sm transition-colors hover:border-destructive/40 hover:text-destructive"
+                            >
+                              <X className="size-3" aria-hidden />
+                            </button>
+                          </div>
+                        ))}
+                        <button
+                          type="button"
+                          onClick={() => imageInputRef.current?.click()}
+                          disabled={imagesBusy || images.length >= MAX_IMAGES}
+                          aria-label="Add images to the post"
+                          title={`Attach up to ${MAX_IMAGES} images`}
+                          className="grid size-16 place-items-center rounded-md border border-dashed border-border text-faint transition-colors hover:border-brand/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {imagesBusy ? (
+                            <RefreshCw
+                              className="size-4 animate-spin"
+                              aria-hidden
+                            />
+                          ) : (
+                            <ImagePlus className="size-4" aria-hidden />
+                          )}
+                        </button>
+                        <input
+                          ref={imageInputRef}
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp"
+                          multiple
+                          tabIndex={-1}
+                          className="sr-only"
+                          onChange={(event) =>
+                            void addImages(event.target.files ?? [])
+                          }
+                        />
+                        <span className="ml-auto text-[10px] tabular-nums text-muted-foreground">
+                          {images.length}/{MAX_IMAGES} images
+                        </span>
+                      </div>
+                    )}
+                    {!videoFile && !images.length && (
+                      <div className="mt-2">
+                        <FilePicker
+                          id="compose-video"
+                          accept="video/mp4,video/quicktime"
+                          label="Attach a video — optional"
+                          hint="MP4/MOV · 1 GB max"
+                          file={videoFile}
+                          onPick={applyVideoFile}
+                          onClear={() => applyVideoFile(null)}
+                          icon={<Upload className="size-3.5" />}
+                          validate={(picked) =>
+                            mediaFileError(picked, {
+                              types: ['video/mp4', 'video/quicktime'],
+                              extensions: ['.mp4', '.mov'],
+                              typeLabel: 'an MP4 or MOV file',
+                              maxBytes: MAX_VIDEO_BYTES,
+                              maxLabel: '1 GB',
+                            })
+                          }
+                        />
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex flex-wrap items-end justify-between gap-3 border-t border-border/60 bg-muted/30 px-5 py-3">
@@ -766,6 +903,8 @@ function ComposeWorkspace() {
                             !facebook.connected ||
                             !pages.selected.length ||
                             publishing ||
+                            videoStaging ||
+                            Boolean(videoFile && !videoUrl) ||
                             selected?.status === 'published'
                           }
                           title={publishHint}
@@ -782,6 +921,8 @@ function ComposeWorkspace() {
                             !draft ||
                             !facebook.connected ||
                             !pages.selected.length ||
+                            videoStaging ||
+                            Boolean(videoFile && !videoUrl) ||
                             selected?.status === 'published'
                           }
                           aria-expanded={scheduleOpen}
@@ -898,15 +1039,40 @@ function ComposeWorkspace() {
                 </section>
 
                 <div className="xl:col-start-2 xl:row-span-2 xl:sticky xl:top-5">
-                  <FacebookPreview
-                    text={stripMarkdown(draft)}
-                    imageUrls={images}
-                    connected={facebook.connected}
-                    pageName={
-                      selectedPage?.name ?? facebook.page?.name
-                    }
-                    pagePicture={selectedPage?.picture}
-                  />
+                  {videoFile && videoPreviewUrl && !videoPreviewFailed ? (
+                    <MediaPreviewCard
+                      statusLabel={videoUrl ? 'Ready to publish' : 'Staging…'}
+                      ready={Boolean(videoUrl)}
+                      label="Video"
+                      footer={
+                        <p className="truncate text-[12px] font-semibold">
+                          {videoFile.name}
+                        </p>
+                      }
+                    >
+                      <MediaPreviewMedia className="aspect-video">
+                        <video
+                          key={videoPreviewUrl}
+                          src={videoPreviewUrl}
+                          controls
+                          playsInline
+                          preload="metadata"
+                          onError={() => setVideoPreviewFailed(true)}
+                          className="h-full w-full object-contain"
+                        />
+                      </MediaPreviewMedia>
+                    </MediaPreviewCard>
+                  ) : (
+                    <FacebookPreview
+                      text={stripMarkdown(draft)}
+                      imageUrls={images}
+                      connected={facebook.connected}
+                      pageName={
+                        selectedPage?.name ?? facebook.page?.name
+                      }
+                      pagePicture={selectedPage?.picture}
+                    />
+                  )}
                 </div>
 
               </div>

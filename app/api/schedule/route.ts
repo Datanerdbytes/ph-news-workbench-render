@@ -56,14 +56,21 @@ export async function POST(request: Request) {
 
   const newsItemId = Number(body?.newsItemId);
   const draftId = Number(body?.draftId);
+  // A video attachment changes the post kind — Facebook has no image-plus-
+  // video feed post, so video wins and imageUrls are ignored.
+  const videoUrl =
+    typeof body?.videoUrl === "string" && body.videoUrl ? body.videoUrl : null;
   const rawImages = Array.isArray(body?.imageUrls)
     ? body.imageUrls
     : typeof body?.imageUrl === "string"
       ? [body.imageUrl]
       : [];
-  const imageUrls = rawImages
-    .filter((value: unknown): value is string => typeof value === "string" && value.length > 0)
-    .slice(0, MAX_POST_IMAGES);
+  const imageUrls = videoUrl
+    ? []
+    : rawImages
+        .filter((value: unknown): value is string => typeof value === "string" && value.length > 0)
+        .slice(0, MAX_POST_IMAGES);
+  const kind = videoUrl ? "video" : "post";
 
   // Optional target page — validated against the workspace's connected pages;
   // null lets the executor fall back to the default (primary) page.
@@ -86,15 +93,15 @@ export async function POST(request: Request) {
 
   const rows = (await sql`
     INSERT INTO scheduled_posts
-      (workspace_id, news_item_id, draft_id, text, image_url, image_urls, scheduled_for, page_id, created_by)
+      (workspace_id, news_item_id, draft_id, text, image_url, image_urls, scheduled_for, kind, page_id, created_by)
     VALUES
       (${access.workspace.id},
        ${Number.isInteger(newsItemId) && newsItemId > 0 ? newsItemId : null},
        ${Number.isInteger(draftId) && draftId > 0 ? draftId : null},
        ${text},
-       ${imageUrls[0] ?? null},
+       ${videoUrl ?? imageUrls[0] ?? null},
        ${imageUrls.length ? JSON.stringify(imageUrls) : null}::jsonb,
-       ${scheduledFor.toISOString()}, ${scheduledPageId}, ${access.user.id})
+       ${scheduledFor.toISOString()}, ${kind}, ${scheduledPageId}, ${access.user.id})
     RETURNING id, news_item_id, scheduled_for, status`) as unknown as {
     id: number;
     news_item_id: number | null;
