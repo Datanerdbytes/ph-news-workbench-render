@@ -66,9 +66,16 @@ function useDb(overrides: {
   claimRow?: unknown[];
   stuck?: unknown[];
   native?: unknown[];
+  staleRescheduling?: unknown[];
+  updatedRows?: unknown[];
 }) {
   sqlMock.mockImplementation(async (strings: TemplateStringsArray) => {
     const query = strings.join(" ");
+    if (
+      query.includes("WHERE status = 'rescheduling'") &&
+      query.includes("interval '10 minutes'")
+    )
+      return overrides.staleRescheduling ?? [];
     if (query.includes("attempts = attempts + 1"))
       // Per-row conditional claim — succeeds unless the test overrides it.
       // attempts mirrors the fixture's pre-claim value + 1.
@@ -77,6 +84,8 @@ function useDb(overrides: {
     if (query.includes("status = 'publishing'")) return overrides.stuck ?? [];
     if (query.includes("source IN ('facebook', 'youtube')"))
       return overrides.native ?? [];
+    if (query.includes("RETURNING id"))
+      return overrides.updatedRows ?? [{ id: 1 }];
     return [];
   });
 }
@@ -229,6 +238,30 @@ describe("publishDuePosts", () => {
     });
     expect(publishPagePost).not.toHaveBeenCalled();
     expect(events()).toEqual([]);
+  });
+
+  it("skips a candidate rescheduled into the future before the publish claim", async () => {
+    useDb({
+      claim: [claimedRow()],
+      claimRow: [], // the claim matches scheduled_for <= now(), returning empty when rescheduled
+    });
+    vi.mocked(getPrimaryPage).mockResolvedValue({
+      pageId: "pg1",
+      token: "tok",
+    });
+
+    await expect(publishDuePosts({ source: "scheduler" })).resolves.toMatchObject({
+      due: 1,
+      published: 0,
+      failed: 0,
+    });
+    expect(publishPagePost).not.toHaveBeenCalled();
+    expect(events()).toEqual([]);
+
+    const claimCalls = sqlMock.mock.calls
+      .map((call) => (call[0] as TemplateStringsArray).join(" "))
+      .filter((text) => text.includes("attempts = attempts + 1"));
+    expect(claimCalls[0]).toContain("scheduled_for <= now()");
   });
 
   it("redacts token material from Facebook error messages", async () => {
@@ -642,6 +675,69 @@ describe("syncNativeSchedules", () => {
       expect(events()[0]).toMatchObject({
         event: "failed",
         errorMessage: "YouTube did not return an id for this upload.",
+      });
+    });
+
+    describe("stale rescheduling claim recovery", () => {
+      it("resets a stale rescheduling claim older than 10 minutes to scheduled with confirmed intended time", async () => {
+        const intendedTime = minutesAgo(-120);
+        useDb({
+          staleRescheduling: [
+            {
+              id: 42,
+              workspace_id: "ws1",
+              source: "facebook",
+              kind: "post",
+              facebook_post_id: "fb_stale",
+              page_id: "pg1",
+              scheduled_for: minutesAgo(30),
+              error_message: JSON.stringify({
+                claim: "c1",
+                intended: intendedTime,
+              }),
+            },
+          ],
+        });
+        vi.mocked(resolvePageToken).mockResolvedValue("tok");
+        vi.mocked(isFacebookStillScheduled).mockResolvedValue(true);
+
+        await syncNativeSchedules();
+
+        const updateCalls = sqlMock.mock.calls
+          .map((call) => (call[0] as TemplateStringsArray).join(" "))
+          .filter(
+            (text) =>
+              text.includes("SET status = 'scheduled'") &&
+              text.includes("status = 'rescheduling'")
+          );
+        expect(updateCalls.length).toBeGreaterThan(0);
+      });
+
+      it("leaves a recent rescheduling row unchanged", async () => {
+        // Query for stale rescheduling claims older than 10 minutes returns empty
+        useDb({ staleRescheduling: [] });
+
+        await syncNativeSchedules();
+
+        const updateCalls = sqlMock.mock.calls
+          .map((call) => (call[0] as TemplateStringsArray).join(" "))
+          .filter(
+            (text) =>
+              text.includes("SET status = 'scheduled'") &&
+              text.includes("status = 'rescheduling'")
+          );
+        expect(updateCalls).toHaveLength(0);
+      });
+
+      it("does not fail a post if it was rescheduled while the probe was in flight", async () => {
+        useDb({
+          native: [nativeRow({ scheduled_for: minutesAgo(90) })],
+          // Conditional update matches scheduled_for, simulating row moved by concurrent PATCH
+          updatedRows: [],
+        });
+
+        await expect(syncNativeSchedules()).resolves.toBe(0);
+        expect(events()).toEqual([]);
       });
     });
   });

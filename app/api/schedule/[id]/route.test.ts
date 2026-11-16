@@ -7,6 +7,7 @@ const {
   resolvePageTokenMock,
   rescheduleMock,
   heldMock,
+  cancelMock,
 } = vi.hoisted(() => ({
   sqlMock: vi.fn(),
   requireWorkspaceMock: vi.fn(),
@@ -14,6 +15,7 @@ const {
   resolvePageTokenMock: vi.fn(),
   rescheduleMock: vi.fn(),
   heldMock: vi.fn(),
+  cancelMock: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({ sql: sqlMock }));
@@ -29,7 +31,7 @@ vi.mock("@/lib/schedule-events", () => ({
   recordScheduleEvent: recordEventMock,
 }));
 vi.mock("@/lib/facebook", () => ({
-  cancelFacebookScheduledPost: vi.fn(),
+  cancelFacebookScheduledPost: cancelMock,
   isFacebookStillScheduled: heldMock,
   rescheduleFacebookScheduledPost: rescheduleMock,
 }));
@@ -52,6 +54,16 @@ const localRow = {
   facebook_post_id: null,
   facebook_post_ids: null,
   page_id: null,
+};
+
+const facebookRow = {
+  ...localRow,
+  source: "facebook",
+  facebook_post_id: "vid9",
+  page_id: "pg1",
+  facebook_post_ids: [
+    { id: "vid9", ok: true, page: { id: "pg1", name: "The Daily Buzz" } },
+  ],
 };
 
 const NEW_TIME = "2026-11-21T02:30:00.000Z";
@@ -126,15 +138,6 @@ describe("PATCH /api/schedule/[id]", () => {
   });
 
   describe("Facebook-held rows", () => {
-    const facebookRow = {
-      ...localRow,
-      source: "facebook",
-      facebook_post_id: "vid9",
-      page_id: "pg1",
-      facebook_post_ids: [
-        { id: "vid9", ok: true, page: { id: "pg1", name: "The Daily Buzz" } },
-      ],
-    };
     const NEW_UNIX = Math.floor(Date.parse(NEW_TIME) / 1000);
 
     beforeEach(() => {
@@ -314,6 +317,36 @@ describe("PATCH /api/schedule/[id]", () => {
       expect(data.warning).toContain("It did move on 1 of 2 Pages");
       expect(data.warning).toContain("could not be read");
     });
+
+    it("halts moving further Pages when the reschedule operation deadline is exceeded", async () => {
+      sqlMock
+        .mockResolvedValueOnce([
+          {
+            ...facebookRow,
+            facebook_post_ids: [
+              { id: "vid9", ok: true, page: { id: "pg1", name: "Page A" } },
+              { id: "vid10", ok: true, page: { id: "pg2", name: "Page B" } },
+            ],
+          },
+        ])
+        .mockResolvedValueOnce([{ id: 51 }])
+        .mockResolvedValueOnce([{ id: 51, scheduled_for: NEW_TIME }]);
+      resolvePageTokenMock.mockResolvedValue("tok");
+
+      const originalNow = Date.now;
+      let offset = 0;
+      vi.spyOn(Date, "now").mockImplementation(() => originalNow() + offset);
+      rescheduleMock.mockImplementationOnce(async () => {
+        offset = 10 * 60_000;
+      });
+
+      const res = await PATCH(patchRequest({ scheduledFor: NEW_TIME }), params());
+      const data = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(data.warning).toContain("timed out before all Pages could be moved");
+      expect(rescheduleMock).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("refuses a time outside the scheduling window before touching the row", async () => {
@@ -381,5 +414,92 @@ describe("DELETE /api/schedule/[id]", () => {
     expect(res.status).toBe(409);
     expect(data.error).toContain("being rescheduled right now");
     expect(sqlMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("claims the row atomically and deletes a scheduled post", async () => {
+    sqlMock
+      .mockResolvedValueOnce([localRow])
+      .mockResolvedValueOnce([{ id: 51 }])
+      .mockResolvedValueOnce([
+        { id: 51, news_item_id: null, scheduled_for: localRow.scheduled_for },
+      ]);
+
+    const res = await DELETE(
+      new Request("http://localhost/api/schedule/51", { method: "DELETE" }),
+      params()
+    );
+    const data = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(data.deleted).toBe(true);
+    expect(recordEventMock).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "canceled" })
+    );
+
+    const claimText = (sqlMock.mock.calls[1][0] as string[]).join("?");
+    expect(claimText).toContain("status = 'rescheduling'");
+    const deleteText = (sqlMock.mock.calls[2][0] as string[]).join("?");
+    expect(deleteText).toContain("DELETE FROM scheduled_posts");
+    expect(deleteText).toContain("status = 'rescheduling'");
+  });
+
+  it("interleaving 1: refuses when reschedule claims row between DELETE read and claim", async () => {
+    sqlMock
+      .mockResolvedValueOnce([localRow])
+      .mockResolvedValueOnce([]); // atomic claim returns empty because PATCH claimed first
+
+    const res = await DELETE(
+      new Request("http://localhost/api/schedule/51", { method: "DELETE" }),
+      params()
+    );
+    const data = await res.json();
+
+    expect(res.status).toBe(409);
+    expect(data.error).toContain("being rescheduled right now");
+    expect(recordEventMock).not.toHaveBeenCalled();
+  });
+
+  it("interleaving 2: cancels Facebook while holding claim and deletes", async () => {
+    sqlMock
+      .mockResolvedValueOnce([facebookRow])
+      .mockResolvedValueOnce([{ id: 51 }])
+      .mockResolvedValueOnce([
+        { id: 51, news_item_id: null, scheduled_for: facebookRow.scheduled_for },
+      ]);
+    resolvePageTokenMock.mockResolvedValue("tok");
+    heldMock.mockResolvedValue(true);
+    cancelMock.mockResolvedValue(undefined);
+
+    const res = await DELETE(
+      new Request("http://localhost/api/schedule/51", { method: "DELETE" }),
+      params()
+    );
+    const data = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(data.deleted).toBe(true);
+    expect(cancelMock).toHaveBeenCalledWith("vid9", "tok", "pg1");
+  });
+
+  it("releases claim back to scheduled if Facebook cancel fails", async () => {
+    sqlMock
+      .mockResolvedValueOnce([facebookRow])
+      .mockResolvedValueOnce([{ id: 51 }])
+      .mockResolvedValueOnce([{ id: 51 }]);
+    resolvePageTokenMock.mockResolvedValue("tok");
+    heldMock.mockResolvedValue(true);
+    cancelMock.mockRejectedValue(new Error("Facebook cancel error"));
+
+    const res = await DELETE(
+      new Request("http://localhost/api/schedule/51", { method: "DELETE" }),
+      params()
+    );
+    const data = await res.json();
+
+    expect(res.status).toBe(409);
+    expect(data.error).toContain("Facebook cancel error");
+    const releaseText = (sqlMock.mock.calls[2][0] as string[]).join("?");
+    expect(releaseText).toContain("status = 'scheduled'");
+    expect(releaseText).toContain("status = 'rescheduling'");
   });
 });

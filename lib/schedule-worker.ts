@@ -109,6 +109,7 @@ export async function publishDuePosts(
       UPDATE scheduled_posts
       SET status = 'publishing', attempts = attempts + 1, updated_at = now()
       WHERE id = ${post.id} AND status = 'scheduled'
+        AND scheduled_for <= now()
         AND attempts < ${MAX_ATTEMPTS}
         AND (attempts = 0
              OR updated_at < now() - (${RETRY_BACKOFF_MINUTES} * interval '1 minute'))
@@ -402,6 +403,73 @@ type NativeRow = {
 };
 
 /**
+ * Release stale rescheduling claims abandoned by a crash or timeout.
+ * When an intended time was persisted with the claim, recover with that
+ * confirmed intended time instead of restoring a stale overdue scheduled_for.
+ */
+export async function recoverStaleReschedules(): Promise<number> {
+  const stale = (await sql`
+    SELECT id, workspace_id, source, kind, facebook_post_id, page_id,
+           scheduled_for, error_message
+    FROM scheduled_posts
+    WHERE status = 'rescheduling'
+      AND updated_at < now() - interval '10 minutes'
+    FOR UPDATE SKIP LOCKED`) as unknown as Array<{
+      id: number;
+      workspace_id: string;
+      source: string;
+      kind: string;
+      facebook_post_id: string | null;
+      page_id: string | null;
+      scheduled_for: string;
+      error_message: string | null;
+    }>;
+
+  let recovered = 0;
+  for (const row of stale) {
+    let intendedIso: string | null = null;
+    try {
+      if (row.error_message?.startsWith("{")) {
+        const parsed = JSON.parse(row.error_message);
+        if (typeof parsed.intended === "string") intendedIso = parsed.intended;
+      }
+    } catch {}
+
+    let targetTime = row.scheduled_for;
+    if (intendedIso) {
+      if (row.source === "facebook" && row.page_id && row.facebook_post_id) {
+        try {
+          const token = await resolvePageToken(row.workspace_id, row.page_id);
+          if (token) {
+            const held = await isFacebookStillScheduled(
+              row.page_id,
+              row.facebook_post_id,
+              token
+            );
+            if (held === true) {
+              targetTime = intendedIso;
+            }
+          }
+        } catch {}
+      } else {
+        targetTime = intendedIso;
+      }
+    }
+
+    await sql`
+      UPDATE scheduled_posts
+      SET status = 'scheduled',
+          scheduled_for = ${targetTime},
+          error_message = NULL,
+          updated_at = now()
+      WHERE id = ${row.id} AND status = 'rescheduling'`;
+    recovered++;
+  }
+
+  return recovered;
+}
+
+/**
  * Facebook (and, for videos scheduled with publishAt, YouTube) is the
  * executor for every natively scheduled item, but the workspace still needs
  * to learn how each one ended. This sweep asks the platform whether the item
@@ -409,14 +477,9 @@ type NativeRow = {
  * Calendar and Analytics stay truthful.
  */
 export async function syncNativeSchedules(): Promise<number> {
-  // A crash between claim and completion leaves a row held by nobody. No
-  // request can outlast the Graph timeout by minutes, so an old claim is
-  // abandoned and handed back.
-  await sql`
-    UPDATE scheduled_posts
-    SET status = 'scheduled', updated_at = now()
-    WHERE status = 'rescheduling'
-      AND updated_at < now() - interval '10 minutes'`;
+  // A crash between claim and completion leaves a row held by nobody.
+  // Reconcile and release stale claims older than 10 minutes.
+  await recoverStaleReschedules();
 
   const oneMinuteAgo = new Date(Date.now() - 60_000).toISOString();
   const twoMinutesAgo = new Date(Date.now() - 120_000).toISOString();
@@ -456,7 +519,10 @@ export async function syncNativeSchedules(): Promise<number> {
 
     const postId = row.facebook_post_id;
     if (!postId) {
-      await markNativeFailed(row, "Facebook did not return an id for this item.");
+      await markNativeFailed(
+        row,
+        "Facebook did not return an id for this item."
+      );
       continue;
     }
 
@@ -467,10 +533,13 @@ export async function syncNativeSchedules(): Promise<number> {
       const published = await detectPublished(row.kind, postId, token);
 
       if (published === true) {
-        await sql`
+        const updated = (await sql`
           UPDATE scheduled_posts
           SET status = 'published', error_message = NULL, updated_at = now()
-          WHERE id = ${row.id} AND status = 'scheduled'`;
+          WHERE id = ${row.id} AND status = 'scheduled'
+            AND scheduled_for = ${row.scheduled_for}
+          RETURNING id`) as unknown as { id: number }[];
+        if (!updated.length) continue;
         await recordScheduleEvent({
           workspaceId: row.workspace_id,
           scheduledPostId: row.id,
@@ -507,10 +576,13 @@ export async function syncNativeSchedules(): Promise<number> {
           const pastSlot =
             Date.now() >= new Date(row.scheduled_for).getTime();
           if (pastSlot) {
-            await sql`
+            const updated = (await sql`
               UPDATE scheduled_posts
               SET status = 'published', error_message = NULL, updated_at = now()
-              WHERE id = ${row.id} AND status = 'scheduled'`;
+              WHERE id = ${row.id} AND status = 'scheduled'
+                AND scheduled_for = ${row.scheduled_for}
+              RETURNING id`) as unknown as { id: number }[];
+            if (!updated.length) continue;
             await recordScheduleEvent({
               workspaceId: row.workspace_id,
               scheduledPostId: row.id,
@@ -529,10 +601,11 @@ export async function syncNativeSchedules(): Promise<number> {
               link: `/calendar?post=${row.id}`,
             });
           } else {
-            await markNativeFailed(
+            const failed = await markNativeFailed(
               row,
               "The item was removed from Facebook before its scheduled time."
             );
+            if (!failed) continue;
           }
           synced++;
           continue;
@@ -547,11 +620,14 @@ export async function syncNativeSchedules(): Promise<number> {
       const slot = new Date(row.scheduled_for).getTime();
       const overdueBy = Date.now() - slot;
       if (overdueBy > graceMinutes * 60_000) {
-        await markNativeFailed(
-          row,
-          "Facebook did not publish this item at its scheduled time."
-        );
-        synced++;
+        if (
+          await markNativeFailed(
+            row,
+            "Facebook did not publish this item at its scheduled time."
+          )
+        ) {
+          synced++;
+        }
       }
     } catch (error) {
       console.error(
@@ -607,10 +683,13 @@ async function syncYouTubeSchedule(row: NativeRow): Promise<number> {
   }
 
   if (status.privacyStatus === "public") {
-    await sql`
+    const updated = (await sql`
       UPDATE scheduled_posts
       SET status = 'published', error_message = NULL, updated_at = now()
-      WHERE id = ${row.id} AND status = 'scheduled'`;
+      WHERE id = ${row.id} AND status = 'scheduled'
+        AND scheduled_for = ${row.scheduled_for}
+      RETURNING id`) as unknown as { id: number }[];
+    if (!updated.length) return 0;
     await recordScheduleEvent({
       workspaceId: row.workspace_id,
       scheduledPostId: row.id,
@@ -652,11 +731,12 @@ async function syncYouTubeSchedule(row: NativeRow): Promise<number> {
   // Confirmed still non-public. Past the grace window YouTube is not going
   // to publish it — surface that instead of leaving it queued forever.
   if (overdueBy > YOUTUBE_GRACE_MINUTES * 60_000) {
-    await markNativeFailed(
+    return (await markNativeFailed(
       row,
       "YouTube did not publish this video at its scheduled time."
-    );
-    return 1;
+    ))
+      ? 1
+      : 0;
   }
   return 0;
 }
@@ -691,8 +771,9 @@ async function backOffYouTubeProbe(
   // Broken well past the slot, sweep after sweep — surface it rather than
   // leave the row queued forever with a connection that never answers.
   if (overdueBy > YOUTUBE_GRACE_MINUTES * 60_000) {
-    await markNativeFailed(row, `YouTube could not be probed: ${message}`);
-    return 1;
+    return (await markNativeFailed(row, `YouTube could not be probed: ${message}`))
+      ? 1
+      : 0;
   }
 
   await bumpYouTubeRetryMarker(row);
@@ -711,11 +792,19 @@ async function bumpYouTubeRetryMarker(row: NativeRow): Promise<void> {
   }
 }
 
-async function markNativeFailed(row: NativeRow, reason: string) {
-  await sql`
+async function markNativeFailed(
+  row: NativeRow,
+  reason: string
+): Promise<boolean> {
+  const updated = (await sql`
     UPDATE scheduled_posts
     SET status = 'failed', error_message = ${reason}, updated_at = now()
-    WHERE id = ${row.id} AND status = 'scheduled'`;
+    WHERE id = ${row.id} AND status = 'scheduled'
+      AND scheduled_for = ${row.scheduled_for}
+    RETURNING id`) as unknown as { id: number }[];
+
+  if (!updated.length) return false;
+
   await recordScheduleEvent({
     workspaceId: row.workspace_id,
     scheduledPostId: row.id,
@@ -734,6 +823,7 @@ async function markNativeFailed(row: NativeRow, reason: string) {
     body: failedCopy.body,
     link: `/calendar?post=${row.id}`,
   });
+  return true;
 }
 
 /**

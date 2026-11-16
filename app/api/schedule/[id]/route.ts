@@ -53,7 +53,7 @@ export async function DELETE(
   const { id } = await params;
 
   const existing = (await sql`
-    SELECT id, workspace_id, news_item_id, kind, source, status,
+    SELECT id, workspace_id, news_item_id, kind, source, status, scheduled_for,
            facebook_post_id, facebook_post_ids, page_id
     FROM scheduled_posts
     WHERE id = ${id} AND workspace_id = ${access.workspace.id}
@@ -71,11 +71,47 @@ export async function DELETE(
     );
   }
 
+  const deleteClaim = JSON.stringify({
+    claim: crypto.randomUUID(),
+    action: "delete",
+  });
+
+  if (row.status === "scheduled") {
+    // Atomically claim the scheduled row before canceling Facebook or deleting locally.
+    // If an overlapping reschedule claimed it, this update returns empty and we 409.
+    const claimed = (await sql`
+      UPDATE scheduled_posts
+      SET status = 'rescheduling',
+          error_message = ${deleteClaim},
+          updated_at = now()
+      WHERE id = ${id}
+        AND workspace_id = ${access.workspace.id}
+        AND status = 'scheduled'
+      RETURNING id`) as unknown as { id: number }[];
+
+    if (!claimed.length) {
+      return NextResponse.json(
+        { error: "This post is being rescheduled right now. Try again in a moment." },
+        { status: 409 }
+      );
+    }
+  }
+
   if (row.source === "facebook" && row.status === "scheduled") {
     // Facebook is holding this item in its own queue, so deleting the local
     // row would not stop it. Cancel it on Facebook first.
     const cancelled = await cancelOnFacebook(row);
     if (!cancelled.ok) {
+      await sql`
+        UPDATE scheduled_posts
+        SET status = 'scheduled',
+            error_message = NULL,
+            updated_at = now()
+        WHERE id = ${id}
+          AND workspace_id = ${access.workspace.id}
+          AND status = 'rescheduling'
+          AND error_message = ${deleteClaim}`;
+
       return NextResponse.json(
         {
           error:
@@ -91,6 +127,10 @@ export async function DELETE(
     DELETE FROM scheduled_posts
     WHERE id = ${id}
       AND workspace_id = ${access.workspace.id}
+      AND (
+        (status = 'rescheduling' AND error_message = ${deleteClaim})
+        OR status = ${row.status}
+      )
     RETURNING id, news_item_id, scheduled_for`) as unknown as {
     id: number;
     news_item_id: number | null;
@@ -98,7 +138,10 @@ export async function DELETE(
   }[];
 
   if (!rows.length) {
-    return NextResponse.json({ error: "not found" }, { status: 404 });
+    return NextResponse.json(
+      { error: "This post changed or was deleted. Reload the calendar." },
+      { status: 409 }
+    );
   }
 
   const canceled = rows[0];
@@ -186,10 +229,18 @@ export async function PATCH(
 
   // Claim the row for the whole operation. The status flip lives in the
   // database, so it survives across requests: a second reschedule cannot read
-  // the in-flight time and overtake this one mid-Graph.
+  // the in-flight time and overtake this one mid-Graph. The intended time is
+  // persisted with the claim so crash recovery restores the confirmed new slot.
+  const claimPayload = JSON.stringify({
+    claim: crypto.randomUUID(),
+    intended: scheduledFor.toISOString(),
+  });
+
   const claimed = (await sql`
     UPDATE scheduled_posts
-    SET status = 'rescheduling', updated_at = now()
+    SET status = 'rescheduling',
+        error_message = ${claimPayload},
+        updated_at = now()
     WHERE id = ${id}
       AND workspace_id = ${access.workspace.id}
       AND status = 'scheduled'
@@ -208,10 +259,13 @@ export async function PATCH(
 
   const release = () => sql`
     UPDATE scheduled_posts
-    SET status = 'scheduled', updated_at = now()
+    SET status = 'scheduled',
+        error_message = NULL,
+        updated_at = now()
     WHERE id = ${id}
       AND workspace_id = ${access.workspace.id}
-      AND status = 'rescheduling'`;
+      AND status = 'rescheduling'
+      AND error_message = ${claimPayload}`;
 
   if (row.source === "facebook") {
     const moved = await rescheduleOnFacebook(
@@ -233,10 +287,12 @@ export async function PATCH(
   const finished = (await sql`
     UPDATE scheduled_posts
     SET status = 'scheduled', scheduled_for = ${scheduledFor.toISOString()},
+        error_message = NULL,
         updated_at = now()
     WHERE id = ${id}
       AND workspace_id = ${access.workspace.id}
       AND status = 'rescheduling'
+      AND error_message = ${claimPayload}
     RETURNING id, scheduled_for`) as unknown as {
     id: number;
     scheduled_for: string;
@@ -345,9 +401,21 @@ async function cancelOnFacebook(
  * Returns how many Pages the new time reached so the caller can decide
  * whether the local row should follow a partial move.
  */
+export const RESCHEDULE_OPERATION_TIMEOUT_MS = 2 * 60_000;
+
+/**
+ * Move the schedule Facebook is holding, across every Page that accepted it.
+ * Returns how many Pages the new time reached so the caller can decide
+ * whether the local row should follow a partial move.
+ *
+ * An operation-wide deadline bounds the entire sequence of Graph calls to well
+ * below the 10-minute stale claim reset threshold in the schedule worker, so a
+ * slow or stalled owner cannot continue making changes after its claim expires.
+ */
 async function rescheduleOnFacebook(
   row: TargetRow,
-  scheduledPublishTime: number
+  scheduledPublishTime: number,
+  timeoutMs = RESCHEDULE_OPERATION_TIMEOUT_MS
 ): Promise<{ ok: boolean; moved: number; error?: string }> {
   const targets = facebookTargets(row);
   if (!targets.length) {
@@ -359,8 +427,17 @@ async function rescheduleOnFacebook(
     };
   }
 
+  const deadline = Date.now() + timeoutMs;
   let moved = 0;
   for (const target of targets) {
+    if (Date.now() >= deadline) {
+      return {
+        ok: false,
+        moved,
+        error: `Rescheduling timed out before all Pages could be moved.${partialMoveNote(moved, targets.length)}`,
+      };
+    }
+
     // The token lookup touches the database, so it can reject like any other
     // call. Return the Pages already moved instead of throwing, or PATCH would
     // keep the old local time while Facebook holds the new one.
