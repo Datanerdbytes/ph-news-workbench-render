@@ -517,7 +517,7 @@ export default function QueuePage() {
               )}
             </div>
 
-            {items.length > 0 && filtered.length > 0 && (
+            {items.length > 0 && (
               <footer className="mt-4">
                 {hasMore ? (
                   <Button

@@ -51,7 +51,6 @@ import {
   wordCount,
 } from '@/lib/format';
 import { stageUpload } from '@/lib/stage-client';
-import { deleteStagedBlob } from '@/lib/blob-cleanup';
 import { fetchQueueItem, fetchQueuePage, type QueueItem } from '@/lib/story-queue';
 import {
   MediaPreviewCard,
@@ -191,8 +190,10 @@ function ComposeWorkspace() {
       setSelected((prev) => {
         if (wanted) return wanted;
         if (prev) {
+          // Keep the user's selection even when it fell off the refreshed
+          // first page — deep-linked stories can live beyond it.
           const next = rows.find((item) => item.id === prev.id);
-          if (next) return next;
+          return next ?? prev;
         }
         return rows[0] ?? null;
       });
@@ -237,10 +238,11 @@ function ComposeWorkspace() {
   }, []);
 
   // One media type per post: a video attachment replaces the images, and
-  // picking an image drops the video (plus its staged blob).
+  // picking an image drops the video. The staged blob is NOT deleted on
+  // removal — a scheduled post may still reference it; the scheduler cleans
+  // it up after publishing.
   function applyVideoFile(next: File | null) {
     if (videoPreviewUrl) URL.revokeObjectURL(videoPreviewUrl);
-    if (videoUrl) deleteStagedBlob(videoUrl);
     setVideoFile(next);
     setVideoPreviewUrl(next ? URL.createObjectURL(next) : null);
     setVideoUrl(null);
@@ -903,6 +905,7 @@ function ComposeWorkspace() {
                             !facebook.connected ||
                             !pages.selected.length ||
                             publishing ||
+                            imagesBusy ||
                             videoStaging ||
                             Boolean(videoFile && !videoUrl) ||
                             selected?.status === 'published'
@@ -921,6 +924,7 @@ function ComposeWorkspace() {
                             !draft ||
                             !facebook.connected ||
                             !pages.selected.length ||
+                            imagesBusy ||
                             videoStaging ||
                             Boolean(videoFile && !videoUrl) ||
                             selected?.status === 'published'

@@ -187,10 +187,16 @@ export async function downloadVideoFromUrl(
     throw new Error('The attached video URL is not allowed.');
   }
 
-  const res = await fetch(url);
+  // Staged storage URLs respond directly (2xx) — anything redirecting is
+  // suspicious, so redirects are refused rather than followed: following one
+  // would let a public URL bounce the server fetch onto a private host.
+  const res = await fetch(url, { redirect: 'manual' });
   if (!res.ok || !res.body) {
     throw new Error('The attached video could not be read from storage.');
   }
+  // And the whole transfer is bounded — a slow-trickle server must not be
+  // able to park the scheduler on this download forever.
+  const deadline = AbortSignal.timeout(5 * 60_000);
 
   const dir = await mkdtemp(path.join(tmpdir(), 'ph-video-'));
   const filePath = path.join(dir, filename);
@@ -213,7 +219,9 @@ export async function downloadVideoFromUrl(
         cb(null, chunk);
       },
     });
-    await pipeline(res.body as never, counter, createWriteStream(filePath));
+    await pipeline(res.body as never, counter, createWriteStream(filePath), {
+      signal: deadline,
+    });
   } catch (error) {
     await cleanup();
     throw error;

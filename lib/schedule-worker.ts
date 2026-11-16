@@ -66,6 +66,7 @@ type ClaimedRow = {
   image_url: string | null;
   image_urls: unknown;
   kind: string;
+  page_id: string | null;
   attempts: number;
 };
 
@@ -92,7 +93,7 @@ export async function publishDuePosts(
   // cannot let an overlapping sweep double-publish a waiting row.
   const due = (await sql`
     SELECT id, workspace_id, news_item_id, draft_id, text,
-           image_url, image_urls, kind, attempts
+           image_url, image_urls, kind, page_id, attempts
     FROM scheduled_posts
     WHERE status = 'scheduled' AND scheduled_for <= now()
       AND source = 'local'
@@ -140,10 +141,21 @@ export async function publishDuePosts(
       } else if (post.kind === "video") {
         // A scheduled video carries its staged file URL in image_url —
         // stream it to a temp file (never the heap) and publish it with the
-        // post text as the video's description.
+        // post text as the video's description. It goes to the Page picked
+        // at schedule time, falling back to the primary Page.
         const primary = await getPrimaryPage(post.workspace_id);
         if (!primary) {
           throw new Error("This workspace has no connected Facebook Page.");
+        }
+        let pageId = primary.pageId;
+        let token = primary.token;
+        if (post.page_id) {
+          const scoped = await resolvePageToken(post.workspace_id, post.page_id);
+          if (!scoped) {
+            throw new Error("That Page is not connected to this workspace.");
+          }
+          pageId = post.page_id;
+          token = scoped;
         }
         if (!post.image_url) {
           throw new Error("The scheduled video is missing its file.");
@@ -151,8 +163,8 @@ export async function publishDuePosts(
         const downloaded = await downloadVideoFromUrl(post.image_url);
         try {
           const video = await publishPageVideo({
-            pageId: primary.pageId,
-            accessToken: primary.token,
+            pageId,
+            accessToken: token,
             description: stripMarkdown(post.text),
             video: downloaded.upload,
           });

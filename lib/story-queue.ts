@@ -61,10 +61,11 @@ export async function fetchQueuePage(before?: number | null): Promise<QueuePage>
 }
 
 /** One story by id (single-item mode of /api/items) — resolves Compose deep
- * links to stories that sit beyond the first list page. */
+ * links to stories that sit beyond the first list page. Throws on request
+ * failure; returns null only when the story does not exist. */
 export async function fetchQueueItem(id: number): Promise<QueueItem | null> {
   const res = await fetch(`/api/items?item=${id}`, { cache: 'no-store' });
-  if (!res.ok) return null;
+  if (!res.ok) throw new Error('Could not load the story.');
   const data = await res.json();
   const rows: QueueItem[] = data.rows ?? [];
   return rows[0] ?? null;

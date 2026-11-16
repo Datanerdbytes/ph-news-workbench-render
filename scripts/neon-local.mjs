@@ -28,7 +28,9 @@ if (!dbUrl) {
         .split("\n")
         .find((line) => line.startsWith("DATABASE_URL="))
         ?.slice("DATABASE_URL=".length)
-        .trim() ?? undefined;
+        .trim()
+        // dotenv tolerates quoted values — strip them so URL parsing works.
+        .replace(/^["']|["']$/g, "") ?? undefined;
   } catch {
     // No .env.local — leave the driver untouched below.
   }
@@ -53,8 +55,8 @@ if (isLocal) {
     types: { getTypeParser: () => (v) => v },
   });
 
-  const runOne = async ({ query, params }) => {
-    const res = await pool.query({
+  const runOne = async (executor, { query, params }) => {
+    const res = await executor.query({
       text: query,
       values: params ?? [],
       rowMode: "array",
@@ -70,11 +72,14 @@ if (isLocal) {
     try {
       if (Array.isArray(body.queries)) {
         // sql.transaction([...]) — one implicit transaction, like Neon's API.
+        // Every statement runs on the transaction's own client: pool.query
+        // would hand them to different connections and BEGIN/COMMIT would
+        // wrap nothing.
         const client = await pool.connect();
         const results = [];
         try {
           await client.query("BEGIN");
-          for (const q of body.queries) results.push(await runOne(q));
+          for (const q of body.queries) results.push(await runOne(client, q));
           await client.query("COMMIT");
         } catch (e) {
           await client.query("ROLLBACK").catch(() => {});
@@ -84,7 +89,9 @@ if (isLocal) {
         }
         return new Response(JSON.stringify({ results }), { status: 200 });
       }
-      return new Response(JSON.stringify(await runOne(body)), { status: 200 });
+      return new Response(JSON.stringify(await runOne(pool, body)), {
+        status: 200,
+      });
     } catch (error) {
       return new Response(
         JSON.stringify({ message: error?.message ?? String(error) }),
