@@ -353,7 +353,13 @@ export default function CalendarPage() {
   // Day panel: key of the day whose posts are expanded below the grid
   // (chips and "+N more" open it; chips alone truncate and hide the rest).
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
-  const [reschedule, setReschedule] = useState<ScheduledPost | null>(null);
+  const [reschedule, setReschedule] = useState<{
+    post: ScheduledPost;
+    token: number;
+  } | null>(null);
+  // Each opening gets its own token so a request can only close the dialog it
+  // was started from — even when the same post is reopened.
+  const rescheduleSeq = useRef(0);
   const rescheduleInputRef = useRef<HTMLInputElement>(null);
   const detailRef = useRef<HTMLDivElement>(null);
   const hadDaySelected = useRef(false);
@@ -538,7 +544,7 @@ export default function CalendarPage() {
     toast.success("Scheduled post canceled");
   }
 
-  async function reschedulePost(id: number, iso: string) {
+  async function reschedulePost(id: number, iso: string, token: number) {
     const res = await fetch(`/api/schedule/${id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
@@ -556,14 +562,19 @@ export default function CalendarPage() {
         post.id === id ? { ...post, scheduled_for: movedTo } : post
       )
     );
-    // Close only the dialog this request started — another post's dialog may
-    // have been opened while the move was in flight.
-    setReschedule((current) => (current?.id === id ? null : current));
+    // Close only the dialog instance this request started — another post, or
+    // the same post reopened while the move was in flight, keeps its input.
+    setReschedule((current) => (current?.token === token ? null : current));
     if (typeof data?.warning === "string" && data.warning) {
       toast.warning("Moved on some Pages", { description: data.warning });
     } else {
       toast.success("Scheduled post moved");
     }
+  }
+
+  function openReschedule(post: ScheduledPost) {
+    rescheduleSeq.current += 1;
+    setReschedule({ post, token: rescheduleSeq.current });
   }
 
   return (
@@ -660,7 +671,7 @@ export default function CalendarPage() {
                       <CalendarPostRow
                         post={post}
                         onCancel={cancelPost}
-                        onReschedule={setReschedule}
+                        onReschedule={openReschedule}
                       />
                     </li>
                   ))}
@@ -797,7 +808,7 @@ export default function CalendarPage() {
                         <CalendarPostRow
                           post={post}
                           onCancel={cancelPost}
-                          onReschedule={setReschedule}
+                          onReschedule={openReschedule}
                         />
                       </li>
                     ))}
@@ -865,7 +876,7 @@ export default function CalendarPage() {
                           {canReschedule(post) && (
                             <RescheduleButton
                               post={post}
-                              onReschedule={setReschedule}
+                              onReschedule={openReschedule}
                             />
                           )}
                           <CancelButton post={post} onCancel={cancelPost} />
@@ -924,12 +935,14 @@ export default function CalendarPage() {
       >
         {reschedule && (
           <RescheduleForm
-            key={reschedule.id}
-            post={reschedule}
+            key={reschedule.post.id}
+            post={reschedule.post}
             now={now}
             inputRef={rescheduleInputRef}
             onCancel={() => setReschedule(null)}
-            onSave={(iso) => reschedulePost(reschedule.id, iso)}
+            onSave={(iso) =>
+              reschedulePost(reschedule.post.id, iso, reschedule.token)
+            }
           />
         )}
       </Modal>

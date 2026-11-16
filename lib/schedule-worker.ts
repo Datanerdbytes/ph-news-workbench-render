@@ -409,6 +409,15 @@ type NativeRow = {
  * Calendar and Analytics stay truthful.
  */
 export async function syncNativeSchedules(): Promise<number> {
+  // A crash between claim and completion leaves a row held by nobody. No
+  // request can outlast the Graph timeout by minutes, so an old claim is
+  // abandoned and handed back.
+  await sql`
+    UPDATE scheduled_posts
+    SET status = 'scheduled', updated_at = now()
+    WHERE status = 'rescheduling'
+      AND updated_at < now() - interval '10 minutes'`;
+
   const oneMinuteAgo = new Date(Date.now() - 60_000).toISOString();
   const twoMinutesAgo = new Date(Date.now() - 120_000).toISOString();
   const rows = (await sql`

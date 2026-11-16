@@ -312,6 +312,67 @@ describe("CalendarPage reschedule", () => {
     );
   });
 
+  it("does not close a reopened dialog when the earlier request finishes", async () => {
+    let finishPatch!: (value: unknown) => void;
+    fetchMock.mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/schedule") {
+          return { ok: true, json: async () => [localPost] };
+        }
+        if (init?.method === "PATCH") {
+          return new Promise((resolve) => {
+            finishPatch = resolve;
+          });
+        }
+        return { ok: true, json: async () => ({ deleted: true }) };
+      }
+    );
+
+    render(<CalendarPage />);
+    await flush();
+
+    const sidebar = screen
+      .getByRole("heading", { name: "Scheduled" })
+      .closest("section")!;
+    fireEvent.click(
+      within(sidebar).getByRole("button", { name: "Reschedule" })
+    );
+    let dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Reschedule" }));
+    await within(dialog).findByRole("button", { name: "Rescheduling…" });
+
+    // Dismiss while the save is in flight, then reopen the same post: the
+    // earlier completion must not close this new dialog or drop its input.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    );
+    fireEvent.click(
+      within(sidebar).getByRole("button", { name: "Reschedule" })
+    );
+    dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("New date and time"), {
+      target: { value: "2026-11-22T09:00" },
+    });
+
+    finishPatch({
+      ok: true,
+      json: async () => ({
+        id: 51,
+        scheduled_for: new Date("2026-11-21T10:30").toISOString(),
+      }),
+    });
+    await waitFor(() =>
+      expect(toastMock.success).toHaveBeenCalledWith("Scheduled post moved")
+    );
+
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("dialog")).getByLabelText("New date and time")
+    ).toHaveValue("2026-11-22T09:00");
+  });
+
   it("surfaces a platform refusal inside the dialog", async () => {
     fetchMock.mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {

@@ -64,6 +64,13 @@ export async function DELETE(
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
+  if (row.status === "rescheduling") {
+    return NextResponse.json(
+      { error: "This post is being rescheduled right now. Try again in a moment." },
+      { status: 409 }
+    );
+  }
+
   if (row.source === "facebook" && row.status === "scheduled") {
     // Facebook is holding this item in its own queue, so deleting the local
     // row would not stop it. Cancel it on Facebook first.
@@ -147,6 +154,12 @@ export async function PATCH(
   if (!row) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
+  if (row.status === "rescheduling") {
+    return NextResponse.json(
+      { error: "This post is being rescheduled right now. Try again in a moment." },
+      { status: 409 }
+    );
+  }
   if (row.status !== "scheduled") {
     return NextResponse.json(
       { error: "Only a scheduled post can be rescheduled." },
@@ -171,20 +184,17 @@ export async function PATCH(
     );
   }
 
-  // Claim the row before touching Facebook. This conditional update is the
-  // serialization point: an overlapping reschedule fails here instead of
-  // moving Facebook after this one and leaving the row and Facebook apart.
+  // Claim the row for the whole operation. The status flip lives in the
+  // database, so it survives across requests: a second reschedule cannot read
+  // the in-flight time and overtake this one mid-Graph.
   const claimed = (await sql`
     UPDATE scheduled_posts
-    SET scheduled_for = ${scheduledFor.toISOString()}, updated_at = now()
+    SET status = 'rescheduling', updated_at = now()
     WHERE id = ${id}
       AND workspace_id = ${access.workspace.id}
       AND status = 'scheduled'
       AND scheduled_for = ${row.scheduled_for}
-    RETURNING id, scheduled_for`) as unknown as {
-    id: number;
-    scheduled_for: string;
-  }[];
+    RETURNING id`) as unknown as { id: number }[];
 
   if (!claimed.length) {
     return NextResponse.json(
@@ -196,26 +206,50 @@ export async function PATCH(
     );
   }
 
+  const release = () => sql`
+    UPDATE scheduled_posts
+    SET status = 'scheduled', updated_at = now()
+    WHERE id = ${id}
+      AND workspace_id = ${access.workspace.id}
+      AND status = 'rescheduling'`;
+
   if (row.source === "facebook") {
     const moved = await rescheduleOnFacebook(
       row,
       Math.floor(scheduledFor.getTime() / 1000)
     );
     if (!moved.ok) {
-      // Nothing moved on Facebook, so the claimed time is undone. Once a Page
-      // has accepted the new time, the row must keep it or the calendar would
-      // show a time Facebook no longer holds.
+      // Nothing moved on Facebook, so the claim is dropped and the old time
+      // stands. Once a Page has accepted the new time, the row must keep it or
+      // the calendar would show a time Facebook no longer holds.
       if (moved.moved === 0) {
-        await sql`
-          UPDATE scheduled_posts
-          SET scheduled_for = ${row.scheduled_for}, updated_at = now()
-          WHERE id = ${id}
-            AND workspace_id = ${access.workspace.id}
-            AND scheduled_for = ${scheduledFor.toISOString()}`;
+        await release();
         return NextResponse.json({ error: moved.error }, { status: 409 });
       }
       warning = moved.error;
     }
+  }
+
+  const finished = (await sql`
+    UPDATE scheduled_posts
+    SET status = 'scheduled', scheduled_for = ${scheduledFor.toISOString()},
+        updated_at = now()
+    WHERE id = ${id}
+      AND workspace_id = ${access.workspace.id}
+      AND status = 'rescheduling'
+    RETURNING id, scheduled_for`) as unknown as {
+    id: number;
+    scheduled_for: string;
+  }[];
+
+  if (!finished.length) {
+    return NextResponse.json(
+      {
+        error:
+          "The post changed while it was being rescheduled. Reload the calendar and try again.",
+      },
+      { status: 409 }
+    );
   }
 
   await recordScheduleEvent({
@@ -229,7 +263,7 @@ export async function PATCH(
   });
 
   return NextResponse.json(
-    warning ? { ...claimed[0], warning } : claimed[0]
+    warning ? { ...finished[0], warning } : finished[0]
   );
 }
 

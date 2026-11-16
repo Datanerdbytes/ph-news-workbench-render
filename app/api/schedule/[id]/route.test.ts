@@ -37,7 +37,7 @@ vi.mock("@/lib/facebook-page-token", () => ({
   resolvePageToken: resolvePageTokenMock,
 }));
 
-import { PATCH } from "./route";
+import { DELETE, PATCH } from "./route";
 
 const access = { user: { id: "u1" }, workspace: { id: "ws1" } };
 
@@ -84,6 +84,7 @@ describe("PATCH /api/schedule/[id]", () => {
   it("moves a workspace-scheduled post and records the event", async () => {
     sqlMock
       .mockResolvedValueOnce([localRow])
+      .mockResolvedValueOnce([{ id: 51 }])
       .mockResolvedValueOnce([{ id: 51, scheduled_for: NEW_TIME }]);
 
     const res = await PATCH(patchRequest({ scheduledFor: NEW_TIME }), params());
@@ -99,14 +100,16 @@ describe("PATCH /api/schedule/[id]", () => {
         metadata: { from: localRow.scheduled_for, to: NEW_TIME },
       })
     );
-    // The update is scoped to the workspace, to a still-scheduled row, and to
-    // the time we read — an overlapping reschedule cannot silently win.
-    const updateCall = sqlMock.mock.calls[1];
-    const updateText = (updateCall[0] as string[]).join("?");
-    expect(updateText).toContain("status = 'scheduled'");
-    expect(updateText).toContain("scheduled_for =");
-    expect(updateCall).toContain(localRow.scheduled_for);
-    expect(updateCall).toContain(NEW_TIME);
+    // The claim flips the row out of 'scheduled' for the duration, pinned to
+    // the time that was read; the finish writes the new time and flips back.
+    const claimText = (sqlMock.mock.calls[1][0] as string[]).join("?");
+    expect(claimText).toContain("status = 'rescheduling'");
+    expect(sqlMock.mock.calls[1]).toContain(localRow.scheduled_for);
+    const finishCall = sqlMock.mock.calls[2];
+    const finishText = (finishCall[0] as string[]).join("?");
+    expect(finishText).toContain("status = 'scheduled'");
+    expect(finishText).toContain("scheduled_for =");
+    expect(finishCall).toContain(NEW_TIME);
   });
 
   it("refuses platforms that cannot move an accepted schedule", async () => {
@@ -143,21 +146,39 @@ describe("PATCH /api/schedule/[id]", () => {
     it("claims the row before moving Facebook and records the event", async () => {
       sqlMock
         .mockResolvedValueOnce([facebookRow])
+        .mockResolvedValueOnce([{ id: 51 }])
         .mockResolvedValueOnce([{ id: 51, scheduled_for: NEW_TIME }]);
 
       const res = await PATCH(patchRequest({ scheduledFor: NEW_TIME }), params());
 
       expect(res.status).toBe(200);
-      // The local claim lands before the first Graph call, so a competing
-      // request loses there instead of moving Facebook afterwards.
+      // The claim lands before the first Graph call and the finish after the
+      // last one, so no competing request can read the in-flight time.
       expect(sqlMock.mock.invocationCallOrder[1]).toBeLessThan(
         rescheduleMock.mock.invocationCallOrder[0]
+      );
+      expect(rescheduleMock.mock.invocationCallOrder[0]).toBeLessThan(
+        sqlMock.mock.invocationCallOrder[2]
       );
       expect(resolvePageTokenMock).toHaveBeenCalledWith("ws1", "pg1");
       expect(rescheduleMock).toHaveBeenCalledWith("vid9", "tok", NEW_UNIX, "pg1");
       expect(recordEventMock).toHaveBeenCalledWith(
         expect.objectContaining({ event: "rescheduled" })
       );
+    });
+
+    it("refuses while another request holds the claim", async () => {
+      sqlMock.mockResolvedValueOnce([
+        { ...facebookRow, status: "rescheduling" },
+      ]);
+
+      const res = await PATCH(patchRequest({ scheduledFor: NEW_TIME }), params());
+      const data = await res.json();
+
+      expect(res.status).toBe(409);
+      expect(data.error).toContain("being rescheduled right now");
+      expect(rescheduleMock).not.toHaveBeenCalled();
+      expect(sqlMock).toHaveBeenCalledTimes(1);
     });
 
     it("refuses a second reschedule before it reaches Facebook", async () => {
@@ -174,10 +195,10 @@ describe("PATCH /api/schedule/[id]", () => {
       expect(recordEventMock).not.toHaveBeenCalled();
     });
 
-    it("keeps the old time and undoes the claim when Facebook refuses", async () => {
+    it("keeps the old time and drops the claim when Facebook refuses", async () => {
       sqlMock
         .mockResolvedValueOnce([facebookRow])
-        .mockResolvedValueOnce([{ id: 51, scheduled_for: NEW_TIME }]);
+        .mockResolvedValueOnce([{ id: 51 }]);
       rescheduleMock.mockRejectedValue(new Error("(#10) permission denied"));
 
       const res = await PATCH(patchRequest({ scheduledFor: NEW_TIME }), params());
@@ -186,16 +207,18 @@ describe("PATCH /api/schedule/[id]", () => {
       expect(res.status).toBe(409);
       expect(data.error).toContain("Facebook refused to move this item");
       expect(data.error).toContain("(#10) permission denied");
-      // Read, claim, then restore — no event for a move that never happened.
+      // Read, claim, then release — no event for a move that never happened.
       expect(sqlMock).toHaveBeenCalledTimes(3);
-      expect(sqlMock.mock.calls[2]).toContain(localRow.scheduled_for);
+      const releaseText = (sqlMock.mock.calls[2][0] as string[]).join("?");
+      expect(releaseText).toContain("status = 'scheduled'");
+      expect(releaseText).toContain("status = 'rescheduling'");
       expect(recordEventMock).not.toHaveBeenCalled();
     });
 
     it("reports when Facebook already released the item", async () => {
       sqlMock
         .mockResolvedValueOnce([facebookRow])
-        .mockResolvedValueOnce([{ id: 51, scheduled_for: NEW_TIME }]);
+        .mockResolvedValueOnce([{ id: 51 }]);
       heldMock.mockResolvedValue(false);
 
       const res = await PATCH(patchRequest({ scheduledFor: NEW_TIME }), params());
@@ -218,6 +241,7 @@ describe("PATCH /api/schedule/[id]", () => {
             ],
           },
         ])
+        .mockResolvedValueOnce([{ id: 51 }])
         .mockResolvedValueOnce([{ id: 51, scheduled_for: NEW_TIME }]);
       rescheduleMock
         .mockResolvedValueOnce(undefined)
@@ -276,6 +300,7 @@ describe("PATCH /api/schedule/[id]", () => {
             ],
           },
         ])
+        .mockResolvedValueOnce([{ id: 51 }])
         .mockResolvedValueOnce([{ id: 51, scheduled_for: NEW_TIME }]);
       resolvePageTokenMock
         .mockResolvedValueOnce("tok")
@@ -340,5 +365,21 @@ describe("PATCH /api/schedule/[id]", () => {
     const res = await PATCH(patchRequest({ scheduledFor: NEW_TIME }), params());
     expect(res.status).toBe(401);
     expect(sqlMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("DELETE /api/schedule/[id]", () => {
+  it("refuses while a reschedule holds the row", async () => {
+    sqlMock.mockResolvedValueOnce([{ ...localRow, status: "rescheduling" }]);
+
+    const res = await DELETE(
+      new Request("http://localhost/api/schedule/51", { method: "DELETE" }),
+      params()
+    );
+    const data = await res.json();
+
+    expect(res.status).toBe(409);
+    expect(data.error).toContain("being rescheduled right now");
+    expect(sqlMock).toHaveBeenCalledTimes(1);
   });
 });
