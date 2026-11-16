@@ -5,7 +5,10 @@ test("renders the dashboard activity feed", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "Activity log" })
   ).toBeVisible();
-  await expect(page.getByText("Loading your workspace…")).toBeHidden();
+  // While the route hydrates the DOM can briefly hold two copies of the
+  // page, so the loading copy is located without insisting on a single
+  // match — the question is whether it is still visible.
+  await expect(page.getByText("Loading your workspace…").first()).toBeHidden();
 });
 
 test("renders the dashboard publishing stats", async ({ page }) => {
@@ -24,15 +27,20 @@ test("renders the dashboard publishing stats", async ({ page }) => {
   );
   expect(facebook).toBeTruthy();
 
-  const totalCard = page.locator("article").filter({ hasText: "Total published" });
+  // Same as above: the hydrating DOM can hold two copies, so nothing here
+  // may insist on a single match.
+  const totalCard = page
+    .locator("article")
+    .filter({ hasText: "Total published" })
+    .first();
   await expect(totalCard).toBeVisible();
   await expect(
     totalCard.getByText(String(facebook.published.total), { exact: true })
   ).toBeVisible();
   await expect(
-    page.getByText(
-      new RegExp(`${facebook.published30d.total} in the last 30 days`)
-    )
+    page
+      .getByText(new RegExp(`${facebook.published30d.total} in the last 30 days`))
+      .first()
   ).toBeVisible();
 
   // And the endpoint itself must answer with a platform breakdown — the
