@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { bakeReelAnimation, composeFrame } from "./bake";
 import {
+  breaking,
   endcard,
   headline,
   planEffects,
@@ -16,32 +17,58 @@ import {
 
 type FakeCtx = {
   scale: Mock;
+  translate: Mock;
   clearRect: Mock;
   drawImage: Mock;
   save: Mock;
   restore: Mock;
   fillRect: Mock;
+  beginPath: Mock;
+  roundRect: Mock;
+  rect: Mock;
+  arc: Mock;
+  clip: Mock;
+  fill: Mock;
+  stroke: Mock;
+  fillText: Mock;
   measureText: Mock;
   textBaseline: string;
   textAlign: string;
   font: string;
   fillStyle: string;
+  strokeStyle: string;
+  lineWidth: number;
+  shadowColor: string;
+  shadowBlur: number;
   globalAlpha: number;
 };
 
 function makeCtx(): FakeCtx {
   return {
     scale: vi.fn(),
+    translate: vi.fn(),
     clearRect: vi.fn(),
     drawImage: vi.fn(),
     save: vi.fn(),
     restore: vi.fn(),
     fillRect: vi.fn(),
+    beginPath: vi.fn(),
+    roundRect: vi.fn(),
+    rect: vi.fn(),
+    arc: vi.fn(),
+    clip: vi.fn(),
+    fill: vi.fn(),
+    stroke: vi.fn(),
+    fillText: vi.fn(),
     measureText: vi.fn(() => ({ width: 42 })),
     textBaseline: "alphabetic",
     textAlign: "start",
     font: "",
     fillStyle: "",
+    strokeStyle: "",
+    lineWidth: 0,
+    shadowColor: "",
+    shadowBlur: 0,
     globalAlpha: 1,
   };
 }
@@ -372,14 +399,51 @@ describe("composeFrame", () => {
     endcardSpy.mockRestore();
   });
 
-  it("skips looped effects while they sit in the gap between repeats", () => {
+  it("replays a looped effect every duration, one pass at a time", () => {
     const headlineSpy = vi.spyOn(headline, "draw");
     const drawFootage = vi.fn();
     const looping = effects([{ presetId: "headline", slot: "start", loop: true }]);
     composeFrame(ctx, looping, 1, drawFootage);
-    composeFrame(ctx, looping, 3.6, drawFootage); // inside the 3.4–3.8s gap
     expect(headlineSpy).toHaveBeenCalledTimes(1);
+    // headline.duration 3.4: the next pass starts at 3.4 with local 0 while
+    // the previous one has finished — passes never draw over each other.
+    composeFrame(ctx, looping, 3.4, drawFootage);
+    expect(headlineSpy).toHaveBeenCalledTimes(2);
+    expect(headlineSpy).toHaveBeenLastCalledWith(ctx, 0, headline.duration, {});
     headlineSpy.mockRestore();
+  });
+
+  it("streams a looped banner instead of restarting it", () => {
+    const streamSpy = vi.spyOn(breaking, "stream");
+    const drawSpy = vi.spyOn(breaking, "draw");
+    const drawFootage = vi.fn();
+    const looping = effects([{ presetId: "breaking", slot: "start", loop: true }]);
+    composeFrame(ctx, looping, breaking.duration + 2.5, drawFootage);
+    expect(streamSpy).toHaveBeenCalledWith(
+      ctx,
+      breaking.duration + 2.5,
+      breaking.duration,
+      {}
+    );
+    expect(drawSpy).not.toHaveBeenCalled();
+    streamSpy.mockRestore();
+    drawSpy.mockRestore();
+  });
+
+  it("stops a looped animation once the end card opens", () => {
+    const headlineSpy = vi.spyOn(headline, "draw");
+    const endcardSpy = vi.spyOn(endcard, "draw");
+    const drawFootage = vi.fn();
+    const planned = effects([
+      { presetId: "headline", slot: "start", loop: true },
+      { presetId: "endcard", slot: "end", loop: false },
+    ]);
+    const endcardStart = 30 - endcard.duration - 0.2;
+    composeFrame(ctx, planned, endcardStart + 1, drawFootage);
+    expect(headlineSpy).not.toHaveBeenCalled();
+    expect(endcardSpy).toHaveBeenCalledTimes(1);
+    headlineSpy.mockRestore();
+    endcardSpy.mockRestore();
   });
 
   it("keeps the footage zoom at 1 when no camera effect is active", () => {

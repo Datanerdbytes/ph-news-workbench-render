@@ -14,8 +14,9 @@ import { cn } from 'cn';
 import { PageAvatar } from '@/components/publishing/page-selection';
 import {
   attachmentsFromSlots,
-  effectLocalTime,
+  effectRenderer,
   planEffects,
+  plannedFrames,
   type PresetSlot,
   type PresetValues,
 } from '@/lib/reels/presets';
@@ -64,25 +65,18 @@ export function FinalReelPreview({
         Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
       const effects = planEffects(attachmentsFromSlots(slots, loops), duration, values);
       let zoom = 1;
-      const frames: { effect: (typeof effects)[number]; local: number }[] = [];
-      for (const effect of effects) {
-        const local = effectLocalTime(
-          video.currentTime,
-          effect.start,
-          effect.preset.duration,
-          effect.loop
-        );
-        if (local == null) continue;
+      const frames = plannedFrames(effects, video.currentTime);
+      for (const { effect, local } of frames) {
         if (effect.preset.scale) zoom *= effect.preset.scale(local);
-        frames.push({ effect, local });
       }
       video.style.transform = zoom === 1 ? '' : `scale(${zoom})`;
       ctx.clearRect(0, 0, OVERLAY_W, OVERLAY_H);
       for (const { effect, local } of frames) {
-        if (!effect.preset.draw) continue;
+        const draw = effectRenderer(effect);
+        if (!draw) continue;
         ctx.save();
         ctx.scale(OVERLAY_W / 1080, OVERLAY_H / 1920);
-        effect.preset.draw(ctx, local, effect.preset.duration, effect.values);
+        draw(ctx, local, effect.preset.duration, effect.values);
         ctx.restore();
       }
     };

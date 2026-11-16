@@ -58,6 +58,12 @@ export type ReelPreset = {
   fields: PresetField[];
   /** Render one frame at local time `t` in a 1080×1920 design space. */
   draw?: (ctx: Ctx, t: number, duration: number, values: PresetValues) => void;
+  /**
+   * Renderer for a looped effect whose content should keep flowing instead of
+   * replaying its intro — e.g. a ticker, where each repeat's text follows the
+   * one before on the same line. `t` keeps growing past `duration`.
+   */
+  stream?: (ctx: Ctx, t: number, duration: number, values: PresetValues) => void;
   /** Frame zoom multiplier over local time (camera motion baked into footage). */
   scale?: (t: number) => number;
   /** Build the looping DOM preview for picker cards (GSAP, preview only). */
@@ -153,7 +159,9 @@ export const headline: ReelPreset = {
     const top = 360;
     const padX = 110;
     const barIn = outQuart(seg(t, 0, 0.35));
-    const barOut = inCubic(seg(t, duration - 0.65, 0.3));
+    // Entrance starts at 0 and the exit ends exactly on `duration` so a
+    // looped pass finishes as the next one begins — no dead air at the seam.
+    const barOut = inCubic(seg(t, duration - 0.35, 0.35));
     if (barIn > 0 && barOut < 1) {
       ctx.save();
       ctx.globalAlpha = 1 - barOut;
@@ -170,8 +178,11 @@ export const headline: ReelPreset = {
     ctx.shadowColor = 'rgba(0,0,0,0.35)';
     ctx.shadowBlur = 28;
     words.forEach((word, i) => {
-      const inP = outQuart(seg(t, 0.3 + i * 0.28, 0.55));
-      const outP = inCubic(seg(t, duration - 0.75 + i * 0.07, 0.4));
+      const inP = outQuart(seg(t, i * 0.28, 0.55));
+      // Last word leaves exactly at `duration`.
+      const outP = inCubic(
+        seg(t, duration - 0.4 - (words.length - 1 - i) * 0.07, 0.4)
+      );
       if (inP === 0 || outP === 1) return;
       const y = top + i * lineH;
       const dy = (1 - inP) * (lineH + 30) - outP * (lineH + 30);
@@ -186,6 +197,51 @@ export const headline: ReelPreset = {
   },
 };
 
+/**
+ * Banner frame at local time `t`. The ticker's offset is continuous in `t`,
+ * so a streamed loop keeps scrolling instead of restarting the line.
+ */
+function drawBreaking(ctx: Ctx, t: number, v: PresetValues, fade: number) {
+  if (fade <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = fade;
+  const tagIn = outBack(seg(t, 0, 0.3));
+  if (tagIn > 0) {
+    const tagW = 300;
+    const tagH = 74;
+    ctx.save();
+    ctx.translate(80 + tagW / 2, 120 + tagH / 2);
+    const s = Math.max(tagIn, 0.001);
+    ctx.scale(s, s);
+    ctx.fillStyle = RED;
+    roundRect(ctx, -tagW / 2, -tagH / 2, tagW, tagH, 8);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = font(800, 38);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('BREAKING', 0, 2);
+    ctx.restore();
+  }
+  const barIn = outCubic(seg(t, 0.15, 0.4));
+  if (barIn > 0) {
+    const barH = 140;
+    const barY = DESIGN_H - 340 - (1 - barIn) * (barH + 40);
+    ctx.fillStyle = 'rgba(10,14,18,0.92)';
+    ctx.fillRect(0, barY, DESIGN_W, barH);
+    ctx.font = font(700, 54);
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffffff';
+    const text = (v.text || '').toUpperCase();
+    const unit = Math.max(ctx.measureText(`${text}   •   `).width, 100);
+    const x = -((t * 240) % unit);
+    for (let i = 0; i < Math.ceil(DESIGN_W / unit) + 2; i++) {
+      ctx.fillText(`${text}   •   `, x + i * unit, barY + barH / 2 + 2);
+    }
+  }
+  ctx.restore();
+}
+
 export const breaking: ReelPreset = {
   id: 'breaking',
   name: 'Breaking Banner',
@@ -198,45 +254,12 @@ export const breaking: ReelPreset = {
     { key: 'text', label: 'Banner text', value: 'Supreme Court rules on charter case' },
   ],
   draw(ctx, t, duration, v) {
-    const fade = 1 - seg(t, duration - 0.4, 0.4);
-    if (fade <= 0) return;
-    ctx.save();
-    ctx.globalAlpha = fade;
-    const tagIn = outBack(seg(t, 0, 0.3));
-    if (tagIn > 0) {
-      const tagW = 300;
-      const tagH = 74;
-      ctx.save();
-      ctx.translate(80 + tagW / 2, 120 + tagH / 2);
-      const s = Math.max(tagIn, 0.001);
-      ctx.scale(s, s);
-      ctx.fillStyle = RED;
-      roundRect(ctx, -tagW / 2, -tagH / 2, tagW, tagH, 8);
-      ctx.fill();
-      ctx.fillStyle = '#ffffff';
-      ctx.font = font(800, 38);
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('BREAKING', 0, 2);
-      ctx.restore();
-    }
-    const barIn = outCubic(seg(t, 0.15, 0.4));
-    if (barIn > 0) {
-      const barH = 140;
-      const barY = DESIGN_H - 260 - (1 - barIn) * (barH + 40);
-      ctx.fillStyle = 'rgba(10,14,18,0.92)';
-      ctx.fillRect(0, barY, DESIGN_W, barH);
-      ctx.font = font(700, 54);
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#ffffff';
-      const text = (v.text || '').toUpperCase();
-      const unit = Math.max(ctx.measureText(`${text}   •   `).width, 100);
-      const x = -((t * 240) % unit);
-      for (let i = 0; i < Math.ceil(DESIGN_W / unit) + 2; i++) {
-        ctx.fillText(`${text}   •   `, x + i * unit, barY + barH / 2 + 2);
-      }
-    }
-    ctx.restore();
+    drawBreaking(ctx, t, v, 1 - seg(t, duration - 0.4, 0.4));
+  },
+  // Looped banner stays up and its ticker keeps rolling: each repeat's text
+  // follows the previous one off-screen on the same line.
+  stream(ctx, t, _duration, v) {
+    drawBreaking(ctx, t, v, 1);
   },
 };
 
@@ -578,9 +601,6 @@ export const PRESET_CATEGORIES = [
   'Motion',
 ] as const;
 
-/** Silence between looped repeats of an effect, in seconds. */
-export const LOOP_GAP_SECONDS = 0.4;
-
 /** Effect start time for `slot` on a reel of `videoDuration` seconds. */
 export function slotStart(
   preset: ReelPreset,
@@ -597,21 +617,28 @@ export function slotStart(
 }
 
 /**
- * Local seconds into an effect at absolute reel time `t`, or null while the
- * effect is off screen — before its start, after a single play finishes, or
- * inside the gap between looped repeats. Looped effects cycle
- * `duration + LOOP_GAP_SECONDS` so each repeat plays the effect's own in/out
- * animation before the next one begins.
+ * Local times to draw an effect at, for absolute reel time `t`.
+ *
+ * A single play draws once inside its window. A looped effect replays its full
+ * in/out cycle every `duration` seconds; passes run back to back, never
+ * overlapping, so the next pass follows the previous one instead of landing
+ * on top of it. `endAt` — the absolute time the closing effect starts — ends
+ * the loop, so the end card is never painted over by a repeated animation.
  */
-export function effectLocalTime(
+export function effectLocals(
   t: number,
   start: number,
   duration: number,
-  loop: boolean
-): number | null {
-  if (t < start) return null;
-  const local = loop ? (t - start) % (duration + LOOP_GAP_SECONDS) : t - start;
-  return local <= duration ? local : null;
+  loop: boolean,
+  endAt: number = Number.POSITIVE_INFINITY
+): number[] {
+  if (t < start || duration <= 0) return [];
+  if (!loop) {
+    const local = t - start;
+    return local <= duration ? [local] : [];
+  }
+  if (t >= endAt) return [];
+  return [(t - start) % duration];
 }
 
 /** A planned effect: a preset resolved to one absolute time on a reel. */
@@ -649,6 +676,55 @@ export function planEffects(
     });
   }
   return planned;
+}
+
+/** One draw of a planned effect at its own local time. */
+export type EffectFrame = { effect: PlannedEffect; local: number };
+
+/**
+ * The draws one reel frame needs: every planned effect that is on screen at
+ * absolute time `t`, in attachment order. Streaming loops (a ticker) keep a
+ * single unbounded local time so their content flows across repeats instead
+ * of restarting; every other loop restarts every `duration` seconds. Loops
+ * stop at the closing effect's start so the end card keeps the frame to
+ * itself.
+ */
+export function plannedFrames(
+  effects: PlannedEffect[],
+  t: number
+): EffectFrame[] {
+  let endAt = Number.POSITIVE_INFINITY;
+  for (const effect of effects) {
+    if (effect.slot === 'end') endAt = Math.min(endAt, effect.start);
+  }
+  const frames: EffectFrame[] = [];
+  for (const effect of effects) {
+    if (effect.loop && effect.preset.stream) {
+      if (t >= effect.start && t < endAt) {
+        frames.push({ effect, local: t - effect.start });
+      }
+      continue;
+    }
+    for (const local of effectLocals(
+      t,
+      effect.start,
+      effect.preset.duration,
+      effect.loop,
+      endAt
+    )) {
+      frames.push({ effect, local });
+    }
+  }
+  return frames;
+}
+
+/** Renderer for one planned frame: `stream` while streaming, else `draw`. */
+export function effectRenderer(
+  effect: PlannedEffect
+): ReelPreset['draw'] | ReelPreset['stream'] {
+  return effect.loop && effect.preset.stream
+    ? effect.preset.stream
+    : effect.preset.draw;
 }
 
 /** Reads the picker's per-slot selection into bake-ready attachments. */

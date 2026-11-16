@@ -112,7 +112,18 @@ describe("AnimationPicker", () => {
     fireEvent.click(loop);
     expect(loop.checked).toBe(true);
     expect(
-      screen.getByText(/Repeats about every 3.8s through the rest of the reel/)
+      screen.getByText(/Repeats every 3\.4s — each pass follows the one before/)
+    ).toBeTruthy();
+  });
+
+  it("describes a streamed loop as scrolling rather than repeating", () => {
+    render(<Harness />);
+    fireEvent.click(presetCard("Breaking Banner"));
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(
+      screen.getByText(
+        "Keeps scrolling through the reel, stopping when the end animation starts."
+      )
     ).toBeTruthy();
   });
 

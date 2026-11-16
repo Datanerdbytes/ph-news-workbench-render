@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Sparkles, X } from 'lucide-react';
 import {
-  LOOP_GAP_SECONDS,
   PRESET_CATEGORIES,
   REEL_PRESETS,
   SLOT_ORDER,
@@ -72,6 +71,16 @@ function PresetThumb({
 }
 
 /** Editor block for one attached slot: fields, loop toggle, remove. */
+/** One line describing how the attached preset plays in its slot. */
+function playbackHint(slot: PresetSlot, preset: ReelPreset, loops: boolean) {
+  if (slot === 'end') return `Plays ${preset.window.toLowerCase()}.`;
+  if (!loops) return 'Plays once.';
+  if (preset.stream) {
+    return 'Keeps scrolling through the reel, stopping when the end animation starts.';
+  }
+  return `Repeats every ${preset.duration.toFixed(1)}s — each pass follows the one before, stopping when the end animation starts.`;
+}
+
 function SlotEditor({
   slot,
   preset,
@@ -137,11 +146,7 @@ function SlotEditor({
         </div>
       ))}
       <p className="text-[10px] leading-relaxed text-muted-foreground">
-        {slot === 'end'
-          ? `Plays ${preset.window.toLowerCase()}.`
-          : loops
-            ? `Repeats about every ${(preset.duration + LOOP_GAP_SECONDS).toFixed(1)}s through the rest of the reel.`
-            : 'Plays once.'}
+        {playbackHint(slot, preset, loops)}
       </p>
     </div>
   );
