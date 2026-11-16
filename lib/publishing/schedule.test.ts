@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  FACEBOOK_SCHEDULE_MAX_MS,
+  FACEBOOK_SCHEDULE_TOO_FAR_ERROR,
   SCHEDULE_INVALID_ERROR,
   SCHEDULE_MISSING_ERROR,
   SCHEDULE_TOO_FAR_ERROR,
   SCHEDULE_TOO_SOON_ERROR,
+  facebookScheduleWindowError,
   parseScheduledPublishTime,
   resolveScheduledFor,
   scheduledFields,
@@ -58,6 +61,18 @@ describe("parseScheduledPublishTime", () => {
     expect(parseScheduledPublishTime(target.toISOString())).toEqual({
       unix: Math.floor(target.getTime() / 1000),
     });
+  });
+});
+
+describe("facebookScheduleWindowError", () => {
+  it("caps Facebook-held schedules at 29 days", () => {
+    expect(FACEBOOK_SCHEDULE_MAX_MS).toBe(29 * 24 * 60 * 60 * 1000);
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    expect(facebookScheduleWindowError(new Date(now + 29 * day), now)).toBeUndefined();
+    expect(facebookScheduleWindowError(new Date(now + 30 * day), now)).toBe(
+      FACEBOOK_SCHEDULE_TOO_FAR_ERROR
+    );
   });
 });
 

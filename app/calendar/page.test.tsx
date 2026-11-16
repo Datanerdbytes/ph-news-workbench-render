@@ -399,6 +399,67 @@ describe("CalendarPage reschedule", () => {
     );
   });
 
+  it("clears a failed request on edit and lets the move be retried", async () => {
+    let patches = 0;
+    fetchMock.mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/schedule") {
+          return { ok: true, json: async () => [localPost] };
+        }
+        if (init?.method === "PATCH") {
+          patches += 1;
+          if (patches === 1) {
+            return {
+              ok: false,
+              json: async () => ({ error: "Facebook refused to move this item." }),
+            };
+          }
+          return {
+            ok: true,
+            json: async () => ({
+              id: 51,
+              scheduled_for: new Date("2026-11-22T10:30").toISOString(),
+            }),
+          };
+        }
+        return { ok: true, json: async () => ({ deleted: true }) };
+      }
+    );
+
+    render(<CalendarPage />);
+    await flush();
+
+    const sidebar = screen
+      .getByRole("heading", { name: "Scheduled" })
+      .closest("section")!;
+    fireEvent.click(
+      within(sidebar).getByRole("button", { name: "Reschedule" })
+    );
+    const dialog = await screen.findByRole("dialog");
+    const input = within(dialog).getByLabelText("New date and time");
+    fireEvent.change(input, { target: { value: "2026-11-22T10:30" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Reschedule" }));
+
+    expect(
+      await within(dialog).findByText("Facebook refused to move this item.")
+    ).toBeInTheDocument();
+    const submit = within(dialog).getByRole("button", { name: "Reschedule" });
+    // A failed request is retryable; only an invalid time blocks submission.
+    expect(submit).toBeEnabled();
+
+    fireEvent.change(input, { target: { value: "2026-11-22T11:00" } });
+    expect(
+      within(dialog).queryByText("Facebook refused to move this item.")
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Reschedule" }));
+    await waitFor(() =>
+      expect(toastMock.success).toHaveBeenCalledWith("Scheduled post moved")
+    );
+    expect(patches).toBe(2);
+  });
+
   it("caps a Facebook row's picker at Meta's 29-day window", async () => {
     respond([reel]);
 

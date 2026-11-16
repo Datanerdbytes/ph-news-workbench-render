@@ -2,7 +2,10 @@ import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { requireWorkspace, unauthorized } from "@/lib/session";
 import { recordScheduleEvent } from "@/lib/schedule-events";
-import { scheduleWindowError, FACEBOOK_SCHEDULE_MAX_MS } from "@/lib/publishing/schedule";
+import {
+  facebookScheduleWindowError,
+  scheduleWindowError,
+} from "@/lib/publishing/schedule";
 import {
   cancelFacebookScheduledPost,
   isFacebookStillScheduled,
@@ -150,17 +153,11 @@ export async function PATCH(
       { status: 409 }
     );
   }
-  if (
-    row.source === "facebook" &&
-    scheduledFor.getTime() - Date.now() > FACEBOOK_SCHEDULE_MAX_MS
-  ) {
-    return NextResponse.json(
-      {
-        error:
-          "Facebook only accepts schedules up to 29 days ahead. Pick an earlier time.",
-      },
-      { status: 400 }
-    );
+  if (row.source === "facebook") {
+    const facebookWindowError = facebookScheduleWindowError(scheduledFor);
+    if (facebookWindowError) {
+      return NextResponse.json({ error: facebookWindowError }, { status: 400 });
+    }
   }
 
   let warning: string | undefined;
@@ -194,6 +191,7 @@ export async function PATCH(
     WHERE id = ${id}
       AND workspace_id = ${access.workspace.id}
       AND status = 'scheduled'
+      AND scheduled_for = ${row.scheduled_for}
     RETURNING id, scheduled_for`) as unknown as {
     id: number;
     scheduled_for: string;

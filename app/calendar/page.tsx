@@ -200,6 +200,9 @@ function RescheduleForm({
   const bounds = rescheduleBounds(now, post);
   const resolution = resolveScheduledFor(value, new Date(now));
   const message = failure ?? resolution.error;
+  // Only a validation error keeps the button disabled — a failed request may
+  // be retried as-is, and editing the time clears the stale failure.
+  const blocked = Boolean(resolution.error);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -242,7 +245,10 @@ function RescheduleForm({
         disabled={saving}
         aria-invalid={Boolean(message)}
         aria-describedby={message ? "reschedule-error" : undefined}
-        onChange={(event) => setValue(event.target.value)}
+        onChange={(event) => {
+          setValue(event.target.value);
+          setFailure(null);
+        }}
         className="mt-1.5 h-9"
       />
       {message && (
@@ -267,7 +273,7 @@ function RescheduleForm({
         <Button
           type="submit"
           size="sm"
-          disabled={saving || Boolean(message)}
+          disabled={saving || blocked}
           aria-label={saving ? "Rescheduling…" : undefined}
         >
           {saving ? (
@@ -396,7 +402,7 @@ export default function CalendarPage() {
   }, [load]);
 
   useEffect(() => {
-    if (focusResolved.current || loading || !focusPostId) return;
+    if (focusResolved.current || loading || loadError || !focusPostId) return;
     // Resolve the hand-off once, after the first fetch: switch to the post's
     // month and open its day panel. A stale id (canceled elsewhere) is only
     // reported, never retried.
@@ -411,7 +417,7 @@ export default function CalendarPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setCursor(new Date(when.getFullYear(), when.getMonth(), 1));
     setSelectedDay(dayKey(when));
-  }, [focusPostId, loading, posts]);
+  }, [focusPostId, loadError, loading, posts]);
 
   const byDay = useMemo(() => {
     const map = new Map<string, ScheduledPost[]>();
@@ -550,7 +556,9 @@ export default function CalendarPage() {
         post.id === id ? { ...post, scheduled_for: movedTo } : post
       )
     );
-    setReschedule(null);
+    // Close only the dialog this request started — another post's dialog may
+    // have been opened while the move was in flight.
+    setReschedule((current) => (current?.id === id ? null : current));
     if (typeof data?.warning === "string" && data.warning) {
       toast.warning("Moved on some Pages", { description: data.warning });
     } else {

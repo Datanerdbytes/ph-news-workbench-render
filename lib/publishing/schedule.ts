@@ -7,6 +7,18 @@ export const MAX_SCHEDULE_MS = 75 * 24 * 60 * 60 * 1000;
  * stay inside it or the platform refuses the schedule.
  */
 export const FACEBOOK_SCHEDULE_MAX_MS = 29 * 24 * 60 * 60 * 1000;
+export const FACEBOOK_SCHEDULE_TOO_FAR_ERROR =
+  'Facebook only accepts schedules up to 29 days ahead. Pick an earlier time.';
+
+/** Narrower window for rows Facebook holds; undefined when it fits. */
+export function facebookScheduleWindowError(
+  date: Date,
+  now: number = Date.now()
+): string | undefined {
+  return date.getTime() - now > FACEBOOK_SCHEDULE_MAX_MS
+    ? FACEBOOK_SCHEDULE_TOO_FAR_ERROR
+    : undefined;
+}
 
 export const SCHEDULE_MISSING_ERROR = 'Pick a date and time to schedule.';
 export const SCHEDULE_INVALID_ERROR = 'Pick a valid date and time to schedule.';

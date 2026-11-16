@@ -99,11 +99,13 @@ describe("PATCH /api/schedule/[id]", () => {
         metadata: { from: localRow.scheduled_for, to: NEW_TIME },
       })
     );
-    // The update is scoped to the workspace and to a still-scheduled row.
+    // The update is scoped to the workspace, to a still-scheduled row, and to
+    // the time we read — an overlapping reschedule cannot silently win.
     const updateCall = sqlMock.mock.calls[1];
-    expect((updateCall[0] as string[]).join("?")).toContain(
-      "status = 'scheduled'"
-    );
+    const updateText = (updateCall[0] as string[]).join("?");
+    expect(updateText).toContain("status = 'scheduled'");
+    expect(updateText).toContain("scheduled_for =");
+    expect(updateCall).toContain(localRow.scheduled_for);
     expect(updateCall).toContain(NEW_TIME);
   });
 
