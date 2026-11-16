@@ -60,9 +60,10 @@ export async function clearSignInLock(email: string): Promise<void> {
 }
 
 /**
- * Seed two published posts: one linked to a published draft (the same
- * publish written down twice) and one with no draft at all. The workspace
- * total must count them as two publishes, not three.
+ * Seed three published posts: two linked to the same published draft (the
+ * same draft published twice) and one with no draft at all. The workspace
+ * total must count them as three publishes — counting the linked posts as
+ * rows instead of distinct drafts would report two.
  */
 export async function seedPublishedPublishes(): Promise<void> {
   const sql = db();
@@ -82,6 +83,8 @@ export async function seedPublishedPublishes(): Promise<void> {
     INSERT INTO scheduled_posts
       (workspace_id, text, scheduled_for, status, kind, source, created_by, draft_id)
     VALUES
+      (${owner.workspace_id}, ${SEED_MARKER}, now(), 'published', 'post',
+       'local', ${owner.user_id}, ${drafts[0].id}),
       (${owner.workspace_id}, ${SEED_MARKER}, now(), 'published', 'post',
        'local', ${owner.user_id}, ${drafts[0].id}),
       (${owner.workspace_id}, ${SEED_MARKER}, now(), 'published', 'post',

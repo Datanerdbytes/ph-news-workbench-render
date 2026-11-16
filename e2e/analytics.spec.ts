@@ -19,14 +19,15 @@ test.afterEach(async () => {
 test("counts a publish that flipped its draft once", async ({ page }) => {
   const before = await publishedTotal(page);
 
-  // One published post linked to a published draft — the same publish
-  // recorded twice — and one published post with no draft.
+  // Two published posts linked to the same published draft — that draft
+  // published twice — and one published post with no draft.
   await seedPublishedPublishes();
 
   const after = await publishedTotal(page);
 
-  // Two publishes, not three: the linked one is one publish, whatever it
-  // was recorded as. This runs the overlap query against the database, so
-  // a wrong subtraction fails here.
-  expect(after - before).toBe(2);
+  // Three publishes, not four: the linked ones are two publishes, whatever
+  // they were recorded as. This runs the overlap query against the
+  // database, so counting the linked posts as rows instead of distinct
+  // drafts fails here.
+  expect(after - before).toBe(3);
 });
