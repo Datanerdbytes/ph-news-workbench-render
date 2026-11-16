@@ -137,10 +137,17 @@ export function NotificationBell() {
    * when it lands instead of resurrecting a stale badge.
    */
   const mutationVersionRef = useRef(0);
+  /**
+   * Counts the mark-read writes currently in flight. A read that goes out
+   * while one is pending can still be answered with the pre-write count, so it
+   * is dropped — the refresh that follows the settled write restores the truth.
+   */
+  const pendingWritesRef = useRef(0);
 
   const refresh = useCallback(
     async (announce: boolean) => {
       const version = mutationVersionRef.current;
+      const writePending = pendingWritesRef.current > 0;
       try {
         const res = await fetch(`/api/notifications?limit=${PAGE_SIZE}`, {
           cache: "no-store",
@@ -150,6 +157,9 @@ export function NotificationBell() {
         // A local mutation landed while this request was in flight, so its
         // count is older than what the panel already shows.
         if (mutationVersionRef.current !== version) return;
+        // The request went out while a mark-read write was pending, so the
+        // server may have answered with the count from before that write.
+        if (writePending) return;
         const previousMax = maxSeenIdRef.current;
         setRows(data.rows);
         setUnread(data.unread);
@@ -216,6 +226,7 @@ export function NotificationBell() {
     if (loadingMore || !hasMore || !rows.length) return;
     setLoadingMore(true);
     const version = mutationVersionRef.current;
+    const writePending = pendingWritesRef.current > 0;
     try {
       const res = await fetch(
         `/api/notifications?limit=${PAGE_SIZE}&before=${rows[rows.length - 1].id}`,
@@ -223,9 +234,11 @@ export function NotificationBell() {
       );
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data = (await res.json()) as NotificationsResponse;
-      // Same rule as refresh: a page fetched before a local mutation carries
-      // a stale count, so it must not overwrite the current badge.
+      // Same rules as refresh: a page fetched before a local mutation, or
+      // while one is pending, carries a stale count and must not overwrite
+      // the current badge.
       if (mutationVersionRef.current !== version) return;
+      if (writePending) return;
       setRows((current) => mergeRows(current, data.rows));
       setHasMore(data.hasMore);
       setUnread(data.unread);
@@ -244,6 +257,7 @@ export function NotificationBell() {
       // Invalidate any refresh already on the wire — its count predates this
       // mutation.
       mutationVersionRef.current += 1;
+      pendingWritesRef.current += 1;
       setRows((current) =>
         current.map((item) =>
           item.id === row.id
@@ -252,7 +266,13 @@ export function NotificationBell() {
         )
       );
       setUnread((value) => Math.max(0, value - 1));
-      void markRead(Number(row.id)).catch(() => void refresh(false));
+      void markRead(Number(row.id))
+        .catch(() => undefined)
+        .finally(() => {
+          pendingWritesRef.current -= 1;
+          // The settled server state is authoritative — re-read it.
+          void refresh(false);
+        });
     }
     setOpen(false);
     if (row.link) router.push(row.link);
@@ -262,6 +282,7 @@ export function NotificationBell() {
     // Invalidate any refresh already on the wire — its count predates this
     // mutation and would put the badge back.
     mutationVersionRef.current += 1;
+    pendingWritesRef.current += 1;
     setRows((current) =>
       current.map((item) =>
         item.readAt ? item : { ...item, readAt: new Date().toISOString() }
@@ -271,7 +292,10 @@ export function NotificationBell() {
     try {
       await markRead("all");
     } catch {
-      // The write failed — fall back to what the server still reports.
+      // The write failed — the refresh below restores the server's count.
+    } finally {
+      pendingWritesRef.current -= 1;
+      // The settled server state is authoritative — re-read it.
       void refresh(false);
     }
   }

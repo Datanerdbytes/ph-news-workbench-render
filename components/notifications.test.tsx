@@ -52,11 +52,19 @@ let pollData: PollPayload;
 let moreData: PollPayload;
 let moreFail = false;
 let moreStatus = 200;
+/** The writes the mock server has taken — it reports them like the real one. */
+let readAll = false;
+const readIds = new Set<string>();
 
 const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-  void init; // the bell never inspects request options
   const url = String(input);
   if (url.includes("/api/notifications/read")) {
+    const body = String(init?.body ?? "");
+    if (body.includes('"all":true')) {
+      readAll = true;
+    } else {
+      readIds.add(String(JSON.parse(body).id));
+    }
     return { ok: true, json: async () => ({ ok: true }) };
   }
   if (url.includes("before=")) {
@@ -65,7 +73,15 @@ const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => 
     }
     return { ok: true, json: async () => moreData };
   }
-  return { ok: true, json: async () => pollData };
+  const rows = pollData.rows.map((row) =>
+    readAll || readIds.has(row.id)
+      ? { ...row, readAt: row.readAt ?? new Date().toISOString() }
+      : row
+  );
+  const unread = readAll
+    ? 0
+    : Math.max(0, pollData.unread - readIds.size);
+  return { ok: true, json: async () => ({ ...pollData, rows, unread }) };
 });
 
 async function flush() {
@@ -82,6 +98,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   moreFail = false;
   moreStatus = 200;
+  readAll = false;
+  readIds.clear();
   vi.stubGlobal("fetch", fetchMock);
 });
 
@@ -248,6 +266,59 @@ describe("NotificationBell", () => {
 
     // The in-flight response still reports two unread — it must not win.
     release({ ok: true, json: async () => pollData });
+    await flush();
+
+    expect(screen.queryByText("2")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Mark all read" })
+    ).toBeNull();
+  });
+
+  it("does not let a read issued during a pending write restore the old count", async () => {
+    pollData = {
+      rows: [notif(1), notif(2)],
+      unread: 2,
+      nextCursor: null,
+      hasMore: false,
+    };
+    render(<NotificationBell />);
+    await flush();
+    await openPanel();
+
+    // Hold the mark-all write open so a read can go out while it is pending.
+    let releaseWrite!: (value: Awaited<ReturnType<typeof fetchMock>>) => void;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseWrite = (value) => {
+            readAll = true; // the server applies the write it just took
+            resolve(value);
+          };
+        })
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+    await flush();
+
+    // The poll that runs while the write is pending still reports two unread.
+    let releaseRead!: (value: Awaited<ReturnType<typeof fetchMock>>) => void;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseRead = resolve;
+        })
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    releaseRead({ ok: true, json: async () => pollData });
+    await flush();
+
+    // The stale count must not win.
+    expect(screen.queryByText("2")).not.toBeInTheDocument();
+
+    // Once the write lands, the settled refresh confirms the cleared badge.
+    releaseWrite({ ok: true, json: async () => ({ ok: true }) });
+    await flush();
     await flush();
 
     expect(screen.queryByText("2")).not.toBeInTheDocument();
