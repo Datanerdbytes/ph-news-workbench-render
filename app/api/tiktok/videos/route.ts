@@ -6,6 +6,7 @@ import { ensureFreshTikTokToken, TikTokAuthError, tiktokPublicPostingApproved } 
 import { requirePlatformConnection } from '@/lib/publishing/connection';
 import { publishTikTokVideo, type TikTokPublishResult } from '@/lib/publishing/tiktok';
 import { tiktokErrorResponse } from '@/lib/publishing/errors';
+import { recordNativeSchedule } from '@/lib/schedule-mirror';
 
 export const dynamic = 'force-dynamic';
 
@@ -95,6 +96,28 @@ export async function POST(request: Request) {
       accessToken: token,
       metadata: { title, privacyStatus },
       videoUrl,
+    });
+
+    // Mirror the publish so the workspace keeps a row for it — without this
+    // the per-platform counters never saw a TikTok post.
+    await recordNativeSchedule({
+      workspaceId,
+      userId: access.user.id,
+      kind: 'video',
+      text: title,
+      scheduledFor: null,
+      results: [
+        {
+          page: {
+            id: connection.platformUserId,
+            name: connection.username,
+          },
+          ok: true,
+          id: published.id,
+          permalink: published.permalink,
+        },
+      ],
+      platform: 'tiktok',
     });
 
     return NextResponse.json(

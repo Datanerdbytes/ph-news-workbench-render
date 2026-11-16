@@ -4,6 +4,7 @@ import { requirePublishingConnection } from '@/lib/publishing/connection';
 import {
   crosspostResponse,
   publishToSelectedPages,
+  type CrosspostResult,
 } from '@/lib/publishing/crosspost';
 import { facebookErrorResponse } from '@/lib/publishing/errors';
 import { readPageIds } from '@/lib/publishing/request';
@@ -19,6 +20,7 @@ import {
   MultipartTooLargeError,
   type ParsedMultipart,
 } from '@/lib/media-file';
+import { recordNativeSchedule } from '@/lib/schedule-mirror';
 
 export const dynamic = 'force-dynamic';
 
@@ -31,6 +33,23 @@ export async function POST(request: Request) {
   if (result.response) return result.response;
 
   const { access } = result.context;
+
+  /**
+   * Stories are a Facebook format the mirror did not know about, so every
+   * publish used to leave no local trace — the Dashboard's per-platform
+   * counters would have stayed at zero forever. Mirroring is best-effort:
+   * the mirror swallows its own failures, so a broken row never undoes a
+   * story that is already live.
+   */
+  const recordStory = (results: CrosspostResult[]) =>
+    recordNativeSchedule({
+      workspaceId: access.workspace.id,
+      userId: access.user.id,
+      kind: 'story',
+      text: '',
+      scheduledFor: null,
+      results,
+    });
 
   // Videos spool to disk; photos (≤20 MB) stay in memory. request.formData()
   // buffered the whole upload in the heap — the Render 512 MB OOM.
@@ -117,6 +136,8 @@ export async function POST(request: Request) {
           }),
       });
 
+      await recordStory(results);
+
       return crosspostResponse(
         results,
         { kind },
@@ -158,6 +179,8 @@ export async function POST(request: Request) {
           },
         }),
     });
+
+    await recordStory(results);
 
     return crosspostResponse(
       results,

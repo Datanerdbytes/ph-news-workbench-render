@@ -21,6 +21,95 @@ type DailyRow = {
   scheduled: number;
 };
 
+/** One row per platform in the grouped publish query below. */
+type PlatformRow = {
+  platform: string;
+  total: number;
+  post: number;
+  reel: number;
+  live: number;
+  story: number;
+  total_30d: number;
+};
+
+/** The platforms the Dashboard can show counts for, in pill order. */
+const PLATFORMS = ["facebook", "instagram", "youtube", "tiktok"] as const;
+
+type AnalyticsPlatform = (typeof PLATFORMS)[number];
+
+type PlatformPublishStats = {
+  platform: AnalyticsPlatform;
+  published: {
+    total: number;
+    post: number;
+    reel: number;
+    live: number;
+    story: number;
+  };
+  published30d: {
+    total: number;
+  };
+};
+
+/**
+ * scheduled_posts has no platform column — the platform is derived from
+ * source/kind, the same way the scheduler already branches:
+ *
+ * - facebook: source='facebook' (native publishes) or source='local' (the
+ *   workbench executor) except the Instagram rows, which the local executor
+ *   also owns.
+ * - instagram: kind='instagram-post' — Instagram has no scheduling API, so
+ *   its rows always come from the local executor.
+ * - youtube / tiktok: their own source.
+ */
+async function platformPublishCounts(workspaceId: string) {
+  const rows = (await sql`
+    SELECT platform,
+           count(*)::int AS total,
+           count(*) FILTER (WHERE kind IN ('post', 'photo', 'instagram-post'))::int AS post,
+           count(*) FILTER (WHERE kind = 'reel')::int AS reel,
+           count(*) FILTER (WHERE kind = 'live')::int AS live,
+           count(*) FILTER (WHERE kind = 'story')::int AS story,
+           count(*) FILTER (WHERE updated_at > now() - interval '30 days')::int AS total_30d
+    FROM (
+      SELECT
+        CASE
+          WHEN source = 'facebook' OR (source = 'local' AND kind <> 'instagram-post') THEN 'facebook'
+          WHEN source = 'youtube' THEN 'youtube'
+          WHEN source = 'tiktok' THEN 'tiktok'
+          WHEN kind = 'instagram-post' THEN 'instagram'
+          ELSE 'facebook'
+        END AS platform,
+        kind,
+        updated_at
+      FROM scheduled_posts
+      WHERE workspace_id = ${workspaceId} AND status = 'published'
+    ) rows
+    GROUP BY platform
+  `) as unknown as PlatformRow[];
+
+  const byPlatform = new Map(rows.map((row) => [row.platform, row]));
+
+  // Every platform is always present — a platform without publishes reads as
+  // zeros, not as a missing card.
+  return PLATFORMS.map((platform) => {
+    const row = byPlatform.get(platform);
+    return {
+      platform,
+      published: {
+        total: row?.total ?? 0,
+        post: row?.post ?? 0,
+        reel: row?.reel ?? 0,
+        live: row?.live ?? 0,
+        story: row?.story ?? 0,
+      },
+      published30d: {
+        total: row?.total_30d ?? 0,
+      },
+    } satisfies PlatformPublishStats;
+  });
+}
+
 export async function GET(request: Request) {
   const access = await requireWorkspace(request);
   if (!access) return unauthorized();
@@ -78,6 +167,7 @@ export async function GET(request: Request) {
   `) as unknown as DailyRow[];
 
   const row = totals[0];
+  const platforms = await platformPublishCounts(workspaceId);
 
   return NextResponse.json(
     {
@@ -90,6 +180,7 @@ export async function GET(request: Request) {
         cost: row?.cost ?? 0,
       },
       daily,
+      platforms,
     },
     { headers: { "cache-control": "no-store" } }
   );
