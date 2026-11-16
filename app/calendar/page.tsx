@@ -1,11 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CalendarDays, ChevronLeft, ChevronRight, Clock, Loader2, Play, X } from "lucide-react";
+import { CalendarDays, ChevronLeft, ChevronRight, Clock, Play, X } from "lucide-react";
 import { toast } from "sonner";
 import { AppFrame } from "@/components/app-frame";
 import { Button } from "@/components/ui/button";
-import { ConfirmIconButton } from "@/components/ui/confirm-button";
+import { ConfirmButton } from "@/components/ui/confirm-button";
 import { ErrorState } from "@/components/ui/error-state";
 import { StatusPill } from "@/components/status-pill";
 import { cn } from "cn";
@@ -68,6 +68,29 @@ function timeLabel(value: string) {
   });
 }
 
+/** Labeled cancel control shared by every per-post surface on the calendar. */
+function CancelButton({
+  post,
+  onCancel,
+}: {
+  post: ScheduledPost;
+  onCancel: (id: number) => Promise<void> | void;
+}) {
+  return (
+    <ConfirmButton
+      variant="outline"
+      size="sm"
+      onConfirm={() => onCancel(post.id)}
+      confirmLabel="Click again to cancel"
+      busyLabel="Canceling…"
+      icon={<X className="size-3.5" aria-hidden />}
+      className="h-8 shrink-0 rounded-[6px] border-destructive/30 px-2 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive"
+    >
+      {post.source === "facebook" ? "Cancel on Facebook" : "Cancel post"}
+    </ConfirmButton>
+  );
+}
+
 /**
  * Full-detail row for the day panel and the mobile agenda — the month-grid
  * chips truncate and hide content behind hover-only tooltips, so every
@@ -78,7 +101,7 @@ function CalendarPostRow({
   onCancel,
 }: {
   post: ScheduledPost;
-  onCancel: (id: number) => void;
+  onCancel: (id: number) => Promise<void> | void;
 }) {
   return (
     <div className="flex items-start justify-between gap-3">
@@ -106,14 +129,7 @@ function CalendarPostRow({
         )}
       </div>
       {post.status === "scheduled" && (
-        <ConfirmIconButton
-          onConfirm={() => onCancel(post.id)}
-          idleLabel="Cancel scheduled post"
-          armedLabel="Click again to cancel this scheduled post"
-          busyIcon={<Loader2 className="size-3.5 animate-spin" aria-hidden />}
-          className="tap-target rounded-md p-1.5 text-muted-foreground/70 transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-40"
-          icon={<X className="size-3.5" aria-hidden />}
-        />
+        <CancelButton post={post} onCancel={onCancel} />
       )}
     </div>
   );
@@ -133,6 +149,15 @@ export default function CalendarPage() {
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const detailRef = useRef<HTMLDivElement>(null);
   const hadDaySelected = useRef(false);
+  // A Dashboard hand-off arrives as ?post=<id>. Focus that post — jump to its
+  // month, open its day panel and highlight it — instead of dropping the user
+  // on the month grid with nothing singled out.
+  const [focusPostId] = useState<number | null>(() => {
+    if (typeof window === "undefined") return null;
+    const id = Number(new URLSearchParams(window.location.search).get("post"));
+    return Number.isInteger(id) && id > 0 ? id : null;
+  });
+  const focusResolved = useRef(false);
   // One shared clock for every "is it due yet?" comparison in the render —
   // refreshed on the same minute cadence as load().
   const [now, setNow] = useState(() => Date.now());
@@ -167,6 +192,24 @@ export default function CalendarPage() {
     }, 60_000);
     return () => clearInterval(timer);
   }, [load]);
+
+  useEffect(() => {
+    if (focusResolved.current || loading || !focusPostId) return;
+    // Resolve the hand-off once, after the first fetch: switch to the post's
+    // month and open its day panel. A stale id (canceled elsewhere) is only
+    // reported, never retried.
+    focusResolved.current = true;
+    const focused = posts.find((post) => post.id === focusPostId);
+    if (!focused) {
+      toast("That scheduled post is no longer on the calendar.");
+      return;
+    }
+    const when = new Date(focused.scheduled_for);
+    // The target month and day only exist once the fetch has landed.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCursor(new Date(when.getFullYear(), when.getMonth(), 1));
+    setSelectedDay(dayKey(when));
+  }, [focusPostId, loading, posts]);
 
   const byDay = useMemo(() => {
     const map = new Map<string, ScheduledPost[]>();
@@ -372,8 +415,18 @@ export default function CalendarPage() {
                 {[...monthPosts]
                   .sort((a, b) => a.scheduled_for.localeCompare(b.scheduled_for))
                   .map((post) => (
-                    <li key={post.id} className="px-1 py-2.5">
-                      <CalendarPostRow post={post} onCancel={cancelPost} />
+                    <li
+                      key={post.id}
+                      className={cn(
+                        "px-1 py-2.5",
+                        focusPostId === post.id &&
+                          "-mx-1 rounded-md bg-brand-soft/40 px-2"
+                      )}
+                    >
+                      <CalendarPostRow
+                        post={post}
+                        onCancel={cancelPost}
+                      />
                     </li>
                   ))}
               </ul>
@@ -500,9 +553,16 @@ export default function CalendarPage() {
                     {selectedPosts.map((post) => (
                       <li
                         key={post.id}
-                        className="rounded-lg border border-border bg-card px-3 py-2.5"
+                        className={cn(
+                          "rounded-lg border border-border bg-card px-3 py-2.5",
+                          focusPostId === post.id &&
+                            "border-brand/50 bg-brand-soft/30 ring-1 ring-brand/25"
+                        )}
                       >
-                        <CalendarPostRow post={post} onCancel={cancelPost} />
+                        <CalendarPostRow
+                          post={post}
+                          onCancel={cancelPost}
+                        />
                       </li>
                     ))}
                   </ul>
@@ -535,41 +595,38 @@ export default function CalendarPage() {
                     const late =
                       new Date(post.scheduled_for).getTime() <= now;
                     return (
-                      <li key={post.id} className="group px-4 py-3">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <p
-                              className={cn(
-                                "flex items-center gap-1.5 text-[10.5px] font-semibold",
-                                late
-                                  ? "text-destructive"
-                                  : "text-muted-foreground"
-                              )}
-                            >
-                              <Clock className="size-3" aria-hidden />
-                              {late ? "Overdue · " : ""}
-                              {formatDateTime(post.scheduled_for)}
-                            </p>
-                            <p className="mt-1 flex items-center gap-1.5 text-[9.5px] font-bold uppercase tracking-[0.12em] text-brand">
-                              {KIND_LABELS[post.kind] ?? post.kind}
-                              <span className="font-medium normal-case tracking-normal text-muted-foreground">
-                                {sourceLabel(post.source)}
-                              </span>
-                            </p>
-                            <p className="mt-1 line-clamp-2 text-[12px] leading-snug">
-                              {post.news_title ?? post.text}
-                            </p>
-                          </div>
-                          <ConfirmIconButton
-                            onConfirm={() => cancelPost(post.id)}
-                            idleLabel="Cancel scheduled post"
-                            armedLabel="Click again to cancel this scheduled post"
-                            busyIcon={
-                              <Loader2 className="size-3.5 animate-spin" aria-hidden />
-                            }
-                            className="tap-target rounded-md p-1.5 text-muted-foreground/70 transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-40"
-                            icon={<X className="size-3.5" aria-hidden />}
-                          />
+                      <li
+                        key={post.id}
+                        className={cn(
+                          "group px-4 py-3",
+                          focusPostId === post.id && "bg-brand-soft/40"
+                        )}
+                      >
+                        <div className="min-w-0">
+                          <p
+                            className={cn(
+                              "flex items-center gap-1.5 text-[10.5px] font-semibold",
+                              late
+                                ? "text-destructive"
+                                : "text-muted-foreground"
+                            )}
+                          >
+                            <Clock className="size-3" aria-hidden />
+                            {late ? "Overdue · " : ""}
+                            {formatDateTime(post.scheduled_for)}
+                          </p>
+                          <p className="mt-1 flex items-center gap-1.5 text-[9.5px] font-bold uppercase tracking-[0.12em] text-brand">
+                            {KIND_LABELS[post.kind] ?? post.kind}
+                            <span className="font-medium normal-case tracking-normal text-muted-foreground">
+                              {sourceLabel(post.source)}
+                            </span>
+                          </p>
+                          <p className="mt-1 line-clamp-2 text-[12px] leading-snug">
+                            {post.news_title ?? post.text}
+                          </p>
+                        </div>
+                        <div className="mt-2 flex justify-end">
+                          <CancelButton post={post} onCancel={cancelPost} />
                         </div>
                       </li>
                     );
