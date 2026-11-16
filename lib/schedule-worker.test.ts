@@ -15,6 +15,8 @@ vi.mock("@/lib/facebook", async (importOriginal) => {
     isFacebookPostPublished: vi.fn(),
     isFacebookLiveStarted: vi.fn(),
     isFacebookStillScheduled: vi.fn(),
+    cancelFacebookScheduledPost: vi.fn(),
+    rescheduleFacebookScheduledPost: vi.fn(),
   };
 });
 vi.mock("@/lib/publishing/connection", () => ({
@@ -33,10 +35,12 @@ vi.mock("@/lib/youtube", () => ({
 import { sql } from "@/lib/db";
 import {
   FacebookApiError,
+  cancelFacebookScheduledPost,
   isFacebookPostPublished,
   isFacebookStillScheduled,
   isFacebookVideoPublished,
   publishPagePost,
+  rescheduleFacebookScheduledPost,
 } from "@/lib/facebook";
 import { getPrimaryPage, resolvePageToken } from "@/lib/facebook-page-token";
 import { recordScheduleEvent } from "@/lib/schedule-events";
@@ -50,7 +54,11 @@ import {
   ensureFreshYouTubeToken,
   fetchYouTubeVideoStatus,
 } from "@/lib/youtube";
-import { publishDuePosts, syncNativeSchedules } from "./schedule-worker";
+import {
+  publishDuePosts,
+  recoverStaleReschedules,
+  syncNativeSchedules,
+} from "./schedule-worker";
 
 const sqlMock = sql as unknown as Mock;
 const events = () =>
@@ -740,5 +748,296 @@ describe("syncNativeSchedules", () => {
         expect(events()).toEqual([]);
       });
     });
+  });
+});
+
+describe("recoverStaleReschedules", () => {
+  /**
+   * Dispatch mocked query results by their static SQL text: the stale-claim
+   * SELECT, the ownership swap, the deletion, and the claim release each have
+   * a distinctive shape.
+   */
+  function useRecoveryDb(
+    overrides: {
+      staleRescheduling?: unknown[];
+      ownership?: unknown[];
+      deleted?: unknown[];
+      released?: unknown[];
+    } = {}
+  ) {
+    sqlMock.mockImplementation(async (strings: TemplateStringsArray) => {
+      const query = strings.join(" ");
+      if (
+        query.includes("WHERE status = 'rescheduling'") &&
+        query.includes("interval '10 minutes'")
+      )
+        return overrides.staleRescheduling ?? [];
+      if (query.includes("SET error_message =") && !query.includes("SET status"))
+        return overrides.ownership ?? [{ id: 1 }];
+      if (query.includes("DELETE FROM scheduled_posts"))
+        return overrides.deleted ?? [];
+      if (query.includes("SET status = 'scheduled'"))
+        return overrides.released ?? [{ id: 1 }];
+      return [];
+    });
+  }
+
+  const staleRow = (overrides: Record<string, unknown> = {}) => ({
+    id: 42,
+    workspace_id: "ws1",
+    source: "facebook",
+    kind: "post",
+    facebook_post_id: null,
+    facebook_post_ids: null,
+    page_id: null,
+    scheduled_for: minutesAgo(30),
+    error_message: null,
+    ...overrides,
+  });
+
+  const queryText = (call: unknown[]) =>
+    (call[0] as TemplateStringsArray).join(" ");
+
+  const releaseCalls = () =>
+    sqlMock.mock.calls.filter((call) =>
+      queryText(call).includes("SET status = 'scheduled'")
+    );
+
+  const deleteCalls = () =>
+    sqlMock.mock.calls.filter((call) =>
+      queryText(call).includes("DELETE FROM scheduled_posts")
+    );
+
+  it("moves every Page to the intended time before releasing the claim", async () => {
+    const intended = minutesAgo(-120);
+    useRecoveryDb({
+      staleRescheduling: [
+        staleRow({
+          facebook_post_ids: [
+            { ok: true, id: "p1", page: { id: "pg1", name: "One" } },
+            { ok: true, id: "p2", page: { id: "pg2", name: "Two" } },
+          ],
+          error_message: JSON.stringify({ claim: "c1", intended }),
+        }),
+      ],
+    });
+    vi.mocked(resolvePageToken).mockResolvedValue("tok");
+    vi.mocked(isFacebookStillScheduled).mockResolvedValue(true);
+
+    await expect(recoverStaleReschedules()).resolves.toBe(1);
+
+    expect(vi.mocked(rescheduleFacebookScheduledPost)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(rescheduleFacebookScheduledPost)).toHaveBeenNthCalledWith(
+      1,
+      "p1",
+      "tok",
+      Math.floor(new Date(intended).getTime() / 1000),
+      "pg1"
+    );
+    expect(vi.mocked(rescheduleFacebookScheduledPost)).toHaveBeenNthCalledWith(
+      2,
+      "p2",
+      "tok",
+      Math.floor(new Date(intended).getTime() / 1000),
+      "pg2"
+    );
+    expect(releaseCalls()[0][1]).toBe(intended);
+  });
+
+  it("keeps the claim while any Page remains unconfirmed at the intended time", async () => {
+    useRecoveryDb({
+      staleRescheduling: [
+        staleRow({
+          facebook_post_ids: [
+            { ok: true, id: "p1", page: { id: "pg1", name: "One" } },
+            { ok: true, id: "p2", page: { id: "pg2", name: "Two" } },
+          ],
+          error_message: JSON.stringify({
+            claim: "c1",
+            intended: minutesAgo(-120),
+          }),
+        }),
+      ],
+    });
+    vi.mocked(resolvePageToken).mockResolvedValue("tok");
+    vi.mocked(isFacebookStillScheduled).mockResolvedValue(true);
+    vi.mocked(rescheduleFacebookScheduledPost)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("graph down"));
+
+    await expect(recoverStaleReschedules()).resolves.toBe(0);
+
+    expect(releaseCalls()).toHaveLength(0);
+  });
+
+  it("restores the old time for a Facebook row with no accepted targets", async () => {
+    const old = minutesAgo(30);
+    useRecoveryDb({
+      staleRescheduling: [
+        staleRow({
+          scheduled_for: old,
+          error_message: JSON.stringify({
+            claim: "c1",
+            intended: minutesAgo(-120),
+          }),
+        }),
+      ],
+    });
+
+    await expect(recoverStaleReschedules()).resolves.toBe(1);
+
+    expect(resolvePageToken).not.toHaveBeenCalled();
+    expect(releaseCalls()[0][1]).toBe(old);
+  });
+
+  it("restores the confirmed intended time for a row no platform holds", async () => {
+    const intended = minutesAgo(-120);
+    useRecoveryDb({
+      staleRescheduling: [
+        staleRow({
+          source: "local",
+          error_message: JSON.stringify({ claim: "c1", intended }),
+        }),
+      ],
+    });
+
+    await expect(recoverStaleReschedules()).resolves.toBe(1);
+
+    expect(resolvePageToken).not.toHaveBeenCalled();
+    expect(releaseCalls()[0][1]).toBe(intended);
+  });
+
+  it("skips a row whose claim was taken by another sweep before the swap", async () => {
+    useRecoveryDb({
+      staleRescheduling: [
+        staleRow({
+          error_message: JSON.stringify({
+            claim: "c1",
+            intended: minutesAgo(-120),
+          }),
+        }),
+      ],
+      ownership: [],
+    });
+
+    await expect(recoverStaleReschedules()).resolves.toBe(0);
+
+    expect(resolvePageToken).not.toHaveBeenCalled();
+    expect(rescheduleFacebookScheduledPost).not.toHaveBeenCalled();
+    expect(releaseCalls()).toHaveLength(0);
+  });
+
+  it("takes exclusive ownership of the claim before any remote call", async () => {
+    const observed = JSON.stringify({
+      claim: "c1",
+      intended: minutesAgo(-120),
+    });
+    useRecoveryDb({
+      staleRescheduling: [
+        staleRow({
+          facebook_post_id: "fb_1",
+          page_id: "pg1",
+          error_message: observed,
+        }),
+      ],
+    });
+    vi.mocked(resolvePageToken).mockResolvedValue("tok");
+    vi.mocked(isFacebookStillScheduled).mockResolvedValue(true);
+
+    await recoverStaleReschedules();
+
+    const swapIndex = sqlMock.mock.calls.findIndex((call) =>
+      queryText(call).includes("SET error_message =")
+    );
+    expect(swapIndex).toBeGreaterThanOrEqual(0);
+    const swap = sqlMock.mock.calls[swapIndex];
+    expect(swap[2]).toBe(42);
+    expect(swap[3]).toBe(observed);
+    expect(sqlMock.mock.invocationCallOrder[swapIndex]).toBeLessThan(
+      vi.mocked(resolvePageToken).mock.invocationCallOrder[0]
+    );
+  });
+
+  it("deletes a claimed row only after confirming the remote cancellation on every Page", async () => {
+    useRecoveryDb({
+      staleRescheduling: [
+        staleRow({
+          facebook_post_ids: [
+            { ok: true, id: "p1", page: { id: "pg1", name: "One" } },
+            { ok: true, id: "p2", page: { id: "pg2", name: "Two" } },
+          ],
+          error_message: JSON.stringify({ claim: "c1", action: "delete" }),
+        }),
+      ],
+      deleted: [{ id: 42, news_item_id: 7, scheduled_for: minutesAgo(30) }],
+    });
+    vi.mocked(resolvePageToken).mockResolvedValue("tok");
+    vi.mocked(isFacebookStillScheduled).mockResolvedValue(true);
+
+    await recoverStaleReschedules();
+
+    expect(vi.mocked(cancelFacebookScheduledPost)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(cancelFacebookScheduledPost)).toHaveBeenNthCalledWith(
+      1,
+      "p1",
+      "tok",
+      "pg1"
+    );
+    expect(vi.mocked(cancelFacebookScheduledPost)).toHaveBeenNthCalledWith(
+      2,
+      "p2",
+      "tok",
+      "pg2"
+    );
+    expect(deleteCalls()).toHaveLength(1);
+    expect(events()).toEqual([
+      expect.objectContaining({
+        event: "canceled",
+        metadata: expect.objectContaining({ recovered: true }),
+      }),
+    ]);
+  });
+
+  it("deletes without re-canceling a Page Facebook no longer holds", async () => {
+    useRecoveryDb({
+      staleRescheduling: [
+        staleRow({
+          facebook_post_id: "fb_1",
+          page_id: "pg1",
+          error_message: JSON.stringify({ claim: "c1", action: "delete" }),
+        }),
+      ],
+      deleted: [{ id: 42, news_item_id: 7, scheduled_for: minutesAgo(30) }],
+    });
+    vi.mocked(resolvePageToken).mockResolvedValue("tok");
+    vi.mocked(isFacebookStillScheduled).mockResolvedValue(false);
+
+    await recoverStaleReschedules();
+
+    expect(vi.mocked(cancelFacebookScheduledPost)).not.toHaveBeenCalled();
+    expect(deleteCalls()).toHaveLength(1);
+  });
+
+  it("puts a claimed row back to scheduled when a Page cannot be confirmed canceled", async () => {
+    useRecoveryDb({
+      staleRescheduling: [
+        staleRow({
+          facebook_post_id: "fb_1",
+          page_id: "pg1",
+          error_message: JSON.stringify({ claim: "c1", action: "delete" }),
+        }),
+      ],
+    });
+    vi.mocked(resolvePageToken).mockResolvedValue("tok");
+    vi.mocked(isFacebookStillScheduled).mockResolvedValue(true);
+    vi.mocked(cancelFacebookScheduledPost).mockRejectedValue(
+      new Error("graph refused")
+    );
+
+    await recoverStaleReschedules();
+
+    expect(deleteCalls()).toHaveLength(0);
+    expect(events()).toEqual([]);
+    expect(releaseCalls()).toHaveLength(1);
   });
 });

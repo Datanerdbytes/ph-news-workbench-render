@@ -11,6 +11,7 @@ import {
   isFacebookStillScheduled,
   rescheduleFacebookScheduledPost,
 } from "@/lib/facebook";
+import { facebookTargets } from "@/lib/facebook-schedule";
 import { resolvePageToken } from "@/lib/facebook-page-token";
 
 export const dynamic = "force-dynamic";
@@ -33,14 +34,6 @@ const PLATFORM_LABELS: Record<string, string> = {
   youtube: "YouTube",
   tiktok: "TikTok",
   instagram: "Instagram",
-};
-
-type PageResult = {
-  page: { id: string; name: string };
-  ok: boolean;
-  id?: string;
-  permalink?: string | null;
-  error?: string;
 };
 
 export async function DELETE(
@@ -331,25 +324,6 @@ export async function PATCH(
   return NextResponse.json(
     warning ? { ...finished[0], warning } : finished[0]
   );
-}
-
-/** Every Page that accepted this scheduled action, with the per-Page id. */
-function facebookTargets(row: TargetRow) {
-  const perPage = Array.isArray(row.facebook_post_ids)
-    ? (row.facebook_post_ids as PageResult[]).filter(
-        (entry) => entry?.ok && entry.id
-      )
-    : [];
-
-  if (perPage.length) {
-    return perPage.map((entry) => ({
-      pageId: entry.page?.id ?? null,
-      postId: entry.id!,
-    }));
-  }
-  return row.facebook_post_id
-    ? [{ pageId: row.page_id, postId: row.facebook_post_id }]
-    : [];
 }
 
 /**
