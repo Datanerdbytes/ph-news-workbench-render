@@ -161,21 +161,7 @@ export async function PATCH(
   }
 
   let warning: string | undefined;
-  if (row.source === "facebook") {
-    const moved = await rescheduleOnFacebook(
-      row,
-      Math.floor(scheduledFor.getTime() / 1000)
-    );
-    if (!moved.ok) {
-      // A refusal before any Page moved leaves the row alone. Once a Page has
-      // accepted the new time, the row must follow it or the calendar would
-      // keep showing a time Facebook no longer holds.
-      if (moved.moved === 0) {
-        return NextResponse.json({ error: moved.error }, { status: 409 });
-      }
-      warning = moved.error;
-    }
-  } else if (row.source !== "local") {
+  if (row.source !== "local" && row.source !== "facebook") {
     const platform = PLATFORM_LABELS[row.source] ?? "the platform";
     return NextResponse.json(
       {
@@ -185,7 +171,10 @@ export async function PATCH(
     );
   }
 
-  const updated = (await sql`
+  // Claim the row before touching Facebook. This conditional update is the
+  // serialization point: an overlapping reschedule fails here instead of
+  // moving Facebook after this one and leaving the row and Facebook apart.
+  const claimed = (await sql`
     UPDATE scheduled_posts
     SET scheduled_for = ${scheduledFor.toISOString()}, updated_at = now()
     WHERE id = ${id}
@@ -197,7 +186,7 @@ export async function PATCH(
     scheduled_for: string;
   }[];
 
-  if (!updated.length) {
+  if (!claimed.length) {
     return NextResponse.json(
       {
         error:
@@ -205,6 +194,28 @@ export async function PATCH(
       },
       { status: 409 }
     );
+  }
+
+  if (row.source === "facebook") {
+    const moved = await rescheduleOnFacebook(
+      row,
+      Math.floor(scheduledFor.getTime() / 1000)
+    );
+    if (!moved.ok) {
+      // Nothing moved on Facebook, so the claimed time is undone. Once a Page
+      // has accepted the new time, the row must keep it or the calendar would
+      // show a time Facebook no longer holds.
+      if (moved.moved === 0) {
+        await sql`
+          UPDATE scheduled_posts
+          SET scheduled_for = ${row.scheduled_for}, updated_at = now()
+          WHERE id = ${id}
+            AND workspace_id = ${access.workspace.id}
+            AND scheduled_for = ${scheduledFor.toISOString()}`;
+        return NextResponse.json({ error: moved.error }, { status: 409 });
+      }
+      warning = moved.error;
+    }
   }
 
   await recordScheduleEvent({
@@ -218,7 +229,7 @@ export async function PATCH(
   });
 
   return NextResponse.json(
-    warning ? { ...updated[0], warning } : updated[0]
+    warning ? { ...claimed[0], warning } : claimed[0]
   );
 }
 

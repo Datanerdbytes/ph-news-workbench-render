@@ -140,7 +140,7 @@ describe("PATCH /api/schedule/[id]", () => {
       rescheduleMock.mockResolvedValue(undefined);
     });
 
-    it("moves the schedule on Facebook before updating the row", async () => {
+    it("claims the row before moving Facebook and records the event", async () => {
       sqlMock
         .mockResolvedValueOnce([facebookRow])
         .mockResolvedValueOnce([{ id: 51, scheduled_for: NEW_TIME }]);
@@ -148,6 +148,11 @@ describe("PATCH /api/schedule/[id]", () => {
       const res = await PATCH(patchRequest({ scheduledFor: NEW_TIME }), params());
 
       expect(res.status).toBe(200);
+      // The local claim lands before the first Graph call, so a competing
+      // request loses there instead of moving Facebook afterwards.
+      expect(sqlMock.mock.invocationCallOrder[1]).toBeLessThan(
+        rescheduleMock.mock.invocationCallOrder[0]
+      );
       expect(resolvePageTokenMock).toHaveBeenCalledWith("ws1", "pg1");
       expect(rescheduleMock).toHaveBeenCalledWith("vid9", "tok", NEW_UNIX, "pg1");
       expect(recordEventMock).toHaveBeenCalledWith(
@@ -155,8 +160,24 @@ describe("PATCH /api/schedule/[id]", () => {
       );
     });
 
-    it("keeps the old time when Facebook refuses the move", async () => {
-      sqlMock.mockResolvedValueOnce([facebookRow]);
+    it("refuses a second reschedule before it reaches Facebook", async () => {
+      sqlMock
+        .mockResolvedValueOnce([facebookRow])
+        .mockResolvedValueOnce([]);
+
+      const res = await PATCH(patchRequest({ scheduledFor: NEW_TIME }), params());
+      const data = await res.json();
+
+      expect(res.status).toBe(409);
+      expect(data.error).toContain("changed while it was being rescheduled");
+      expect(rescheduleMock).not.toHaveBeenCalled();
+      expect(recordEventMock).not.toHaveBeenCalled();
+    });
+
+    it("keeps the old time and undoes the claim when Facebook refuses", async () => {
+      sqlMock
+        .mockResolvedValueOnce([facebookRow])
+        .mockResolvedValueOnce([{ id: 51, scheduled_for: NEW_TIME }]);
       rescheduleMock.mockRejectedValue(new Error("(#10) permission denied"));
 
       const res = await PATCH(patchRequest({ scheduledFor: NEW_TIME }), params());
@@ -165,13 +186,16 @@ describe("PATCH /api/schedule/[id]", () => {
       expect(res.status).toBe(409);
       expect(data.error).toContain("Facebook refused to move this item");
       expect(data.error).toContain("(#10) permission denied");
-      // Only the row read ran — no local update, no event.
-      expect(sqlMock).toHaveBeenCalledTimes(1);
+      // Read, claim, then restore — no event for a move that never happened.
+      expect(sqlMock).toHaveBeenCalledTimes(3);
+      expect(sqlMock.mock.calls[2]).toContain(localRow.scheduled_for);
       expect(recordEventMock).not.toHaveBeenCalled();
     });
 
     it("reports when Facebook already released the item", async () => {
-      sqlMock.mockResolvedValueOnce([facebookRow]);
+      sqlMock
+        .mockResolvedValueOnce([facebookRow])
+        .mockResolvedValueOnce([{ id: 51, scheduled_for: NEW_TIME }]);
       heldMock.mockResolvedValue(false);
 
       const res = await PATCH(patchRequest({ scheduledFor: NEW_TIME }), params());
@@ -180,6 +204,7 @@ describe("PATCH /api/schedule/[id]", () => {
       expect(res.status).toBe(409);
       expect(data.error).toContain("no longer holds this item");
       expect(rescheduleMock).not.toHaveBeenCalled();
+      expect(sqlMock).toHaveBeenCalledTimes(3);
     });
 
     it("updates the row and warns when only some Pages took the new time", async () => {
@@ -226,7 +251,9 @@ describe("PATCH /api/schedule/[id]", () => {
     });
 
     it("keeps the old time when a Page token cannot even be read", async () => {
-      sqlMock.mockResolvedValueOnce([facebookRow]);
+      sqlMock
+        .mockResolvedValueOnce([facebookRow])
+        .mockResolvedValueOnce([{ id: 51, scheduled_for: NEW_TIME }]);
       resolvePageTokenMock.mockRejectedValueOnce(new Error("connection reset"));
 
       const res = await PATCH(patchRequest({ scheduledFor: NEW_TIME }), params());
@@ -235,7 +262,7 @@ describe("PATCH /api/schedule/[id]", () => {
       expect(res.status).toBe(409);
       expect(data.error).toContain("could not be read");
       expect(rescheduleMock).not.toHaveBeenCalled();
-      expect(sqlMock).toHaveBeenCalledTimes(1);
+      expect(sqlMock).toHaveBeenCalledTimes(3);
     });
 
     it("updates the row and warns when a later Page token lookup throws", async () => {
