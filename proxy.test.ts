@@ -54,10 +54,14 @@ describe("proxy matcher", () => {
     return !new RegExp(`^(?:${prefixes.join("|")})`).test(path.replace(/^\//, ""));
   }
 
-  it("keeps the reel prepare route out of the proxy body buffer", () => {
+  it("keeps every disk-streaming video upload route out of the proxy body buffer", () => {
     // The proxy makes Next buffer request bodies in memory (10MB by default),
-    // which truncates large reel uploads before the route reads them.
+    // which truncates large video uploads before the route reads them — the
+    // truncated multipart body then fails parsing and the route reports a
+    // misleading "Choose an MP4 or MOV video." for a perfectly valid file.
     expect(isProxied("/api/reels/prepare")).toBe(false);
+    expect(isProxied("/api/videos")).toBe(false);
+    expect(isProxied("/api/stories")).toBe(false);
   });
 
   it("still proxies the pages and the other API routes", () => {
