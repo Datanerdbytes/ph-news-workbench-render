@@ -194,6 +194,8 @@ const captionpopMount = (stage: HTMLElement, v: PresetValues): Timeline | null =
     .trim()
     .split(/\s+/)
     .filter(Boolean)
+    // Same first-10 cap as the baked renderer, so the beat sweep matches.
+    .slice(0, 10)
     .map((w) =>
       div(
         wrap,
