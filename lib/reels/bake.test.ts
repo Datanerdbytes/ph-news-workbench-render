@@ -32,6 +32,8 @@ type FakeCtx = {
   stroke: Mock;
   fillText: Mock;
   measureText: Mock;
+  createLinearGradient: Mock;
+  createRadialGradient: Mock;
   textBaseline: string;
   textAlign: string;
   font: string;
@@ -61,6 +63,8 @@ function makeCtx(): FakeCtx {
     stroke: vi.fn(),
     fillText: vi.fn(),
     measureText: vi.fn(() => ({ width: 42 })),
+    createLinearGradient: vi.fn(() => ({ addColorStop: vi.fn() })),
+    createRadialGradient: vi.fn(() => ({ addColorStop: vi.fn() })),
     textBaseline: "alphabetic",
     textAlign: "start",
     font: "",
