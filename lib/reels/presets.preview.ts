@@ -4,6 +4,7 @@ import {
   breaking,
   lowerthird,
   captionpop,
+  captionActiveStart,
   quote,
   stat,
   punchzoom,
@@ -203,7 +204,8 @@ const captionpopMount = (stage: HTMLElement, v: PresetValues): Timeline | null =
   return loop((tl) => {
     if (!chips.length) return;
     tl.from(chips, { scale: 0, opacity: 0, duration: 0.32, stagger: 0.22, ease: 'back.out(2.4)' });
-    // Karaoke beat: each word flashes the brand red as it "speaks".
+    // Karaoke beat: each word flashes the brand red as it "speaks", on the
+    // same sweep the baked reel draws.
     chips.forEach((chip, i) => {
       tl.to(
         chip,
@@ -215,7 +217,7 @@ const captionpopMount = (stage: HTMLElement, v: PresetValues): Timeline | null =
           repeat: 1,
           ease: 'sine.inOut',
         },
-        0.95 + i * 0.22
+        captionActiveStart(i, captionpop.duration, chips.length)
       );
     });
     tl.to(chips, { opacity: 0, duration: 0.3, stagger: 0.03 }, '+=0.4');

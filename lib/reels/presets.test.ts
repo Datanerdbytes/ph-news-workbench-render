@@ -7,6 +7,7 @@ import {
   attachmentsFromSlots,
   breaking,
   captionActiveIndex,
+  captionActiveStart,
   defaultPresetValues,
   effectLocals,
   getPreset,
@@ -416,5 +417,41 @@ describe("captionActiveIndex", () => {
       expect(index).toBeGreaterThanOrEqual(previous);
       previous = index;
     }
+  });
+});
+
+describe("captionActiveStart", () => {
+  it("lands exactly where captionActiveIndex switches chips", () => {
+    for (let index = 1; index < 5; index += 1) {
+      const start = captionActiveStart(index, 4, 5);
+      expect(captionActiveIndex(start - 0.001, 4, 5)).toBe(index - 1);
+      expect(captionActiveIndex(start + 0.001, 4, 5)).toBe(index);
+    }
+  });
+});
+
+describe("captionpop beat pulse", () => {
+  it("scales the chip up when the beat reaches it", () => {
+    const preset = getPreset("captionpop")!;
+    const values = fieldValues(preset);
+    const beatStart = captionActiveStart(1, preset.duration, 5);
+
+    // At the beat the active word pulses 4% larger; 0.3s later it has
+    // settled back to its resting size. Chip scales are the scale calls,
+    // in draw order (the five default words share one row).
+    const atBeat = makePaintCtx();
+    preset.draw!(atBeat.ctx, beatStart + 0.01, preset.duration, values);
+    const beatScales = (atBeat.ctx.scale as ReturnType<typeof vi.fn>).mock.calls.map(
+      ([s]) => s as number
+    );
+    expect(beatScales).toHaveLength(5);
+    expect(beatScales[1]).toBeGreaterThan(1.03);
+
+    const settled = makePaintCtx();
+    preset.draw!(settled.ctx, beatStart + 0.3, preset.duration, values);
+    const settledScales = (settled.ctx.scale as ReturnType<typeof vi.fn>).mock.calls.map(
+      ([s]) => s as number
+    );
+    expect(Math.max(...settledScales)).toBeLessThan(1.02);
   });
 });
