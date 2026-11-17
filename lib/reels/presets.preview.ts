@@ -1,6 +1,5 @@
 import { gsap } from 'gsap';
 import {
-  REEL_PRESETS,
   headline,
   breaking,
   lowerthird,
@@ -58,14 +57,19 @@ function maskedWord(parent: HTMLElement, css: string, text: string): HTMLDivElem
   return div(mask, css, text);
 }
 
+const RED = '#d92d20';
+
 /* --------------------------------- mounts ---------------------------------- */
+
+const HEADLINE_SIZE = 30;
+const HEADLINE_LINE = 1.14;
 
 const headlineMount = (stage: HTMLElement, v: PresetValues): Timeline | null => {
   addStageBg(stage);
   const wrap = div(stage, 'position:absolute;left:20px;right:20px;top:52px;');
   const bar = div(
     wrap,
-    'position:absolute;top:-14px;left:0;width:34px;height:5px;background:#d92d20;border-radius:2px;'
+    `position:absolute;top:-14px;left:0;width:34px;height:5px;background:${RED};border-radius:2px;`
   );
   const words = (v.text || '')
     .toUpperCase()
@@ -76,15 +80,38 @@ const headlineMount = (stage: HTMLElement, v: PresetValues): Timeline | null => 
   const wordEls = words.map((w) =>
     maskedWord(
       wrap,
-      'font-weight:800;font-size:30px;line-height:1.14;letter-spacing:-.3px;color:#fff;text-transform:uppercase;text-shadow:0 2px 16px rgba(0,0,0,.38);',
+      `font-weight:800;font-size:${HEADLINE_SIZE}px;line-height:${HEADLINE_LINE};letter-spacing:-.3px;color:#fff;text-transform:uppercase;text-shadow:0 2px 16px rgba(0,0,0,.38);transform-origin:0% 100%;`,
       w
     )
   );
+  const rule = words.length
+    ? div(
+        wrap,
+        `position:absolute;left:0;top:${(words.length * HEADLINE_SIZE * HEADLINE_LINE + 6).toFixed(1)}px;width:85px;height:3px;background:${RED};border-radius:2px;transform-origin:0 50%;`
+      )
+    : null;
   return loop((tl) => {
-    tl.from(bar, { scaleX: 0, transformOrigin: '0 50%', duration: 0.35, ease: 'power3.out' })
-      .from(wordEls, { yPercent: 118, duration: 0.55, stagger: 0.16, ease: 'power4.out' }, '-=0.1')
-      .to(wordEls, { yPercent: -118, duration: 0.4, stagger: 0.05, ease: 'power2.in' }, '+=1.1')
-      .to(bar, { scaleX: 0, transformOrigin: '100% 50%', duration: 0.3, ease: 'power2.in' }, '-=0.35');
+    tl.from(bar, { scaleX: 0, transformOrigin: '0 50%', duration: 0.35, ease: 'power3.out' });
+    if (!wordEls.length) {
+      tl.to(bar, { scaleX: 0, transformOrigin: '100% 50%', duration: 0.3, ease: 'power2.in' }, '+=1');
+      return;
+    }
+    tl.from(
+      wordEls,
+      {
+        yPercent: 118,
+        scale: 0.96,
+        transformOrigin: '0% 100%',
+        duration: 0.55,
+        stagger: 0.16,
+        ease: 'power4.out',
+      },
+      '-=0.1'
+    )
+      .from(rule!, { scaleX: 0, duration: 0.5, ease: 'power4.out' }, '-=0.35')
+      .to(wordEls, { yPercent: -118, duration: 0.4, stagger: 0.05, ease: 'power2.in' }, '+=1.05')
+      .to(rule!, { scaleX: 0, transformOrigin: '100% 50%', duration: 0.3, ease: 'power2.in' }, '-=0.35')
+      .to(bar, { scaleX: 0, transformOrigin: '100% 50%', duration: 0.3, ease: 'power2.in' }, '-=0.3');
   });
 };
 
@@ -92,22 +119,34 @@ const breakingMount = (stage: HTMLElement, v: PresetValues): Timeline | null => 
   addStageBg(stage);
   const tag = div(
     stage,
-    'position:absolute;top:18px;left:16px;background:#d92d20;color:#fff;font-size:10px;font-weight:800;letter-spacing:.12em;padding:4px 9px;border-radius:3px;',
+    `position:absolute;top:30px;left:20px;width:85px;height:18.5px;background:${RED};border-radius:2px;`
+  );
+  div(
+    tag,
+    'position:absolute;left:0;right:8px;top:0;bottom:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:7px;font-weight:800;letter-spacing:.12em;padding-right:3px;',
     'BREAKING'
+  );
+  const dot = div(
+    tag,
+    'position:absolute;right:4.5px;top:50%;width:4.5px;height:4.5px;margin-top:-2.25px;border-radius:50%;background:#fff;'
   );
   const bar = div(
     stage,
-    'position:absolute;left:0;right:0;bottom:44px;height:36px;background:rgba(10,14,18,.92);overflow:hidden;'
+    'position:absolute;left:0;right:0;bottom:50px;height:35px;background:rgba(10,14,18,.92);overflow:hidden;'
   );
+  div(bar, `position:absolute;left:0;right:0;top:0;height:1.5px;background:${RED};`);
+  div(bar, 'position:absolute;left:0;right:0;top:1.5px;height:0.5px;background:rgba(255,255,255,.16);');
   const tick = div(
     bar,
-    'position:absolute;left:0;top:50%;margin-top:-9px;white-space:nowrap;color:#fff;font-size:12px;font-weight:700;letter-spacing:.04em;',
+    'position:absolute;left:0;top:50%;margin-top:-8px;white-space:nowrap;color:#fff;font-size:12px;font-weight:700;letter-spacing:.04em;',
     `${(v.text || '').toUpperCase()}   •   `.repeat(3)
   );
   return loop((tl) => {
     tl.from(tag, { scale: 1.7, opacity: 0, duration: 0.3, ease: 'back.out(2.2)' })
-      .from(bar, { yPercent: 130, duration: 0.4, ease: 'power3.out' }, '-=0.05')
-      .fromTo(tick, { xPercent: 8 }, { xPercent: -60, duration: 5, ease: 'none' }, '-=0.2')
+      .to(dot, { opacity: 0.35, duration: 0.35, yoyo: true, repeat: 5, ease: 'sine.inOut' }, 0.3)
+      // Banner stays put — only the ticker scrolls.
+      .from(bar, { opacity: 0, duration: 0.18, ease: 'none' }, 0)
+      .fromTo(tick, { xPercent: 8 }, { xPercent: -60, duration: 5, ease: 'none' }, 0.1)
       .to([tag, bar], { opacity: 0, duration: 0.35 }, '+=0.2');
   });
 };
@@ -118,25 +157,28 @@ const lowerthirdMount = (stage: HTMLElement, v: PresetValues): Timeline | null =
     stage,
     'position:absolute;left:14px;bottom:64px;display:flex;align-items:stretch;'
   );
-  div(wrap, 'width:4px;background:#d92d20;');
+  const accent = div(wrap, `width:4px;background:${RED};transform-origin:50% 100%;`);
   const body = div(
     wrap,
-    'background:rgba(10,14,18,.92);padding:8px 14px 9px 12px;'
+    'position:relative;background:rgba(10,14,18,.92);padding:8px 14px 9px 12px;border-radius:1.5px;'
   );
+  div(body, 'position:absolute;left:0;right:0;top:0;height:0.5px;background:rgba(255,255,255,.14);');
   const name = div(
     body,
     'color:#fff;font-size:15px;font-weight:800;letter-spacing:-.2px;',
-    v.name || ''
+    (v.name || '').toUpperCase()
   );
   const role = div(
     body,
-    'color:#f7b3ad;font-size:9px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;margin-top:2px;',
-    'Field reporter'
+    'color:#f7b3ad;font-size:7.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;margin-top:2px;',
+    'FIELD REPORTER'
   );
   return loop((tl) => {
-    tl.from(wrap, { xPercent: -130, duration: 0.45, ease: 'power3.out' })
-      .from(role, { opacity: 0, duration: 0.3 }, '-=0.15')
-      .to(wrap, { xPercent: -130, duration: 0.4, ease: 'power3.in' }, '+=1.4');
+    tl.from(wrap, { xPercent: -130, duration: 0.45, ease: 'power4.out' })
+      .from(accent, { scaleY: 0, duration: 0.4, ease: 'power2.out' }, '-=0.35')
+      .from(name, { opacity: 0, y: 8, duration: 0.35, ease: 'power3.out' }, '-=0.3')
+      .from(role, { opacity: 0, x: -6, duration: 0.35, ease: 'power3.out' }, '-=0.25')
+      .to(wrap, { xPercent: -130, duration: 0.45, ease: 'power2.inOut' }, '+=1.35');
   });
 };
 
@@ -159,8 +201,24 @@ const captionpopMount = (stage: HTMLElement, v: PresetValues): Timeline | null =
       )
     );
   return loop((tl) => {
-    tl.from(chips, { scale: 0, opacity: 0, duration: 0.32, stagger: 0.22, ease: 'back.out(2.4)' })
-      .to(chips, { opacity: 0, duration: 0.3, stagger: 0.03 }, '+=0.7');
+    if (!chips.length) return;
+    tl.from(chips, { scale: 0, opacity: 0, duration: 0.32, stagger: 0.22, ease: 'back.out(2.4)' });
+    // Karaoke beat: each word flashes the brand red as it "speaks".
+    chips.forEach((chip, i) => {
+      tl.to(
+        chip,
+        {
+          backgroundColor: RED,
+          scale: 1.04,
+          duration: 0.16,
+          yoyo: true,
+          repeat: 1,
+          ease: 'sine.inOut',
+        },
+        0.95 + i * 0.22
+      );
+    });
+    tl.to(chips, { opacity: 0, duration: 0.3, stagger: 0.03 }, '+=0.4');
   });
 };
 
@@ -168,23 +226,42 @@ const quoteMount = (stage: HTMLElement, v: PresetValues): Timeline | null => {
   addStageBg(stage);
   const card = div(
     stage,
-    'position:absolute;left:22px;right:22px;top:44%;background:rgba(10,14,18,.62);border-left:3px solid #d92d20;border-radius:10px;padding:16px 16px 13px;'
+    'position:absolute;left:22px;right:22px;top:44%;background:rgba(10,14,18,.62);border-radius:9px;padding:14px 14px 30px;'
   );
-  div(card, 'color:#fff;font-size:15.5px;font-weight:700;line-height:1.45;', v.text || '');
+  const accent = div(
+    card,
+    `position:absolute;left:0;top:0;bottom:0;width:3.5px;background:${RED};transform-origin:50% 50%;`
+  );
+  div(
+    card,
+    `position:absolute;left:10px;top:4px;color:${RED};font-size:34px;font-weight:800;line-height:1;`,
+    '“'
+  );
+  const text = div(
+    card,
+    'position:relative;color:#fff;font-size:13.5px;font-weight:600;line-height:1.45;padding-left:18px;',
+    v.text || ''
+  );
   const by = div(
     card,
-    'color:#c8d2d8;font-size:10px;font-weight:700;margin-top:8px;letter-spacing:.06em;text-transform:uppercase;',
-    v.by || ''
+    'position:relative;color:#c8d2d8;font-size:7.5px;font-weight:700;margin-top:7px;letter-spacing:.08em;text-transform:uppercase;padding-left:18px;',
+    (v.by || '').toUpperCase()
   );
   return loop((tl) => {
-    tl.from(card, { y: 26, opacity: 0, duration: 0.45, ease: 'power3.out' })
-      .from(by, { opacity: 0, y: 6, duration: 0.3 }, '-=0.1')
-      .to(card, { opacity: 0, y: -14, duration: 0.4, ease: 'power2.in' }, '+=1.6');
+    tl.from(card, { y: 26, opacity: 0, scale: 0.98, duration: 0.5, ease: 'power3.out' })
+      .from(accent, { scaleY: 0, duration: 0.5, ease: 'power4.out' }, '-=0.38')
+      .from(text, { opacity: 0, y: 10, duration: 0.45, ease: 'power3.out' }, '-=0.34')
+      .from(by, { opacity: 0, x: -5, duration: 0.35, ease: 'power3.out' }, '-=0.25')
+      .to(card, { opacity: 0, y: -14, duration: 0.4, ease: 'power2.inOut' }, '+=1.5');
   });
 };
 
 const statMount = (stage: HTMLElement, v: PresetValues): Timeline | null => {
   addStageBg(stage);
+  div(
+    stage,
+    'position:absolute;inset:0;background:radial-gradient(closest-side at 50% 44%, transparent 26%, rgba(5,10,14,.5) 78%);'
+  );
   const wrap = div(
     stage,
     'position:absolute;left:20px;right:20px;top:40%;text-align:center;'
@@ -194,18 +271,39 @@ const statMount = (stage: HTMLElement, v: PresetValues): Timeline | null => {
     'color:#fff;font-size:54px;font-weight:800;letter-spacing:-2px;line-height:1;text-shadow:0 4px 22px rgba(0,0,0,.4);',
     v.num || ''
   );
-  div(
+  const rule = div(
     wrap,
-    'width:46px;height:4px;background:#d92d20;border-radius:2px;margin:12px auto 0;'
+    `width:50px;height:3.5px;background:${RED};border-radius:2px;margin:9px auto 0;transform-origin:50% 50%;`
   );
-  div(
+  const label = div(
     wrap,
-    'color:#d7e0e6;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-top:8px;',
-    v.label || ''
+    'color:#d7e0e6;font-size:8px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;margin-top:6px;',
+    (v.label || '').toUpperCase()
   );
+  const match = /^(\d+)/.exec(v.num || '');
+  const counter = { n: 0 };
   return loop((tl) => {
-    tl.from(num, { scale: 1.9, opacity: 0, duration: 0.4, ease: 'power4.out' })
-      .to(wrap, { opacity: 0, duration: 0.35 }, '+=1.2');
+    tl.from(wrap, { scale: 1.35, opacity: 0, duration: 0.45, ease: 'power4.out' });
+    if (match) {
+      const target = Number(match[1]);
+      const suffix = (v.num || '').slice(match[1].length);
+      tl.fromTo(
+        counter,
+        { n: 0 },
+        {
+          n: target,
+          duration: 0.8,
+          ease: 'power2.out',
+          onUpdate: () => {
+            num.textContent = `${Math.round(counter.n)}${suffix}`;
+          },
+        },
+        0.08
+      );
+    }
+    tl.from(rule, { scaleX: 0, duration: 0.45, ease: 'power4.out' }, 0.32)
+      .from(label, { opacity: 0, y: 5, duration: 0.4, ease: 'power3.out' }, 0.4)
+      .to(wrap, { opacity: 0, duration: 0.35 }, '+=1.1');
   });
 };
 
@@ -218,7 +316,7 @@ const punchzoomMount = (stage: HTMLElement): Timeline | null => {
   return loop((tl) => {
     tl.fromTo(bg, { scale: 1 }, { scale: 1.16, duration: 0.3, ease: 'power4.out' }).to(
       bg,
-      { scale: 1, duration: 0.35, ease: 'power2.inOut' },
+      { scale: 1, duration: 0.5, ease: 'power2.inOut' },
       '+=1.0'
     );
   });
@@ -230,6 +328,26 @@ const logostingMount = (stage: HTMLElement, v: PresetValues): Timeline | null =>
     stage,
     'position:absolute;left:50%;top:44%;width:84px;height:84px;margin:-42px 0 0 -42px;border:3px solid #fff;border-radius:50%;'
   );
+  // Brand arc sweeps around the ring (SVG so the stroke can be drawn on).
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 84 84');
+  svg.style.cssText =
+    'position:absolute;left:50%;top:44%;width:84px;height:84px;margin:-42px 0 0 -42px;overflow:visible;';
+  const arc = document.createElementNS(ns, 'circle');
+  const circumference = 2 * Math.PI * 40.5;
+  arc.setAttribute('cx', '42');
+  arc.setAttribute('cy', '42');
+  arc.setAttribute('r', '40.5');
+  arc.setAttribute('fill', 'none');
+  arc.setAttribute('stroke', RED);
+  arc.setAttribute('stroke-width', '3');
+  arc.setAttribute('stroke-linecap', 'round');
+  arc.setAttribute('stroke-dasharray', `${circumference}`);
+  arc.setAttribute('stroke-dashoffset', `${circumference}`);
+  arc.setAttribute('transform', 'rotate(-90 42 42)');
+  svg.appendChild(arc);
+  stage.appendChild(svg);
   const mark = div(
     stage,
     'position:absolute;left:50%;top:44%;width:84px;height:84px;margin:-42px 0 0 -42px;display:grid;place-items:center;color:#fff;font-size:24px;font-weight:800;letter-spacing:1px;',
@@ -238,34 +356,48 @@ const logostingMount = (stage: HTMLElement, v: PresetValues): Timeline | null =>
   const flash = div(stage, 'position:absolute;inset:0;background:#fff;opacity:0;');
   return loop((tl) => {
     tl.from(ring, { scale: 0, duration: 0.45, ease: 'back.out(2)' })
-      .from(mark, { scale: 0, duration: 0.4, ease: 'back.out(2.4)' }, '-=0.25')
+      .fromTo(
+        arc,
+        { strokeDashoffset: circumference },
+        { strokeDashoffset: circumference * 0.25, duration: 0.9, ease: 'power2.out' },
+        '-=0.32'
+      )
+      .from(mark, { scale: 0, duration: 0.4, ease: 'back.out(2.4)' }, '-=0.45')
       .to(flash, { opacity: 0.4, duration: 0.12, yoyo: true, repeat: 1 }, '-=0.1')
-      .to([ring, mark], { scale: 1.25, opacity: 0, duration: 0.4, ease: 'power2.in' }, '+=0.8');
+      .to([ring, mark, svg], { scale: 1.25, opacity: 0, duration: 0.4, ease: 'power2.in' }, '+=0.8');
   });
 };
 
 const endcardMount = (stage: HTMLElement, v: PresetValues): Timeline | null => {
   addStageBg(stage);
-  const ov = div(stage, 'position:absolute;inset:0;background:rgba(8,12,16,.78);');
+  const ov = div(
+    stage,
+    'position:absolute;inset:0;background:linear-gradient(180deg, rgba(6,10,14,.45) 0%, rgba(6,10,14,.8) 55%, rgba(6,10,14,.94) 100%);'
+  );
   const wrap = div(
     stage,
     'position:absolute;left:24px;right:24px;top:42%;text-align:center;'
   );
   const title = maskedWord(
     wrap,
-    'font-weight:800;font-size:21px;line-height:1.2;color:#fff;text-transform:uppercase;text-shadow:0 2px 16px rgba(0,0,0,.4);',
-    v.text || ''
+    'font-weight:800;font-size:27px;line-height:1.16;color:#fff;text-transform:uppercase;text-shadow:0 2px 16px rgba(0,0,0,.4);',
+    (v.text || '').toUpperCase()
+  );
+  const rule = div(
+    wrap,
+    `width:52px;height:3px;background:${RED};border-radius:2px;margin:9px auto 0;transform-origin:50% 50%;`
   );
   const btn = div(
     wrap,
-    'display:inline-block;margin-top:14px;background:#d92d20;color:#fff;font-size:11.5px;font-weight:800;letter-spacing:.06em;padding:8px 18px;border-radius:999px;',
-    'Follow'
+    `display:inline-block;margin-top:12px;background:${RED};color:#fff;font-size:10px;font-weight:800;letter-spacing:.12em;padding:7px 16px;border-radius:999px;`,
+    'FOLLOW'
   );
   return loop((tl) => {
     tl.from(ov, { opacity: 0, duration: 0.4 })
-      .from(title, { yPercent: 120, duration: 0.5, ease: 'power4.out' }, '-=0.1')
-      .from(btn, { scale: 0, duration: 0.35, ease: 'back.out(2.2)' }, '-=0.2')
-      .to([ov, wrap], { opacity: 0, duration: 0.4 }, '+=1.6');
+      .from(title, { yPercent: 120, duration: 0.55, ease: 'power4.out' }, '-=0.1')
+      .from(rule, { scaleX: 0, duration: 0.45, ease: 'power4.out' }, '-=0.35')
+      .from(btn, { scale: 0, duration: 0.35, ease: 'back.out(2.2)' }, '-=0.28')
+      .to([ov, wrap], { opacity: 0, duration: 0.4 }, '+=1.5');
   });
 };
 

@@ -37,7 +37,13 @@ const totalsRow = {
   cost: 0.5,
 };
 
-const dailyRow = { day: "2026-11-15", drafts: 1, published: 0, scheduled: 0 };
+const dailyRow = {
+  day: "2026-11-15",
+  drafts: 1,
+  published: 0,
+  scheduled: 0,
+  failed: 0,
+};
 
 const facebookRow = {
   platform: "facebook",
@@ -159,6 +165,69 @@ describe("GET /api/analytics", () => {
     const data = await res.json();
 
     expect(data.totals.published).toBe(5);
+  });
+
+  it("dates published bars by the mirrored post, not the draft it flipped", async () => {
+    mockQueries([facebookRow]);
+
+    const res = await GET(new Request("http://localhost/api/analytics"));
+    expect(res.status).toBe(200);
+
+    // The daily series is the second query.
+    const text = queryText(sqlMock.mock.calls[1]);
+
+    // Immediate publishes insert a 'published' scheduled_posts row; the chart
+    // reads that row's scheduled_for. Drafts only contribute their creation day.
+    expect(text).toContain("date_trunc('day', scheduled_for");
+    expect(text).toContain("FROM scheduled_posts");
+    expect(text.match(/status = 'published'/g)).toHaveLength(1);
+  });
+
+  it("draws every outcome from its own status bucket", async () => {
+    mockQueries([facebookRow]);
+
+    await GET(new Request("http://localhost/api/analytics"));
+    const text = queryText(sqlMock.mock.calls[1]);
+
+    expect(text).toContain("status = 'scheduled'");
+    expect(text).toContain("status = 'failed'");
+  });
+
+  it("buckets days in Manila rather than UTC", async () => {
+    mockQueries([facebookRow]);
+
+    await GET(new Request("http://localhost/api/analytics"));
+    const text = queryText(sqlMock.mock.calls[1]);
+
+    // One for each bucket: drafts, published, scheduled, failed.
+    expect(text.match(/AT TIME ZONE 'Asia\/Manila'/g)).toHaveLength(4);
+  });
+
+  it("binds the requested range and defaults invalid values to 14 days", async () => {
+    mockQueries([facebookRow]);
+    await GET(new Request("http://localhost/api/analytics?days=30"));
+    expect(sqlMock.mock.calls[1].slice(1)).toContain(30);
+
+    sqlMock.mockReset();
+    mockQueries([facebookRow]);
+    await GET(new Request("http://localhost/api/analytics?days=15"));
+    expect(sqlMock.mock.calls[1].slice(1)).toContain(14);
+  });
+
+  it("passes failed counts through in the daily series", async () => {
+    sqlMock.mockReset();
+    const daily = [
+      { day: "2026-11-17", drafts: 0, published: 3, scheduled: 1, failed: 2 },
+    ];
+    sqlMock
+      .mockResolvedValueOnce([totalsRow])
+      .mockResolvedValueOnce(daily)
+      .mockResolvedValueOnce([facebookRow]);
+
+    const res = await GET(new Request("http://localhost/api/analytics"));
+    const data = await res.json();
+
+    expect(data.daily).toEqual(daily);
   });
 
   it("zero-fills every platform when nothing has been published yet", async () => {

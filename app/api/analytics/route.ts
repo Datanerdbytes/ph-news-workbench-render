@@ -1,4 +1,8 @@
 import { NextResponse } from "next/server";
+import {
+  DEFAULT_ANALYTICS_RANGE,
+  isAnalyticsRange,
+} from "@/lib/analytics/days";
 import { sql } from "@/lib/db";
 import { requireWorkspace, unauthorized } from "@/lib/session";
 
@@ -21,6 +25,7 @@ type DailyRow = {
   drafts: number;
   published: number;
   scheduled: number;
+  failed: number;
 };
 
 /** One row per platform in the grouped publish query below. */
@@ -120,6 +125,13 @@ export async function GET(request: Request) {
   if (!access) return unauthorized();
   const workspaceId = access.workspace.id;
 
+  // Unknown ranges fall back to the default instead of erroring — the chart
+  // is read-only and every value is a valid window.
+  const requestedDays = Number(new URL(request.url).searchParams.get("days"));
+  const days = isAnalyticsRange(requestedDays)
+    ? requestedDays
+    : DEFAULT_ANALYTICS_RANGE;
+
   // The three reads are independent — one round-trip each, in parallel.
   const [totals, daily, platforms] = await Promise.all([
     sql`
@@ -157,32 +169,59 @@ export async function GET(request: Request) {
         WHERE workspace_id = ${workspaceId}) AS cost
   ` as unknown as Promise<TotalsRow[]>,
     sql`
-    SELECT to_char(day, 'YYYY-MM-DD') AS day,
+    SELECT day,
            sum(drafts)::int AS drafts,
            sum(published)::int AS published,
-           sum(scheduled)::int AS scheduled
+           sum(scheduled)::int AS scheduled,
+           sum(failed)::int AS failed
     FROM (
-      SELECT date_trunc('day', created_at)::date AS day,
-             count(*) AS drafts, 0 AS published, 0 AS scheduled
+      -- Days are Manila calendar days (PHT, UTC+8), matching the labels the
+      -- chart draws; a post sent at 00:30 PHT belongs to that local day.
+      SELECT to_char(
+               date_trunc('day', created_at AT TIME ZONE 'Asia/Manila'),
+               'YYYY-MM-DD'
+             ) AS day,
+             count(*) AS drafts, 0 AS published, 0 AS scheduled, 0 AS failed
       FROM drafts
       WHERE workspace_id = ${workspaceId}
-        AND created_at >= now() - interval '14 days'
+        AND created_at >= now() - make_interval(days => ${days})
       GROUP BY 1
       UNION ALL
-      SELECT date_trunc('day', created_at)::date,
-             0, count(*), 0
-      FROM drafts
+      -- Outcome buckets come from scheduled_posts: drafts carry no publish
+      -- timestamp, and every publish path mirrors a row (immediate publishes
+      -- get scheduled_for = the moment they went out). Each outcome is dated
+      -- by the send it belonged to, so success and failure share one axis.
+      SELECT to_char(
+               date_trunc('day', scheduled_for AT TIME ZONE 'Asia/Manila'),
+               'YYYY-MM-DD'
+             ),
+             0, count(*), 0, 0
+      FROM scheduled_posts
       WHERE workspace_id = ${workspaceId}
         AND status = 'published'
-        AND created_at >= now() - interval '14 days'
+        AND scheduled_for >= now() - make_interval(days => ${days})
       GROUP BY 1
       UNION ALL
-      SELECT date_trunc('day', scheduled_for)::date,
-             0, 0, count(*)
+      SELECT to_char(
+               date_trunc('day', scheduled_for AT TIME ZONE 'Asia/Manila'),
+               'YYYY-MM-DD'
+             ),
+             0, 0, count(*), 0
       FROM scheduled_posts
       WHERE workspace_id = ${workspaceId}
         AND status = 'scheduled'
-        AND scheduled_for >= now() - interval '14 days'
+        AND scheduled_for >= now() - make_interval(days => ${days})
+      GROUP BY 1
+      UNION ALL
+      SELECT to_char(
+               date_trunc('day', scheduled_for AT TIME ZONE 'Asia/Manila'),
+               'YYYY-MM-DD'
+             ),
+             0, 0, 0, count(*)
+      FROM scheduled_posts
+      WHERE workspace_id = ${workspaceId}
+        AND status = 'failed'
+        AND scheduled_for >= now() - make_interval(days => ${days})
       GROUP BY 1
     ) buckets
     GROUP BY day

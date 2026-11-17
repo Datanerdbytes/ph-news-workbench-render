@@ -19,6 +19,12 @@ import { useFacebookConnection } from "@/components/facebook-connection";
 import { PlatformMark } from "@/components/platform-mark";
 import { Button } from "@/components/ui/button";
 import { ErrorState } from "@/components/ui/error-state";
+import {
+  ANALYTICS_RANGES,
+  DEFAULT_ANALYTICS_RANGE,
+  lastNDays,
+  type AnalyticsRange,
+} from "@/lib/analytics/days";
 import { cn } from "cn";
 
 type TopPost = {
@@ -88,6 +94,7 @@ type Day = {
   drafts: number;
   published: number;
   scheduled: number;
+  failed: number;
 };
 
 type PageInsights = {
@@ -111,15 +118,6 @@ function shortDate(iso: string) {
     month: "short",
     day: "numeric",
   });
-}
-
-function lastFourteenDays() {
-  const days: string[] = [];
-  for (let offset = 13; offset >= 0; offset -= 1) {
-    const date = new Date(Date.now() - offset * 86_400_000);
-    days.push(date.toISOString().slice(0, 10));
-  }
-  return days;
 }
 
 function dayLabel(key: string) {
@@ -146,11 +144,12 @@ export default function AnalyticsPage() {
   const [loadError, setLoadError] = useState(false);
   const [insightsError, setInsightsError] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const [range, setRange] = useState<AnalyticsRange>(DEFAULT_ANALYTICS_RANGE);
   const connection = useFacebookConnection();
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch("/api/analytics", {
+    fetch(`/api/analytics?days=${range}`, {
       signal: controller.signal,
       cache: "no-store",
     })
@@ -169,7 +168,7 @@ export default function AnalyticsPage() {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [reloadKey]);
+  }, [reloadKey, range]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -208,17 +207,21 @@ export default function AnalyticsPage() {
 
   const series = useMemo(() => {
     const byDay = new Map(daily.map((entry) => [entry.day, entry]));
-    return lastFourteenDays().map((day) => ({
+    return lastNDays(range).map((day) => ({
       day,
       drafts: byDay.get(day)?.drafts ?? 0,
       published: byDay.get(day)?.published ?? 0,
+      failed: byDay.get(day)?.failed ?? 0,
       scheduled: byDay.get(day)?.scheduled ?? 0,
     }));
-  }, [daily]);
+  }, [daily, range]);
 
   const peak = Math.max(
     1,
-    ...series.map((entry) => entry.drafts + entry.published + entry.scheduled)
+    ...series.map(
+      (entry) =>
+        entry.drafts + entry.published + entry.scheduled + entry.failed
+    )
   );
 
   const cards = [
@@ -266,11 +269,37 @@ export default function AnalyticsPage() {
             <p className="eyebrow">Insights</p>
             <h1 className="page-title mt-1">Analytics</h1>
             <p className="mt-1 text-[12px] text-muted-foreground">
-              Publishing activity from the last 14 days, pulled from this
+              Publishing activity from the last {range} days, pulled from this
               workspace.
             </p>
           </div>
           <div className="flex items-center gap-2">
+            <div
+              role="group"
+              aria-label="Date range"
+              className="flex items-center rounded-[7px] border border-line-strong bg-card p-0.5"
+            >
+              {ANALYTICS_RANGES.map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={range === value}
+                  onClick={() => {
+                    if (value === range) return;
+                    setLoading(true);
+                    setRange(value);
+                  }}
+                  className={cn(
+                    "h-8 rounded-[5px] px-2 text-[11.5px] font-semibold transition-colors",
+                    range === value
+                      ? "bg-ink text-paper"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  {value}d
+                </button>
+              ))}
+            </div>
             <Button
               variant="outline"
               onClick={retryAnalytics}
@@ -333,12 +362,13 @@ export default function AnalyticsPage() {
               <div>
                 <h2 className="text-[13px] font-semibold">Activity</h2>
                 <p className="text-[10.5px] text-muted-foreground">
-                  Drafts, publishes and schedules per day
+                  Drafts, publishes, failures and the queue per day
                 </p>
               </div>
               <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
                 <Legend className="bg-brand-soft" label="Drafts" />
                 <Legend className="bg-brand" label="Published" />
+                <Legend className="bg-destructive" label="Failed" />
                 <Legend className="bg-ink/25" label="Scheduled" />
               </div>
             </div>
@@ -351,16 +381,26 @@ export default function AnalyticsPage() {
                 onRetry={retryAnalytics}
               />
             ) : (
-              <div className="mt-4 flex h-40 items-end gap-1.5 sm:gap-2">
-              {series.map((entry) => {
-                const total = entry.drafts + entry.published + entry.scheduled;
+              <div
+                className={cn(
+                  "mt-4 flex h-40 items-end",
+                  range >= 30 ? "gap-[2px]" : "gap-1.5 sm:gap-2"
+                )}
+              >
+              {series.map((entry, index) => {
+                const total =
+                  entry.drafts + entry.published + entry.scheduled + entry.failed;
                 const scale = (value: number) => `${(value / peak) * 100}%`;
                 const label = dayLabel(entry.day);
+                // 14 columns fit two-line labels; denser ranges label sparsely
+                // so the day numbers never collide.
+                const labelStep = range <= 14 ? 1 : range <= 30 ? 2 : 7;
+                const showLabel = (series.length - 1 - index) % labelStep === 0;
                 return (
                   <div
                     key={entry.day}
                     className="flex h-full min-w-0 flex-1 flex-col justify-end gap-1"
-                    title={`${entry.day}: ${entry.drafts} drafts · ${entry.published} published · ${entry.scheduled} scheduled`}
+                    title={`${entry.day}: ${entry.drafts} drafts · ${entry.published} published · ${entry.failed} failed · ${entry.scheduled} scheduled`}
                   >
                     <div className="flex h-full w-full flex-col justify-end overflow-hidden rounded-t bg-surface-2">
                       {entry.scheduled > 0 && (
@@ -375,6 +415,12 @@ export default function AnalyticsPage() {
                           style={{ height: scale(entry.published) }}
                         />
                       )}
+                      {entry.failed > 0 && (
+                        <div
+                          className="w-full bg-destructive"
+                          style={{ height: scale(entry.failed) }}
+                        />
+                      )}
                       {entry.drafts > 0 && (
                         <div
                           className="w-full bg-brand-soft"
@@ -383,7 +429,12 @@ export default function AnalyticsPage() {
                       )}
                       {total === 0 && <div className="h-0.5 w-full bg-border" />}
                     </div>
-                    <div className="text-center text-[9px] leading-tight text-muted-foreground">
+                    <div
+                      className={cn(
+                        "text-center text-[9px] leading-tight text-muted-foreground",
+                        !showLabel && "invisible"
+                      )}
+                    >
                       <p>{label.weekday}</p>
                       <p className="font-semibold text-muted-foreground">
                         {label.day}

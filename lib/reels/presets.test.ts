@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as sharedPlan from "@/lib/animations/plan";
 import {
   PRESET_CATEGORIES,
@@ -6,6 +6,7 @@ import {
   SLOT_ORDER,
   attachmentsFromSlots,
   breaking,
+  captionActiveIndex,
   defaultPresetValues,
   effectLocals,
   getPreset,
@@ -303,5 +304,117 @@ describe("shared timing engine delegation", () => {
     expect(plannedFrames(effects, 0.5)).toEqual(
       sharedPlan.plannedFramesFor(effects, 0.5)
     );
+  });
+});
+
+/** Canvas stub that records every visible paint so a frame can be checked
+ * for content without asserting on exact drawing calls. */
+function makePaintCtx() {
+  const paints: string[] = [];
+  const gradient = { addColorStop: vi.fn() };
+  const paint = (name: string) => () => {
+    paints.push(name);
+  };
+  const ctx = {
+    save: vi.fn(),
+    restore: vi.fn(),
+    translate: vi.fn(),
+    scale: vi.fn(),
+    beginPath: vi.fn(),
+    rect: vi.fn(),
+    clip: vi.fn(),
+    roundRect: vi.fn(),
+    arc: vi.fn(),
+    fill: vi.fn(paint("fill")),
+    stroke: vi.fn(paint("stroke")),
+    fillRect: vi.fn(paint("fillRect")),
+    fillText: vi.fn(paint("fillText")),
+    createRadialGradient: vi.fn(() => gradient),
+    createLinearGradient: vi.fn(() => gradient),
+    measureText: vi.fn(() => ({ width: 42 })),
+    font: "",
+    fillStyle: "",
+    strokeStyle: "",
+    textAlign: "",
+    textBaseline: "",
+    lineWidth: 0,
+    lineCap: "",
+    shadowColor: "",
+    shadowBlur: 0,
+    globalAlpha: 1,
+  };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, paints };
+}
+
+function fieldValues(preset: (typeof REEL_PRESETS)[number]) {
+  return Object.fromEntries(
+    preset.fields.map((field) => [field.key, field.value])
+  );
+}
+
+describe("preset draw windows", () => {
+  const drawable = REEL_PRESETS.filter(
+    (preset) => preset.id !== "none" && preset.draw
+  );
+
+  it("paints something mid-window for every drawable preset", () => {
+    for (const preset of drawable) {
+      const { ctx, paints } = makePaintCtx();
+      preset.draw!(ctx, preset.duration / 2, preset.duration, fieldValues(preset));
+      expect(paints.length, `${preset.id} mid-window`).toBeGreaterThan(0);
+    }
+  });
+
+  it("paints nothing at the window's start or its exact end", () => {
+    for (const preset of drawable) {
+      const values = fieldValues(preset);
+      const first = makePaintCtx();
+      preset.draw!(first.ctx, 0, preset.duration, values);
+      expect(first.paints, `${preset.id} at t=0`).toEqual([]);
+
+      const last = makePaintCtx();
+      preset.draw!(last.ctx, preset.duration, preset.duration, values);
+      expect(last.paints, `${preset.id} at t=duration`).toEqual([]);
+    }
+  });
+
+  it("keeps painting right up to the last frame before the window closes", () => {
+    // Loop hand-off draws the next pass at local 0, so a blank final frame
+    // would read as a flash on every repeat.
+    for (const preset of drawable) {
+      const { ctx, paints } = makePaintCtx();
+      preset.draw!(
+        ctx,
+        preset.duration - 0.001,
+        preset.duration,
+        fieldValues(preset)
+      );
+      expect(paints.length, `${preset.id} final frame`).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("captionActiveIndex", () => {
+  it("sweeps every word once across the window", () => {
+    expect(captionActiveIndex(0, 4, 5)).toBe(0);
+    expect(captionActiveIndex(1.55, 4, 5)).toBeGreaterThan(0);
+    expect(captionActiveIndex(4, 4, 5)).toBe(4);
+  });
+
+  it("never runs past the last word", () => {
+    expect(captionActiveIndex(60, 4, 3)).toBe(2);
+  });
+
+  it("handles captions with no words", () => {
+    expect(captionActiveIndex(1, 4, 0)).toBe(0);
+  });
+
+  it("advances monotonically so the beat never jumps backwards", () => {
+    let previous = 0;
+    for (let t = 0; t <= 4; t += 0.05) {
+      const index = captionActiveIndex(t, 4, 6);
+      expect(index).toBeGreaterThanOrEqual(previous);
+      previous = index;
+    }
   });
 });
