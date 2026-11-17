@@ -63,6 +63,16 @@ describe("mountPreset", () => {
     expect(timeline!.isActive()).toBe(false);
   });
 
+  it("caps caption chips at the baked renderer's ten words", () => {
+    const words = Array.from({ length: 12 }, (_, i) => `w${i + 1}`);
+    const { stage } = mount("captionpop", { text: words.join(" ") });
+    const wrap = Array.from(stage.querySelectorAll("div")).find(
+      (el) => el.style.flexWrap === "wrap"
+    );
+    expect(wrap!.children).toHaveLength(10);
+    expect(stage.textContent).not.toContain("W11");
+  });
+
   it("returns null when the viewer prefers reduced motion", () => {
     const original = window.matchMedia;
     window.matchMedia = vi.fn().mockReturnValue({ matches: true }) as never;

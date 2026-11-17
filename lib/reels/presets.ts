@@ -168,6 +168,9 @@ function fillTracked(ctx: Ctx, text: string, x: number, y: number, tracking: num
   }
 }
 
+const CAPTION_BEAT_FROM = 0.35;
+const captionBeatLen = (duration: number) => Math.max(0.1, duration - 1);
+
 /**
  * Which caption chip is "speaking" at local time `t` — the karaoke beat
  * sweeps the words after they have popped in.
@@ -178,8 +181,19 @@ export function captionActiveIndex(
   count: number
 ): number {
   if (count <= 0) return 0;
-  const beat = seg(t, 0.35, Math.max(0.1, duration - 1));
+  const beat = seg(t, CAPTION_BEAT_FROM, captionBeatLen(duration));
   return Math.min(count - 1, Math.floor(beat * count));
+}
+
+/** Local time the beat reaches `index` — the moment `captionActiveIndex`
+ * starts returning it, so per-chip accents land on their beat. */
+export function captionActiveStart(
+  index: number,
+  duration: number,
+  count: number
+): number {
+  if (count <= 0) return 0;
+  return CAPTION_BEAT_FROM + (index / count) * captionBeatLen(duration);
 }
 
 /* --------------------------------- presets --------------------------------- */
@@ -445,9 +459,12 @@ export const captionpop: ReelPreset = {
         const p = outBack(seg(t, index * 0.22, 0.32));
         if (p > 0.001) {
           const isActive = index === active;
-          // The speaking word lands 4% larger, easing back as the beat moves on.
+          // The speaking word lands 4% larger on its beat, easing back as
+          // the sweep moves on — not during its entrance pop.
           const talk = isActive
-            ? 1 + 0.04 * (1 - seg(t, index * 0.22 + 0.32, 0.22))
+            ? 1 +
+              0.04 *
+                (1 - seg(t, captionActiveStart(index, duration, words.length), 0.22))
             : 1;
           ctx.save();
           ctx.globalAlpha = Math.min(1, p) * fadeOut;

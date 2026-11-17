@@ -183,6 +183,23 @@ describe("GET /api/analytics", () => {
     expect(text.match(/status = 'published'/g)).toHaveLength(1);
   });
 
+  it("dates a late publish by when it went out, not by its slot", async () => {
+    mockQueries([facebookRow]);
+
+    await GET(new Request("http://localhost/api/analytics"));
+    const text = queryText(sqlMock.mock.calls[1]);
+
+    // The local worker sends after the slot and leaves scheduled_for behind;
+    // the published event records the send time. The published bucket reads
+    // that event and range-filters on it.
+    expect(text).toContain("FROM scheduled_post_events e");
+    expect(text).toContain("e.event = 'published'");
+    expect(text).toContain("min(e.created_at)");
+    expect(text).toContain("sent.published_at >= now() - make_interval");
+    // A publish with no recorded event still counts, on its slot day.
+    expect(text).toContain("coalesce(");
+  });
+
   it("draws every outcome from its own status bucket", async () => {
     mockQueries([facebookRow]);
 
