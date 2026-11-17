@@ -4,6 +4,7 @@ import { createRef } from 'react';
 import { describe, expect, it } from 'vitest';
 import {
   contentBox,
+  frameKey,
   VideoAnimationOverlay,
 } from './video-animation-overlay';
 
@@ -25,6 +26,42 @@ describe('contentBox', () => {
     expect(box.w).toBeCloseTo(225);
     expect(box.y).toBe(0);
     expect(box.x).toBeCloseTo(287.5);
+  });
+});
+
+describe('frameKey', () => {
+  const frame = {
+    currentTime: 3.2,
+    clientWidth: 320,
+    clientHeight: 180,
+    videoWidth: 640,
+    videoHeight: 360,
+    duration: 12,
+    paused: true,
+  };
+
+  it('keeps the key stable for a paused frame with unchanged metadata', () => {
+    expect(frameKey({ ...frame })).toBe(frameKey({ ...frame }));
+  });
+
+  it('repaints when metadata arrives after a paused attach', () => {
+    const beforeMetadata = frameKey({
+      ...frame,
+      duration: Number.NaN,
+      videoWidth: 0,
+      videoHeight: 0,
+    });
+    const afterMetadata = frameKey({ ...frame });
+    expect(afterMetadata).not.toBe(beforeMetadata);
+    expect(
+      frameKey({ ...frame, videoWidth: 1080, videoHeight: 1920 })
+    ).not.toBe(afterMetadata);
+  });
+
+  it('repaints when the playhead moves or playback resumes', () => {
+    const base = frameKey({ ...frame });
+    expect(frameKey({ ...frame, currentTime: 3.3 })).not.toBe(base);
+    expect(frameKey({ ...frame, paused: false })).not.toBe(base);
   });
 });
 

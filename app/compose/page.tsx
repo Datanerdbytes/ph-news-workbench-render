@@ -525,6 +525,13 @@ function ComposeWorkspace() {
     try {
       const when = new Date(schedule.iso);
       const finalVideoUrl = videoUrl ? await animatedVideoUrl() : null;
+      // The bake can run for the clip's full length; re-check the schedule so
+      // the request lands above the server's 10-minute minimum.
+      const recheck = resolveScheduledFor(scheduledFor);
+      if (recheck.iso === null) {
+        setScheduleError(recheck.error);
+        return;
+      }
       const res = await fetch('/api/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

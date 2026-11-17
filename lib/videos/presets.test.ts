@@ -228,3 +228,14 @@ describe("videoEffectRenderer", () => {
     expect(videoEffectRenderer(effects[1])).toBe(title.draw);
   });
 });
+
+describe("camera-push scale curve", () => {
+  it("eases back to 1 before the effect ends or a loop repeats", () => {
+    const push = getVideoPreset("camera-push")!;
+    expect(push.scale!(0)).toBeCloseTo(1, 6);
+    expect(push.scale!(push.duration * 0.6)).toBeGreaterThan(1.02);
+    expect(push.scale!(push.duration)).toBeCloseTo(1, 6);
+    // The planner drops the effect just past `duration`; a loop restarts at 0.
+    expect(push.scale!(push.duration + 0.001)).toBeCloseTo(1, 5);
+  });
+});

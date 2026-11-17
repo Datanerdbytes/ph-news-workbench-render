@@ -235,12 +235,20 @@ export default function VideosPage() {
       if (animations.length && fileUrl) {
         setBakePct(0);
         try {
-          uploadFile = await bakeAndFinalizeVideo({
+          const baked = await bakeAndFinalizeVideo({
             videoUrl: fileUrl,
             attachments: animations,
             values: animValues,
             onProgress: setBakePct,
           });
+          // The route enforces the 1 GB cap after this fallback window; throw
+          // here so an oversized bake still posts the original clip.
+          if (baked.size > MAX_BYTES) {
+            throw new Error(
+              'The animated video would exceed the 1 GB upload limit.'
+            );
+          }
+          uploadFile = baked;
         } catch (error) {
           toast.warning('Posting without the animation', {
             description:
@@ -250,6 +258,16 @@ export default function VideosPage() {
           });
         } finally {
           setBakePct(null);
+        }
+      }
+
+      // The bake can run for the clip's full length; re-check the schedule so
+      // the request lands above the server's 10-minute minimum.
+      if (scheduledForIso) {
+        const recheck = resolveScheduledFor(scheduledFor);
+        if (recheck.iso === null) {
+          setScheduleError(recheck.error);
+          return;
         }
       }
 

@@ -27,6 +27,37 @@ export function contentBox(
 }
 
 /**
+ * Snapshot of everything a painted frame depends on. An unchanged key means
+ * the canvas already shows this frame, so an idle preview skips the repaint;
+ * duration and intrinsic size are included so late-arriving metadata still
+ * repaints a paused video.
+ */
+export function frameKey(
+  video: Pick<
+    HTMLVideoElement,
+    | 'currentTime'
+    | 'clientWidth'
+    | 'clientHeight'
+    | 'videoWidth'
+    | 'videoHeight'
+    | 'duration'
+    | 'paused'
+  >
+): string {
+  const duration =
+    Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+  return [
+    video.currentTime,
+    video.clientWidth,
+    video.clientHeight,
+    video.videoWidth,
+    video.videoHeight,
+    duration,
+    video.paused ? 1 : 0,
+  ].join('|');
+}
+
+/**
  * Live preview of the attached animation presets: a transparent canvas drawn
  * over the video's playhead so the composer shows the same overlays the bake
  * renders on post. Camera presets (scale) zoom the video element itself.
@@ -58,24 +89,20 @@ export function VideoAnimationOverlay({
 
     const attachments = attachmentsFromSlots(slots, loops);
     let raf = 0;
-    let lastT = -1;
-    let lastW = 0;
-    let lastH = 0;
+    let lastKey = '';
     const tick = () => {
       raf = requestAnimationFrame(tick);
       // Idle previews (paused, hidden tab) redraw once and then stay quiet;
-      // seeking changes currentTime and repaints the frozen frame.
+      // seeking or late metadata changes the key and repaints the frame.
       if (document.hidden) return;
-      const t = video.currentTime;
-      const cw = video.clientWidth;
-      const ch = video.clientHeight;
-      if (!cw || !ch) return;
-      if (video.paused && t === lastT && cw === lastW && ch === lastH) return;
-      lastT = t;
-      lastW = cw;
-      lastH = ch;
+      const key = frameKey(video);
+      if (!video.clientWidth || !video.clientHeight) return;
+      if (key === lastKey) return;
+      lastKey = key;
       const duration =
         Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+      const cw = video.clientWidth;
+      const ch = video.clientHeight;
       const box = contentBox(
         video.videoWidth || 16,
         video.videoHeight || 9,

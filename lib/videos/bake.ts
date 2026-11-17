@@ -23,6 +23,7 @@ import {
  */
 
 const MAX_SIDE = 1920;
+const AUDIO_START_TIMEOUT_MS = 3000;
 
 /** Output canvas size for source footage, keeping aspect and even dimensions. */
 export function outputSize(vw: number, vh: number, maxSide = MAX_SIDE) {
@@ -137,116 +138,160 @@ export async function bakeVideoAnimation(
   monitor.gain.value = 0;
   source.connect(monitor);
   monitor.connect(audioCtx.destination);
-  if (audioCtx.state === 'suspended') await audioCtx.resume().catch(() => {});
+  if (audioCtx.state === 'suspended') {
+    // A blocked context never resumes; bound the wait so the caller's
+    // original-clip fallback runs instead of hanging on the bake.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        audioCtx.resume(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error('The browser blocked audio for the animation bake.')
+              ),
+            AUDIO_START_TIMEOUT_MS
+          );
+        }),
+      ]);
+    } catch (error) {
+      await audioCtx.close().catch(() => {});
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   const stream = canvas.captureStream(30);
   for (const track of dest.stream.getAudioTracks()) stream.addTrack(track);
 
-  const recorder = new MediaRecorder(stream, {
-    mimeType,
-    videoBitsPerSecond: 8_000_000,
-  });
-  const chunks: BlobPart[] = [];
-  recorder.ondataavailable = (event) => {
-    if (event.data.size > 0) chunks.push(event.data);
-  };
-
-  const finished = new Promise<Blob>((resolve, reject) => {
-    recorder.onstop = () => {
-      const container = mimeType.startsWith('video/mp4')
-        ? 'video/mp4'
-        : 'video/webm';
-      resolve(new Blob(chunks, { type: container }));
-    };
-    recorder.onerror = () => reject(new Error('Recording failed.'));
-  });
-
-  video.currentTime = 0;
   try {
-    await video.play();
-  } catch {
-    // Never retry muted: the audio is captured through the AudioContext from
-    // this element, so a muted play would bake a silent video. Fail loudly and
-    // let the caller post the original footage instead.
-    await audioCtx.close().catch(() => {});
-    stream.getTracks().forEach((track) => track.stop());
-    throw new Error(
-      'Playback was blocked, so the animation bake was skipped. Try posting again — the video still publishes without it.'
-    );
-  }
-  recorder.start(250);
-
-  const duration =
-    Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
-  const effects = planVideoEffects(attachments, duration, values);
-
-  let playbackError: Error | null = null;
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const fps = 30;
-      const minFrameMs = 1000 / fps;
-      const start = performance.now();
-      let lastFrameTime = start;
-      let lastProgressAt = start;
-      let lastPlayhead = 0;
-      let raf = 0;
-      let settled = false;
-      const finish = (error?: Error) => {
-        if (settled) return;
-        settled = true;
-        cancelAnimationFrame(raf);
-        if (error) reject(error);
-        else resolve();
-      };
-      const tick = () => {
-        const now = performance.now();
-        const playhead = video.currentTime;
-        if (now - lastFrameTime >= minFrameMs) {
-          do {
-            lastFrameTime += minFrameMs;
-          } while (now - lastFrameTime >= minFrameMs);
-          ctx.clearRect(0, 0, box.w, box.h);
-          composeVideoFrame(
-            ctx,
-            effects,
-            playhead,
-            (zoom) => drawFootage(ctx, video, box, zoom),
-            box
-          );
-          if (duration) onProgress?.(Math.min(1, playhead / duration));
-        }
-        if (duration && playhead >= duration - 0.05) {
-          finish();
-          return;
-        }
-        if (playhead > lastPlayhead + 0.01) {
-          lastPlayhead = playhead;
-          lastProgressAt = now;
-        } else if (now - lastProgressAt > 15_000) {
-          finish(new Error('The video stopped playing during the bake.'));
-          return;
-        }
-        raf = requestAnimationFrame(tick);
-      };
-      raf = requestAnimationFrame(tick);
-      video.onended = () => finish();
-      video.onerror = () =>
-        finish(new Error('The video stopped playing during the bake.'));
+    const recorder = new MediaRecorder(stream, {
+      mimeType,
+      videoBitsPerSecond: 8_000_000,
     });
-  } catch (error) {
-    playbackError =
-      error instanceof Error ? error : new Error('The bake was interrupted.');
-  }
+    const chunks: BlobPart[] = [];
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) chunks.push(event.data);
+    };
 
-  video.pause();
-  if (recorder.state !== 'inactive') recorder.stop();
-  const blob = await finished;
-  stream.getTracks().forEach((track) => track.stop());
-  await audioCtx.close().catch(() => {});
-  video.src = '';
-  if (playbackError) throw playbackError;
-  if (blob.size === 0) throw new Error('Recording produced no data.');
-  return blob;
+    const finished = new Promise<Blob>((resolve, reject) => {
+      recorder.onstop = () => {
+        const container = mimeType.startsWith('video/mp4')
+          ? 'video/mp4'
+          : 'video/webm';
+        resolve(new Blob(chunks, { type: container }));
+      };
+      recorder.onerror = () => reject(new Error('Recording failed.'));
+    });
+
+    video.currentTime = 0;
+    try {
+      await video.play();
+    } catch {
+      // Never retry muted: the audio is captured through the AudioContext from
+      // this element, so a muted play would bake a silent video. Fail loudly and
+      // let the caller post the original footage instead.
+      throw new Error(
+        'Playback was blocked, so the animation bake was skipped. Try posting again — the video still publishes without it.'
+      );
+    }
+    recorder.start(250);
+
+    const duration =
+      Number.isFinite(video.duration) && video.duration > 0
+        ? video.duration
+        : 0;
+    const effects = planVideoEffects(attachments, duration, values);
+
+    let playbackError: Error | null = null;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const fps = 30;
+        const minFrameMs = 1000 / fps;
+        const start = performance.now();
+        let lastFrameTime = start;
+        let lastProgressAt = start;
+        let lastPlayhead = 0;
+        let raf = 0;
+        let settled = false;
+        function finish(error?: Error) {
+          if (settled) return;
+          settled = true;
+          cancelAnimationFrame(raf);
+          document.removeEventListener('visibilitychange', onVisibility);
+          if (error) reject(error);
+          else resolve();
+        }
+        function onVisibility() {
+          if (document.hidden) {
+            finish(
+              new Error(
+                'The tab was hidden, so the animation bake was stopped.'
+              )
+            );
+          }
+        }
+        const tick = () => {
+          const now = performance.now();
+          const playhead = video.currentTime;
+          if (now - lastFrameTime >= minFrameMs) {
+            do {
+              lastFrameTime += minFrameMs;
+            } while (now - lastFrameTime >= minFrameMs);
+            ctx.clearRect(0, 0, box.w, box.h);
+            composeVideoFrame(
+              ctx,
+              effects,
+              playhead,
+              (zoom) => drawFootage(ctx, video, box, zoom),
+              box
+            );
+            if (duration) onProgress?.(Math.min(1, playhead / duration));
+          }
+          if (duration && playhead >= duration - 0.05) {
+            finish();
+            return;
+          }
+          if (playhead > lastPlayhead + 0.01) {
+            lastPlayhead = playhead;
+            lastProgressAt = now;
+          } else if (now - lastProgressAt > 15_000) {
+            finish(new Error('The video stopped playing during the bake.'));
+            return;
+          }
+          raf = requestAnimationFrame(tick);
+        };
+        raf = requestAnimationFrame(tick);
+        document.addEventListener('visibilitychange', onVisibility);
+        video.onended = () => finish();
+        video.onerror = () =>
+          finish(new Error('The video stopped playing during the bake.'));
+      });
+    } catch (error) {
+      playbackError =
+        error instanceof Error ? error : new Error('The bake was interrupted.');
+    }
+
+    video.pause();
+    if (recorder.state !== 'inactive') recorder.stop();
+    let blob: Blob | null = null;
+    try {
+      blob = await finished;
+    } catch (error) {
+      playbackError ??=
+        error instanceof Error ? error : new Error('Recording failed.');
+    }
+    if (playbackError) throw playbackError;
+    if (!blob || blob.size === 0) throw new Error('Recording produced no data.');
+    return blob;
+  } finally {
+    video.pause();
+    stream.getTracks().forEach((track) => track.stop());
+    await audioCtx.close().catch(() => {});
+    video.src = '';
+  }
 }
 
 /**

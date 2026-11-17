@@ -772,7 +772,11 @@ export const cameraPush: VideoPreset = {
   start: 0,
   fields: [],
   scale(t) {
-    return 1 + 0.075 * outCubic(seg(t, 0, 5.2));
+    // Push in, then ease back out so the effect leaves the frame (and every
+    // repeat starts) at zoom 1 — no jump when the planner drops it.
+    const zoomIn = outCubic(seg(t, 0, 2.6));
+    const settle = inCubic(seg(t, 4.6, 1.4));
+    return 1 + 0.075 * zoomIn * (1 - settle);
   },
   draw(ctx, t, _duration, _v, box) {
     const U = unit(box);
