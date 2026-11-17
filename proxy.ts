@@ -29,13 +29,13 @@ export function proxy(request: NextRequest) {
 
 export const config = {
   // The proxy makes Next buffer the request body in memory, capped at 10MB by
-  // default, which truncates large reel uploads before the route sees them.
-  // /api/reels/prepare streams its video straight to disk and /api/stage takes
-  // large multipart hf-driver uploads, so both stay out of the proxy; both
-  // routes authenticate the request themselves.
+  // default, which truncates large video uploads before the route sees them.
+  // The three video routes stream their upload straight to disk and
+  // /api/stage takes large multipart hf-driver uploads, so all stay out of
+  // the proxy; every /api/* route authenticates the request itself.
   matcher: [
     // tiktok1evuq…txt: TikTok's site-verification signature file must be
     // publicly fetchable or URL-prefix verification fails.
-    "/((?!_next/static|_next/image|favicon.ico|api/reels/prepare|api/stage|tiktok1evuqUunyZ47vScjZKHVD3zQksvJdTCA\\.txt).*)",
+    "/((?!_next/static|_next/image|favicon.ico|api/reels/prepare|api/videos|api/stories|api/stage|tiktok1evuqUunyZ47vScjZKHVD3zQksvJdTCA\\.txt).*)",
   ],
 };
