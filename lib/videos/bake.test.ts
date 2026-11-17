@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bakeVideoAnimation, composeVideoFrame, outputSize } from "./bake";
 import { getVideoPreset, type PlannedVideoEffect } from "./presets";
 
@@ -117,6 +118,216 @@ describe("composeVideoFrame", () => {
     );
     expect(calls).toEqual(["footage"]);
     expect(draws).toEqual([]);
+  });
+});
+
+describe("bakeVideoAnimation playback lifecycle", () => {
+  const attachments = [
+    { presetId: "cinema-title", slot: "start" as const, loop: false },
+  ];
+
+  let hidden = false;
+  let video: Record<string, unknown> & {
+    pause: ReturnType<typeof vi.fn>;
+    onended: (() => void) | null;
+  };
+  let frames: FrameRequestCallback[];
+  let recorders: FakeRecorder[];
+  let originalCreateElement: typeof document.createElement;
+  let originalGetContext: typeof HTMLCanvasElement.prototype.getContext;
+  let originalCaptureStream: unknown;
+  let originalRecorder: unknown;
+  let originalAudioContext: unknown;
+  let originalRaf: typeof requestAnimationFrame;
+  let originalCaf: typeof cancelAnimationFrame;
+
+  class FakeRecorder {
+    static isTypeSupported = () => true;
+    state = "inactive";
+    ondataavailable: ((event: { data: Blob }) => void) | null = null;
+    onstop: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    constructor() {
+      recorders.push(this);
+    }
+    start() {
+      this.state = "recording";
+    }
+    stop() {
+      this.state = "inactive";
+      this.onstop?.();
+    }
+  }
+
+  class FakeAudioContext {
+    state = "running";
+    destination = {};
+    createMediaElementSource() {
+      return { connect: () => {} };
+    }
+    createMediaStreamDestination() {
+      return { stream: { getAudioTracks: () => [{ stop: () => {} }] } };
+    }
+    createGain() {
+      return { gain: { value: 0 }, connect: () => {} };
+    }
+    resume() {
+      return Promise.resolve();
+    }
+    close() {
+      return Promise.resolve();
+    }
+  }
+
+  function fakeCtx() {
+    const store = new Map<PropertyKey, unknown>();
+    const gradient = { addColorStop: () => {} };
+    return new Proxy(store, {
+      get(target, prop) {
+        if (prop === "measureText") return () => ({ width: 10 });
+        if (prop === "createLinearGradient") return () => gradient;
+        if (prop === "createRadialGradient") return () => gradient;
+        if (!target.has(prop)) return () => undefined;
+        return target.get(prop);
+      },
+      set(target, prop, value) {
+        target.set(prop, value);
+        return true;
+      },
+    }) as unknown as CanvasRenderingContext2D;
+  }
+
+  function makeVideo() {
+    let src = "";
+    let metadataFired = false;
+    const element = {
+      currentTime: 0,
+      duration: 1,
+      videoWidth: 1920,
+      videoHeight: 1080,
+      onloadedmetadata: null as (() => void) | null,
+      onended: null as (() => void) | null,
+      onerror: null as (() => void) | null,
+      play: () => Promise.resolve(),
+      pause: vi.fn(),
+    };
+    Object.defineProperty(element, "src", {
+      get: () => src,
+      set: (value: string) => {
+        src = value;
+        if (value && !metadataFired) {
+          metadataFired = true;
+          setTimeout(() => element.onloadedmetadata?.(), 0);
+        }
+      },
+    });
+    return element;
+  }
+
+  beforeEach(() => {
+    hidden = false;
+    frames = [];
+    recorders = [];
+    video = makeVideo();
+
+    originalCreateElement = document.createElement;
+    vi.spyOn(document, "createElement").mockImplementation(((
+      tag: string,
+      options?: ElementCreationOptions
+    ) =>
+      tag === "video"
+        ? (video as unknown as HTMLElement)
+        : originalCreateElement.call(document, tag, options)) as typeof document.createElement);
+
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => hidden,
+    });
+
+    originalGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = (() => fakeCtx()) as never;
+
+    originalCaptureStream = (
+      HTMLCanvasElement.prototype as unknown as {
+        captureStream?: unknown;
+      }
+    ).captureStream;
+    (
+      HTMLCanvasElement.prototype as unknown as {
+        captureStream: () => MediaStream;
+      }
+    ).captureStream = () => ({
+      getTracks: () => [{ stop: () => {} }],
+      addTrack: () => {},
+    }) as unknown as MediaStream;
+
+    originalRecorder = globalThis.MediaRecorder;
+    globalThis.MediaRecorder = FakeRecorder as unknown as typeof MediaRecorder;
+    originalAudioContext = globalThis.AudioContext;
+    globalThis.AudioContext =
+      FakeAudioContext as unknown as typeof AudioContext;
+
+    originalRaf = globalThis.requestAnimationFrame;
+    originalCaf = globalThis.cancelAnimationFrame;
+    globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }) as typeof requestAnimationFrame;
+    globalThis.cancelAnimationFrame = (() => {}) as typeof cancelAnimationFrame;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete (document as unknown as { hidden?: boolean }).hidden;
+    HTMLCanvasElement.prototype.getContext = originalGetContext;
+    (
+      HTMLCanvasElement.prototype as unknown as {
+        captureStream?: unknown;
+      }
+    ).captureStream = originalCaptureStream;
+    globalThis.MediaRecorder = originalRecorder as typeof MediaRecorder;
+    globalThis.AudioContext = originalAudioContext as typeof AudioContext;
+    globalThis.requestAnimationFrame = originalRaf;
+    globalThis.cancelAnimationFrame = originalCaf;
+  });
+
+  it("rejects a bake that starts while the tab is already hidden", async () => {
+    hidden = true;
+    await expect(
+      bakeVideoAnimation({ videoUrl: "blob:test", attachments, values: {} })
+    ).rejects.toThrow("The tab was hidden, so the animation bake was stopped.");
+    expect(video.pause).toHaveBeenCalled();
+    // The guard runs before playback handlers are attached.
+    expect(video.onended).toBeNull();
+  });
+
+  it("rejects when the tab hides while the take is recording", async () => {
+    const bake = bakeVideoAnimation({
+      videoUrl: "blob:test",
+      attachments,
+      values: {},
+    });
+    await vi.waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    hidden = true;
+    document.dispatchEvent(new Event("visibilitychange"));
+    await expect(bake).rejects.toThrow(
+      "The tab was hidden, so the animation bake was stopped."
+    );
+    expect(video.pause).toHaveBeenCalled();
+  });
+
+  it("ends the take as soon as the recorder fails", async () => {
+    const bake = bakeVideoAnimation({
+      videoUrl: "blob:test",
+      attachments,
+      values: {},
+    });
+    await vi.waitFor(() => expect(recorders).toHaveLength(1));
+    // Playback is still running; the recorder fails mid-clip.
+    expect(frames).toHaveLength(1);
+    recorders[0].onerror?.();
+    await expect(bake).rejects.toThrow("Recording failed.");
+    expect(video.pause).toHaveBeenCalled();
   });
 });
 

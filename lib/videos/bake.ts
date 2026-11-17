@@ -265,6 +265,18 @@ export async function bakeVideoAnimation(
         };
         raf = requestAnimationFrame(tick);
         document.addEventListener('visibilitychange', onVisibility);
+        // The tab can already be hidden by the time the listener lands (the
+        // user switched away while playback was starting); no event fires in
+        // that case, so reject up front.
+        if (document.hidden) {
+          onVisibility();
+          return;
+        }
+        // A recorder failure has to end the take too — otherwise the fallback
+        // waits for the rest of a long clip before it can run.
+        finished.catch((error: unknown) => {
+          finish(error instanceof Error ? error : new Error('Recording failed.'));
+        });
         video.onended = () => finish();
         video.onerror = () =>
           finish(new Error('The video stopped playing during the bake.'));
