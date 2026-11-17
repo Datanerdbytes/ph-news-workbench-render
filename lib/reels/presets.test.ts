@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import * as sharedPlan from "@/lib/animations/plan";
 import {
   PRESET_CATEGORIES,
   REEL_PRESETS,
@@ -279,5 +280,28 @@ describe("punchzoom scale curve", () => {
     expect(punchzoom.scale!(0)).toBeCloseTo(1, 5);
     expect(punchzoom.scale!(0.3)).toBeCloseTo(1.16, 5);
     expect(punchzoom.scale!(2.4)).toBeCloseTo(1, 5);
+  });
+});
+
+describe("shared timing engine delegation", () => {
+  it("re-exports the slot helpers unchanged", () => {
+    expect(SLOT_ORDER).toBe(sharedPlan.SLOT_ORDER);
+    expect(slotStart).toBe(sharedPlan.slotStart);
+    expect(effectLocals).toBe(sharedPlan.effectLocals);
+    expect(attachmentsFromSlots).toBe(sharedPlan.attachmentsFromSlots);
+  });
+
+  it("routes planEffects and plannedFrames through the shared planner", () => {
+    const attachments = [
+      { presetId: "headline", slot: "start" as const, loop: true },
+      { presetId: "endcard", slot: "end" as const, loop: false },
+    ];
+    const effects = planEffects(attachments, 30);
+    expect(effects).toEqual(
+      sharedPlan.planEffectsFor(attachments, 30, {}, getPreset)
+    );
+    expect(plannedFrames(effects, 0.5)).toEqual(
+      sharedPlan.plannedFramesFor(effects, 0.5)
+    );
   });
 });

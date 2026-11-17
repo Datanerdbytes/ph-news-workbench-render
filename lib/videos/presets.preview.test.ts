@@ -7,6 +7,18 @@ const { toMock, killMock } = vi.hoisted(() => {
   return { toMock: vi.fn(() => ({ kill: killMock })), killMock };
 });
 vi.mock("gsap", () => ({ gsap: { to: toMock } }));
+// The registry has no draw-less preset today; mountVideoPreset still has to
+// reject one, so expose a sentinel id that resolves to a scale-only preset.
+vi.mock("./presets", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./presets")>();
+  return {
+    ...actual,
+    getVideoPreset: (id: string | null | undefined) =>
+      id === "ghost-drawless"
+        ? { ...actual.getVideoPreset("cinema-title")!, id, draw: undefined }
+        : actual.getVideoPreset(id),
+  };
+});
 
 import { mountVideoPreset } from "./presets.preview";
 
@@ -65,6 +77,13 @@ describe("mountVideoPreset", () => {
     const stage = document.createElement("div");
     expect(mountVideoPreset(stage, "ghost", {}, BOX)).toBeNull();
     expect(mountVideoPreset(stage, "none", {}, BOX)).toBeNull();
+    expect(stage.querySelector("canvas")).toBeNull();
+    expect(toMock).not.toHaveBeenCalled();
+  });
+
+  it("returns null for presets that only move the camera and draw nothing", () => {
+    const stage = document.createElement("div");
+    expect(mountVideoPreset(stage, "ghost-drawless", {}, BOX)).toBeNull();
     expect(stage.querySelector("canvas")).toBeNull();
     expect(toMock).not.toHaveBeenCalled();
   });
