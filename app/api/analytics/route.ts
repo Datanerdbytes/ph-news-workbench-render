@@ -187,19 +187,31 @@ export async function GET(request: Request) {
         AND created_at >= now() - make_interval(days => ${days})
       GROUP BY 1
       UNION ALL
-      -- Outcome buckets come from scheduled_posts: drafts carry no publish
-      -- timestamp, and every publish path mirrors a row (immediate publishes
-      -- get scheduled_for = the moment they went out). Each outcome is dated
-      -- by the send it belonged to, so success and failure share one axis.
+      -- Outcomes come from scheduled_posts, but a publish is dated by when
+      -- it went out: scheduled_for keeps the slot, so a post due 23:59 PHT
+      -- and sent at 00:02 PHT would count on the wrong day. The published
+      -- event carries the send time. A row whose event is missing (event
+      -- recording never fails a publish) falls back to its slot.
       SELECT to_char(
-               date_trunc('day', scheduled_for AT TIME ZONE 'Asia/Manila'),
+               date_trunc('day', published_at AT TIME ZONE 'Asia/Manila'),
                'YYYY-MM-DD'
              ),
              0, count(*), 0, 0
-      FROM scheduled_posts
-      WHERE workspace_id = ${workspaceId}
-        AND status = 'published'
-        AND scheduled_for >= now() - make_interval(days => ${days})
+      FROM (
+        SELECT coalesce(
+                 (
+                   SELECT min(e.created_at)
+                   FROM scheduled_post_events e
+                   WHERE e.scheduled_post_id = sp.id
+                     AND e.event = 'published'
+                 ),
+                 sp.scheduled_for
+               ) AS published_at
+        FROM scheduled_posts sp
+        WHERE sp.workspace_id = ${workspaceId}
+          AND sp.status = 'published'
+      ) sent
+      WHERE sent.published_at >= now() - make_interval(days => ${days})
       GROUP BY 1
       UNION ALL
       SELECT to_char(
