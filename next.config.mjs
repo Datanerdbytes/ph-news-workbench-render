@@ -28,6 +28,11 @@ const nextConfig = {
   // unreachable instance.
   serverExternalPackages: ["@neondatabase/serverless"],
   allowedDevOrigins,
+  // Marks this upgrade as driven by a published security advisory
+  // (next upgrade --agent=security).
+  experimental: {
+    agentUpgrade: "security",
+  },
 };
 
 export default nextConfig;
