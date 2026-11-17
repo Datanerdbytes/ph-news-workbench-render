@@ -56,6 +56,19 @@ import {
   MediaPreviewCard,
   MediaPreviewMedia,
 } from '@/components/publishing/media-preview-card';
+import { VideoAnimationPicker } from '@/components/videos/video-animation-picker';
+import { VideoAnimationOverlay } from '@/components/videos/video-animation-overlay';
+import { bakeAndFinalizeVideo } from '@/lib/videos/bake';
+import {
+  attachmentsFromSlots,
+  presetDefaultValues,
+  type PresetSlot,
+  type PresetValues,
+} from '@/lib/videos/presets';
+import type {
+  VideoSlotLoops,
+  VideoSlotSelection,
+} from '@/components/videos/video-animation-picker';
 
 const MAX_MESSAGE_LENGTH = 5000;
 const MAX_IMAGES = 10;
@@ -66,6 +79,16 @@ const ALLOWED_IMAGE_TYPES = new Set([
   'image/png',
   'image/webp',
 ]);
+
+function publishButtonLabel(
+  baking: boolean,
+  bakePct: number | null,
+  publishing: boolean
+): string {
+  if (baking) return `Rendering ${Math.round((bakePct ?? 0) * 100)}%…`;
+  if (publishing) return 'Publishing…';
+  return 'Publish';
+}
 
 type DraftStats = {
   inputTokens: number;
@@ -134,12 +157,45 @@ function ComposeWorkspace() {
   // clears the images, attaching an image clears the video. The file stages
   // straight from the browser to storage; publish/schedule reference the URL.
   const [videoFile, setVideoFile] = useState<File | null>(null);
+  const previewVideoRef = useRef<HTMLVideoElement>(null);
   const [videoPreviewUrl, setVideoPreviewUrl] = useState<string | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoStaging, setVideoStaging] = useState(false);
   const [videoStagingFailed, setVideoStagingFailed] = useState(false);
   const [videoPct, setVideoPct] = useState<number | null>(null);
   const [videoPreviewFailed, setVideoPreviewFailed] = useState(false);
+  const [animSlots, setAnimSlots] = useState<VideoSlotSelection>({
+    start: null,
+    middle: null,
+    end: null,
+  });
+  const [animLoops, setAnimLoops] = useState<VideoSlotLoops>({
+    start: false,
+    middle: false,
+    end: false,
+  });
+  const [animValues, setAnimValues] = useState<Record<string, PresetValues>>({});
+  const [baking, setBaking] = useState(false);
+  const [bakePct, setBakePct] = useState<number | null>(null);
+  const animations = attachmentsFromSlots(animSlots, animLoops);
+
+  // Field values are keyed by slot: the same preset can open and close the
+  // video with different text. Attaching seeds the slot with preset defaults.
+  function selectAnimation(slot: PresetSlot, presetId: string | null) {
+    setAnimSlots((current) => ({ ...current, [slot]: presetId }));
+    if (!presetId) return;
+    setAnimValues((current) => ({
+      ...current,
+      [slot]: presetDefaultValues(presetId),
+    }));
+  }
+
+  function setAnimationField(slot: PresetSlot, key: string, text: string) {
+    setAnimValues((current) => ({
+      ...current,
+      [slot]: { ...current[slot], [key]: text },
+    }));
+  }
   const selectionRef = useRef<number | null>(null);
   const [itemsLoading, setItemsLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -249,9 +305,51 @@ function ComposeWorkspace() {
     setVideoPct(null);
     setVideoStagingFailed(false);
     setVideoPreviewFailed(false);
+    // Animations belong to the attached clip — never carry them to the next.
+    setAnimSlots({ start: null, middle: null, end: null });
+    setAnimLoops({ start: false, middle: false, end: false });
+    setAnimValues({});
     if (next) {
       setImages([]);
       void stageVideo(next);
+    }
+  }
+
+  /**
+   * Staged URL of the video that should actually be posted. With animations
+   * attached the browser bakes them into the footage first (real-time
+   * playback), finalizes the recording to MP4, then re-stages the result;
+   * any failure falls back to posting the original clip.
+   */
+  async function animatedVideoUrl(): Promise<string | null> {
+    if (!videoUrl) return videoUrl;
+    if (!animations.length || !videoPreviewUrl) return videoUrl;
+    setBaking(true);
+    setBakePct(0);
+    try {
+      const finalized = await bakeAndFinalizeVideo({
+        videoUrl: videoPreviewUrl,
+        attachments: animations,
+        values: animValues,
+        onProgress: setBakePct,
+      });
+      const staged = await stageUpload(
+        `compose/${Date.now()}-${finalized.name.replace(/[^\w.-]+/g, '_')}`,
+        finalized,
+        { contentType: 'video/mp4' }
+      );
+      return staged.url;
+    } catch (error) {
+      toast.warning('Posting without the animation', {
+        description:
+          error instanceof Error
+            ? error.message
+            : 'The animation could not be rendered in this browser.',
+      });
+      return videoUrl;
+    } finally {
+      setBaking(false);
+      setBakePct(null);
     }
   }
 
@@ -426,6 +524,14 @@ function ComposeWorkspace() {
     setScheduling(true);
     try {
       const when = new Date(schedule.iso);
+      const finalVideoUrl = videoUrl ? await animatedVideoUrl() : null;
+      // The bake can run for the clip's full length; re-check the schedule so
+      // the request lands above the server's 10-minute minimum.
+      const recheck = resolveScheduledFor(scheduledFor);
+      if (recheck.iso === null) {
+        setScheduleError(recheck.error);
+        return;
+      }
       const res = await fetch('/api/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -433,7 +539,7 @@ function ComposeWorkspace() {
           newsItemId: selected.id,
           draftId: selected.draft_id ?? undefined,
           text: draft,
-          ...(videoUrl ? { videoUrl } : { imageUrls: images }),
+          ...(finalVideoUrl ? { videoUrl: finalVideoUrl } : { imageUrls: images }),
           scheduledFor: schedule.iso,
           pageId: pages.selected[0],
         }),
@@ -507,13 +613,14 @@ function ComposeWorkspace() {
 
     setPublishing(true);
     try {
+      const finalVideoUrl = videoUrl ? await animatedVideoUrl() : null;
       const res = await fetch('/api/publish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           newsItemId: selected.id,
           message: draft,
-          ...(videoUrl ? { videoUrl } : { imageUrls: images }),
+          ...(finalVideoUrl ? { videoUrl: finalVideoUrl } : { imageUrls: images }),
           pageId: pages.selected[0],
         }),
       });
@@ -748,6 +855,16 @@ function ComposeWorkspace() {
                             <span className="text-destructive">
                               Staging failed
                             </span>
+                          ) : baking ? (
+                            <>
+                              <Loader2
+                                className="size-3 animate-spin"
+                                aria-hidden
+                              />
+                              {bakePct != null
+                                ? `Baking ${Math.round(bakePct * 100)}%…`
+                                : 'Baking animation…'}
+                            </>
                           ) : videoUrl ? (
                             'Video ready'
                           ) : (
@@ -833,6 +950,23 @@ function ComposeWorkspace() {
                         />
                       </div>
                     )}
+                    {videoFile && videoPreviewUrl && !videoPreviewFailed && (
+                      <VideoAnimationPicker
+                        className="mt-3"
+                        slots={animSlots}
+                        loops={animLoops}
+                        values={animValues}
+                        disabled={videoStaging || baking}
+                        onSelect={selectAnimation}
+                        onLoopChange={(slot, loop) =>
+                          setAnimLoops((current) => ({
+                            ...current,
+                            [slot]: loop,
+                          }))
+                        }
+                        onFieldChange={setAnimationField}
+                      />
+                    )}
                   </div>
 
                   <div className="flex flex-wrap items-end justify-between gap-3 border-t border-border/60 bg-muted/30 px-5 py-3">
@@ -905,6 +1039,7 @@ function ComposeWorkspace() {
                             !facebook.connected ||
                             !pages.selected.length ||
                             publishing ||
+                            baking ||
                             imagesBusy ||
                             videoStaging ||
                             Boolean(videoFile && !videoUrl) ||
@@ -914,7 +1049,7 @@ function ComposeWorkspace() {
                           aria-describedby="publish-hint"
                         >
                           <FacebookMark className="size-4" />
-                          {publishing ? 'Publishing…' : 'Publish'}
+                          {publishButtonLabel(baking, bakePct, publishing)}
                         </Button>
                         <Button
                           variant="outline"
@@ -924,6 +1059,7 @@ function ComposeWorkspace() {
                             !draft ||
                             !facebook.connected ||
                             !pages.selected.length ||
+                            baking ||
                             imagesBusy ||
                             videoStaging ||
                             Boolean(videoFile && !videoUrl) ||
@@ -1057,12 +1193,19 @@ function ComposeWorkspace() {
                       <MediaPreviewMedia className="aspect-video">
                         <video
                           key={videoPreviewUrl}
+                          ref={previewVideoRef}
                           src={videoPreviewUrl}
                           controls
                           playsInline
                           preload="metadata"
                           onError={() => setVideoPreviewFailed(true)}
                           className="h-full w-full object-contain"
+                        />
+                        <VideoAnimationOverlay
+                          videoRef={previewVideoRef}
+                          slots={animSlots}
+                          loops={animLoops}
+                          values={animValues}
                         />
                       </MediaPreviewMedia>
                     </MediaPreviewCard>

@@ -25,7 +25,7 @@ const CANVAS_H = 1920;
 const DESIGN_W = 1080;
 const DESIGN_H = 1920;
 
-function pickMimeType(): string | undefined {
+export function pickMimeType(): string | undefined {
   if (typeof MediaRecorder === 'undefined') return undefined;
   const candidates = [
     // MP4/H.264 first: the baked reel can then publish straight to Facebook.

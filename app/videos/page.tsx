@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Film, Play, TriangleAlert, Upload, Video } from 'lucide-react';
 import { toast } from 'sonner';
 import { AssistantChat } from '@/components/assistant-chat';
@@ -25,6 +25,20 @@ import {
   MediaPreviewCard,
   MediaPreviewMedia,
 } from '@/components/publishing/media-preview-card';
+import { VideoAnimationPicker } from '@/components/videos/video-animation-picker';
+import { VideoAnimationOverlay } from '@/components/videos/video-animation-overlay';
+import { bakeAndFinalizeVideo } from '@/lib/videos/bake';
+import {
+  attachmentsFromSlots,
+  getVideoPreset,
+  presetDefaultValues,
+  type PresetSlot,
+  type PresetValues,
+} from '@/lib/videos/presets';
+import type {
+  VideoSlotLoops,
+  VideoSlotSelection,
+} from '@/components/videos/video-animation-picker';
 
 const MAX_BYTES = 1024 * 1024 * 1024;
 
@@ -37,6 +51,7 @@ type VideosPublishResponse = {
 export default function VideosPage() {
   const pages = useManagedPages();
   const [file, setFile] = useState<File | null>(null);
+  const previewVideoRef = useRef<HTMLVideoElement>(null);
   const [thumbnail, setThumbnail] = useState<File | null>(null);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -50,11 +65,55 @@ export default function VideosPage() {
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [previewFailed, setPreviewFailed] = useState(false);
 
+  const [animSlots, setAnimSlots] = useState<VideoSlotSelection>({
+    start: null,
+    middle: null,
+    end: null,
+  });
+  const [animLoops, setAnimLoops] = useState<VideoSlotLoops>({
+    start: false,
+    middle: false,
+    end: false,
+  });
+  const [animValues, setAnimValues] = useState<Record<string, PresetValues>>({});
+  const [bakePct, setBakePct] = useState<number | null>(null);
+  const animations = attachmentsFromSlots(animSlots, animLoops);
+  const animationLabel = animations
+    .map((attachment) => getVideoPreset(attachment.presetId)?.name)
+    .filter(Boolean)
+    .map((name) => `“${name}”`)
+    .join(' + ');
+
+  // Field values are keyed by slot: the same preset can open and close the
+  // video with different text. Attaching seeds the slot with preset defaults.
+  function selectAnimation(slot: PresetSlot, presetId: string | null) {
+    setAnimSlots((current) => ({ ...current, [slot]: presetId }));
+    if (!presetId) return;
+    setAnimValues((current) => ({
+      ...current,
+      [slot]: presetDefaultValues(presetId),
+    }));
+  }
+
+  function setAnimationField(slot: PresetSlot, key: string, text: string) {
+    setAnimValues((current) => ({
+      ...current,
+      [slot]: { ...current[slot], [key]: text },
+    }));
+  }
+
+  function resetAnimations() {
+    setAnimSlots({ start: null, middle: null, end: null });
+    setAnimLoops({ start: false, middle: false, end: false });
+    setAnimValues({});
+  }
+
   function applyVideoFile(next: File | null) {
     if (fileUrl) URL.revokeObjectURL(fileUrl);
     setFile(next);
     setFileUrl(next ? URL.createObjectURL(next) : null);
     setPreviewFailed(false);
+    resetAnimations();
   }
 
   const videoPreview = (
@@ -88,15 +147,24 @@ export default function VideosPage() {
     >
       <MediaPreviewMedia className="aspect-video">
         {file && fileUrl && !previewFailed ? (
-          <video
-            key={fileUrl}
-            src={fileUrl}
-            controls
-            playsInline
-            preload="metadata"
-            onError={() => setPreviewFailed(true)}
-            className="h-full w-full object-contain"
-          />
+          <>
+            <video
+              key={fileUrl}
+              ref={previewVideoRef}
+              src={fileUrl}
+              controls
+              playsInline
+              preload="metadata"
+              onError={() => setPreviewFailed(true)}
+              className="h-full w-full object-contain"
+            />
+            <VideoAnimationOverlay
+              videoRef={previewVideoRef}
+              slots={animSlots}
+              loops={animLoops}
+              values={animValues}
+            />
+          </>
         ) : file && previewFailed ? (
           <div className="flex flex-col items-center gap-1.5 px-4 text-center">
             <TriangleAlert className="size-4 text-warning" aria-hidden />
@@ -160,8 +228,51 @@ export default function VideosPage() {
     setResults(null);
     setUploadPct(0);
     try {
+      // Bake the attached animations into the footage first — the browser
+      // plays the video once, records the composited canvas and the result is
+      // finalized to a publishable MP4.
+      let uploadFile = file;
+      if (animations.length && fileUrl) {
+        setBakePct(0);
+        try {
+          const baked = await bakeAndFinalizeVideo({
+            videoUrl: fileUrl,
+            attachments: animations,
+            values: animValues,
+            onProgress: setBakePct,
+          });
+          // The route enforces the 1 GB cap after this fallback window; throw
+          // here so an oversized bake still posts the original clip.
+          if (baked.size > MAX_BYTES) {
+            throw new Error(
+              'The animated video would exceed the 1 GB upload limit.'
+            );
+          }
+          uploadFile = baked;
+        } catch (error) {
+          toast.warning('Posting without the animation', {
+            description:
+              error instanceof Error
+                ? error.message
+                : 'The animation could not be rendered in this browser.',
+          });
+        } finally {
+          setBakePct(null);
+        }
+      }
+
+      // The bake can run for the clip's full length; re-check the schedule so
+      // the request lands above the server's 10-minute minimum.
+      if (scheduledForIso) {
+        const recheck = resolveScheduledFor(scheduledFor);
+        if (recheck.iso === null) {
+          setScheduleError(recheck.error);
+          return;
+        }
+      }
+
       const form = new FormData();
-      form.append('video', file);
+      form.append('video', uploadFile, uploadFile.name);
       form.append('title', title);
       form.append('description', description);
       if (thumbnail) form.append('thumbnail', thumbnail);
@@ -251,6 +362,20 @@ export default function VideosPage() {
               })
             }
           />
+
+          {file && (
+            <VideoAnimationPicker
+              slots={animSlots}
+              loops={animLoops}
+              values={animValues}
+              disabled={busy}
+              onSelect={selectAnimation}
+              onLoopChange={(slot, loop) =>
+                setAnimLoops((current) => ({ ...current, [slot]: loop }))
+              }
+              onFieldChange={setAnimationField}
+            />
+          )}
 
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
@@ -352,17 +477,23 @@ export default function VideosPage() {
               disabled={!file || busy || !pages.selected.length}
             >
               <Video className="size-3.5" aria-hidden />
-              {busy
-                ? uploadPct != null && uploadPct < 100
-                  ? `Uploading ${uploadPct}%…`
-                  : 'Publishing…'
-                : scheduleOn
-                  ? 'Schedule video'
-                  : 'Publish video'}
+              {bakePct != null
+                ? `Rendering ${Math.round(bakePct * 100)}%…`
+                : busy
+                  ? uploadPct != null && uploadPct < 100
+                    ? `Uploading ${uploadPct}%…`
+                    : 'Publishing…'
+                  : scheduleOn
+                    ? 'Schedule video'
+                    : 'Publish video'}
             </Button>
             {file && (
               <span className="text-[10px] text-muted-foreground">
-                {(file.size / (1024 * 1024)).toFixed(1)} MB
+                {animations.length
+                  ? bakePct != null
+                    ? `Baking ${animationLabel} into the footage — keep this tab open.`
+                    : `${animationLabel} ${animations.length > 1 ? 'are' : 'is'} rendered into the video when you post.`
+                  : `${(file.size / (1024 * 1024)).toFixed(1)} MB`}
               </span>
             )}
           </div>
