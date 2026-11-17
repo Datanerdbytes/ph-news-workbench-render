@@ -17,9 +17,23 @@
  * functions live in presets.preview.ts.
  */
 
-export type PresetValues = Record<string, string>;
+import {
+  planEffectsFor,
+  plannedFramesFor,
+  type PlannedEffectOf,
+  type PresetField,
+  type PresetSlot,
+  type PresetValues,
+} from '@/lib/animations/plan';
 
-export type PresetField = { key: string; label: string; value: string };
+export type { PresetField, PresetSlot, PresetValues };
+
+/** One animation picked for a reel slot. */
+export type ReelAttachment = {
+  presetId: string;
+  slot: PresetSlot;
+  loop: boolean;
+};
 
 export type PresetCategory =
   | 'Headlines'
@@ -28,17 +42,12 @@ export type PresetCategory =
   | 'Branding'
   | 'Motion';
 
-/** Where on the reel an animation can be attached. */
-export type PresetSlot = 'start' | 'middle' | 'end';
-
-/** One animation picked for a slot; `loop` repeats it through the reel. */
-export type ReelAttachment = {
-  presetId: string;
-  slot: PresetSlot;
-  loop: boolean;
-};
-
-export const SLOT_ORDER: PresetSlot[] = ['start', 'middle', 'end'];
+export {
+  SLOT_ORDER,
+  attachmentsFromSlots,
+  effectLocals,
+  slotStart,
+} from '@/lib/animations/plan';
 
 type Ctx = CanvasRenderingContext2D;
 
@@ -601,121 +610,32 @@ export const PRESET_CATEGORIES = [
   'Motion',
 ] as const;
 
-/** Effect start time for `slot` on a reel of `videoDuration` seconds. */
-export function slotStart(
-  preset: ReelPreset,
-  slot: PresetSlot,
-  videoDuration: number
-): number {
-  if (slot === 'end') {
-    return Math.max(0, videoDuration - preset.duration - 0.2);
-  }
-  if (slot === 'middle') {
-    return Math.max(0, videoDuration / 2 - preset.duration / 2);
-  }
-  return preset.start;
-}
-
-/**
- * Local times to draw an effect at, for absolute reel time `t`.
- *
- * A single play draws once inside its window. A looped effect replays its full
- * in/out cycle every `duration` seconds; passes run back to back, never
- * overlapping, so the next pass follows the previous one instead of landing
- * on top of it. `endAt` — the absolute time the closing effect starts — ends
- * the loop, so the end card is never painted over by a repeated animation.
- */
-export function effectLocals(
-  t: number,
-  start: number,
-  duration: number,
-  loop: boolean,
-  endAt: number = Number.POSITIVE_INFINITY
-): number[] {
-  if (t < start || duration <= 0) return [];
-  if (!loop) {
-    const local = t - start;
-    return local <= duration ? [local] : [];
-  }
-  if (t >= endAt) return [];
-  return [(t - start) % duration];
-}
-
 /** A planned effect: a preset resolved to one absolute time on a reel. */
-export type PlannedEffect = {
-  preset: ReelPreset;
-  slot: PresetSlot;
-  loop: boolean;
-  /** Absolute reel time the effect (or its first looped cycle) starts. */
-  start: number;
-  values: PresetValues;
-};
+export type PlannedEffect = PlannedEffectOf<ReelPreset>;
 
 /**
- * Resolves the picker's attachments into concrete timed effects for one reel:
- * slots become absolute times, unknown/incompatible picks are dropped, and
- * 'end' effects never loop (their single play already closes the reel).
+ * Resolves the picker's attachments into concrete timed effects for one reel.
  */
 export function planEffects(
   attachments: ReelAttachment[],
   videoDuration: number,
   values: Record<string, PresetValues> = {}
 ): PlannedEffect[] {
-  const planned: PlannedEffect[] = [];
-  for (const attachment of attachments) {
-    const preset = getPreset(attachment.presetId);
-    if (!preset || preset.id === 'none') continue;
-    if (!preset.draw && !preset.scale) continue;
-    if (!preset.slots.includes(attachment.slot)) continue;
-    planned.push({
-      preset,
-      slot: attachment.slot,
-      loop: attachment.loop && attachment.slot !== 'end',
-      start: slotStart(preset, attachment.slot, videoDuration),
-      values: values[attachment.presetId] ?? {},
-    });
-  }
-  return planned;
+  return planEffectsFor(attachments, videoDuration, values, getPreset);
 }
 
 /** One draw of a planned effect at its own local time. */
 export type EffectFrame = { effect: PlannedEffect; local: number };
 
 /**
- * The draws one reel frame needs: every planned effect that is on screen at
- * absolute time `t`, in attachment order. Streaming loops (a ticker) keep a
- * single unbounded local time so their content flows across repeats instead
- * of restarting; every other loop restarts every `duration` seconds. Loops
- * stop at the closing effect's start so the end card keeps the frame to
- * itself.
+ * The draws one reel frame needs, in attachment order, with streaming loops
+ * handled and loops stopped at the closing effect's start.
  */
 export function plannedFrames(
   effects: PlannedEffect[],
   t: number
 ): EffectFrame[] {
-  let endAt = Number.POSITIVE_INFINITY;
-  for (const effect of effects) {
-    if (effect.slot === 'end') endAt = Math.min(endAt, effect.start);
-  }
-  const frames: EffectFrame[] = [];
-  for (const effect of effects) {
-    if (effect.loop && effect.preset.stream) {
-      if (t >= effect.start && t < endAt) {
-        frames.push({ effect, local: t - effect.start });
-      }
-      continue;
-    }
-    for (const local of effectLocals(
-      t,
-      effect.start,
-      effect.preset.duration,
-      effect.loop,
-      endAt
-    )) {
-      frames.push({ effect, local });
-    }
-  }
-  return frames;
+  return plannedFramesFor(effects, t);
 }
 
 /** Renderer for one planned frame: `stream` while streaming, else `draw`. */
@@ -725,18 +645,6 @@ export function effectRenderer(
   return effect.loop && effect.preset.stream
     ? effect.preset.stream
     : effect.preset.draw;
-}
-
-/** Reads the picker's per-slot selection into bake-ready attachments. */
-export function attachmentsFromSlots(
-  slots: Record<PresetSlot, string | null>,
-  loops: Record<PresetSlot, boolean>
-): ReelAttachment[] {
-  return SLOT_ORDER.flatMap((slot) => {
-    const presetId = slots[slot];
-    if (!presetId || presetId === 'none') return [];
-    return [{ presetId, slot, loop: loops[slot] }];
-  });
 }
 
 export function getPreset(id: string | null | undefined): ReelPreset | null {
