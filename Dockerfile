@@ -45,11 +45,20 @@ RUN apt-get update \
 # (lib/live/resolve.ts runs `yt-dlp -J --no-playlist <url>`). The official
 # static Linux binary is pinned to one release so the artifact is reproducible
 # and Trivy scans of the image stay clean — bump the pin deliberately, and
-# check the release notes for CVE fixes when you do. x86-64 only: the deploy
-# target (Render) is amd64.
+# check the release notes for CVE fixes when you do. The release ships one
+# binary per architecture: the deploy target (Render) is amd64, and a local
+# build on an Apple-silicon Mac is arm64, so the download follows BuildKit's
+# TARGETARCH instead of assuming x86-64. TARGETARCH is declared without a
+# default on purpose: a default here would shadow the value BuildKit injects
+# for the target platform, and the amd64 binary does not run under Rosetta.
 ARG YTDLP_VERSION=2026.10.26
-RUN curl -fsSL \
-      "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_linux" \
+ARG TARGETARCH
+RUN case "${TARGETARCH}" in \
+      arm64) YTDLP_ASSET=yt-dlp_linux_aarch64 ;; \
+      *) YTDLP_ASSET=yt-dlp_linux ;; \
+    esac \
+    && curl -fsSL \
+      "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/${YTDLP_ASSET}" \
       -o /usr/local/bin/yt-dlp \
     && chmod 0755 /usr/local/bin/yt-dlp \
     && yt-dlp --version

@@ -98,3 +98,42 @@ export async function clearSeededPublishes(): Promise<void> {
   await sql`DELETE FROM scheduled_posts WHERE text = ${SEED_MARKER}`;
   await sql`DELETE FROM drafts WHERE text = ${SEED_MARKER}`;
 }
+
+/**
+ * Seed a live_streams row the pump guard tests can target: `source_url` is
+ * NULL, so POST /api/live/[id]/pump must refuse to start — the guard fires
+ * before any yt-dlp/ffmpeg process could ever spawn. `status` defaults to
+ * ENDED so no Facebook refresh path touches the row (loadRows only refreshes
+ * non-ended streams, and the suite never sends ?refresh=1); a live status
+ * makes the card render its pump controls for the UI assertions instead.
+ */
+export async function seedSourcelessLiveStream(
+  status = "ENDED"
+): Promise<{ id: number; title: string }> {
+  const sql = db();
+  const owner = await ownerContext();
+  const title = `${SEED_MARKER} live broadcast (${status.toLowerCase()})`;
+  const rows = (await sql`
+    INSERT INTO live_streams
+      (workspace_id, facebook_video_id, title, description, status, created_by)
+    VALUES
+      (${owner.workspace_id}, ${`e2e-pump-${randomUUID()}`}, ${title},
+       'Seeded by the regression suite.', ${status}, ${owner.user_id})
+    RETURNING id, title
+  `) as unknown as { id: number; title: string }[];
+  return rows[0];
+}
+
+/** Remove exactly what seedSourcelessLiveStream wrote. */
+export async function clearSeededLiveStreams(): Promise<void> {
+  await db()`DELETE FROM live_streams WHERE title LIKE ${`${SEED_MARKER}%`}`;
+}
+
+/** The columns live_streams carries, as reported by information_schema. */
+export async function liveStreamsColumns(): Promise<string[]> {
+  const rows = (await db()`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_name = 'live_streams'
+  `) as unknown as { column_name: string }[];
+  return rows.map((row) => row.column_name);
+}
