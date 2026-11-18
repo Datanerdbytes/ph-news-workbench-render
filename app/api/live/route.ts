@@ -149,6 +149,17 @@ export async function POST(request: Request) {
     );
   }
 
+  // The pump copies this address into Facebook's RTMPS ingest, so it must
+  // look like a URL. Light shape check only — full validation (and the
+  // playable stream address) happened at /api/live/resolve time.
+  const sourceUrl = readText(body?.sourceUrl, 2048);
+  if (sourceUrl && !/^https?:\/\//i.test(sourceUrl)) {
+    return NextResponse.json(
+      { error: 'The source link must be an http:// or https:// URL.' },
+      { status: 400 }
+    );
+  }
+
   const schedule = parseScheduledPublishTime(body?.scheduledFor);
   if (schedule.error) {
     return NextResponse.json({ error: schedule.error }, { status: 400 });
@@ -172,11 +183,12 @@ export async function POST(request: Request) {
     const rows = (await sql`
       INSERT INTO live_streams
         (workspace_id, facebook_video_id, title, description, status,
-         stream_key, secure_stream_url, permalink_url, planned_start_time, created_by)
+         stream_key, secure_stream_url, permalink_url, planned_start_time,
+         source_url, created_by)
       VALUES
         (${access.workspace.id}, ${live.id}, ${live.title}, ${live.description},
          ${live.status}, ${storedKey}, ${secure.base}, ${live.permalink},
-         ${planned}, ${access.user.id})
+         ${planned}, ${sourceUrl || null}, ${access.user.id})
       ON CONFLICT (workspace_id, facebook_video_id) DO UPDATE SET
         title = EXCLUDED.title,
         description = EXCLUDED.description,
@@ -185,6 +197,7 @@ export async function POST(request: Request) {
         secure_stream_url = EXCLUDED.secure_stream_url,
         permalink_url = EXCLUDED.permalink_url,
         planned_start_time = EXCLUDED.planned_start_time,
+        source_url = EXCLUDED.source_url,
         updated_at = now()
       RETURNING id, facebook_video_id, title, description, status, stream_key,
                 secure_stream_url, permalink_url, planned_start_time, created_at,
