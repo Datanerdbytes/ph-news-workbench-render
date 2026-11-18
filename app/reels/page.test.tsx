@@ -14,6 +14,7 @@ vi.mock("@/lib/blob-cleanup", () => ({
 }));
 vi.mock("@/lib/reels/browser-normalize", () => ({
   normalizeVideo: vi.fn(),
+  finalizeBakedVideo: vi.fn(),
 }));
 vi.mock("@/lib/reels/bake", () => ({
   bakeReelAnimation: vi.fn(),
@@ -135,13 +136,17 @@ vi.mock("@/components/publishing/publish-page", () => {
 import { stageUpload } from "@/lib/stage-client";
 import { deleteStagedBlob } from "@/lib/blob-cleanup";
 import { bakeReelAnimation } from "@/lib/reels/bake";
-import { normalizeVideo } from "@/lib/reels/browser-normalize";
+import {
+  finalizeBakedVideo,
+  normalizeVideo,
+} from "@/lib/reels/browser-normalize";
 import { toast } from "sonner";
 import ReelsPage from "./page";
 
 const stageUploadMock = stageUpload as unknown as Mock;
 const deleteStagedBlobMock = deleteStagedBlob as unknown as Mock;
 const bakeMock = bakeReelAnimation as unknown as Mock;
+const finalizeMock = finalizeBakedVideo as unknown as Mock;
 const normalizeMock = normalizeVideo as unknown as Mock;
 const fetchMock = vi.fn();
 
@@ -320,6 +325,10 @@ describe("ReelsPage composer", () => {
       target: { value: "2026-11-14T08:15" },
     });
     // The real-time bake finishes at 08:10, five minutes short of the slot.
+    const finalized = new File(["finalized"], "baked.mp4", {
+      type: "video/mp4",
+    });
+    finalizeMock.mockResolvedValue(finalized);
     bakeMock.mockImplementation(async () => {
       vi.setSystemTime(new Date("2026-11-14T08:10:00"));
       return new File(["baked"], "clip.mp4", { type: "video/mp4" });
@@ -341,6 +350,9 @@ describe("ReelsPage composer", () => {
     // Confirming the new time is not re-prompted by the post-staging check.
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(stageUploadMock).toHaveBeenCalledTimes(1);
+    // Staging must upload the finalized bake, not the original clip that a
+    // missing finalizer would fall back to.
+    expect(stageUploadMock.mock.calls[0][1]).toBe(finalized);
     expect(deleteStagedBlobMock).not.toHaveBeenCalled();
   });
 
@@ -374,6 +386,38 @@ describe("ReelsPage composer", () => {
     // The staged reel is removed instead of being orphaned in the store.
     expect(deleteStagedBlobMock).toHaveBeenCalledWith(
       "https://bucket.public.blob.vercel-storage.com/reels/clip.mp4"
+    );
+  });
+
+  it("releases the staged reel when the server rejects the post before publishing", async () => {
+    render(<ReelsPage />);
+    await flush();
+
+    stageVideo();
+    await flush();
+
+    // A pre-publish 400 means the server never read the staged file: keeping
+    // the blob around would orphan it, since the composer forgets its URL.
+    fetchMock.mockImplementationOnce(async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        error: "Scheduled time must be at least 10 minutes from now.",
+      }),
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: /Publish reel/ }));
+
+    await waitFor(() =>
+      expect(deleteStagedBlobMock).toHaveBeenCalledWith(
+        "https://bucket.public.blob.vercel-storage.com/reels/clip.mp4"
+      )
+    );
+    expect(toast.error).toHaveBeenCalledWith(
+      "Reel upload failed",
+      expect.objectContaining({
+        description: "Scheduled time must be at least 10 minutes from now.",
+      })
     );
   });
 

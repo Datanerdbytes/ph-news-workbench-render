@@ -338,7 +338,15 @@ export default function ReelsPage() {
         }),
       });
       const data = await res.json().catch(() => null);
-      if (!res.ok) throw new Error(data?.error ?? 'The reel could not be posted.');
+      if (!res.ok) {
+        // A 400 is a pre-publish rejection: the server never consumed the
+        // staged copy, and this attempt ends without a URL that could retry
+        // it, so release the blob instead of orphaning it in the store. Any
+        // other status may have started publishing — or is an ambiguous
+        // network failure — so that blob is left to the scheduler.
+        if (res.status === 400) deleteStagedBlob(staged.url);
+        throw new Error(data?.error ?? 'The reel could not be posted.');
+      }
       setResults(data.results ?? []);
       toast.success(
         scheduleOn ? 'Reel scheduled' : 'Reel published',
