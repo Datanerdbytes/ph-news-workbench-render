@@ -270,6 +270,12 @@ export function useScheduleRetry() {
         // The click can outlive the dialog's last clock tick, so the confirm
         // is judged again here. Reopen with a fresh seed instead of
         // discarding the prepared media over a time the dialog let through.
+        // Refresh the frozen floor too: a backward clock correction while the
+        // dialog sat open must not keep seeding the same too-early slot.
+        limits.extraMs =
+          Math.max(MIN_SCHEDULE_MS, serverLeadNow(limits)) +
+          limits.uploadMs -
+          MIN_SCHEDULE_MS;
         current = picked;
       }
     },
@@ -280,7 +286,6 @@ export function useScheduleRetry() {
     <ScheduleRetryDialog
       message={prompt.message}
       value={prompt.value}
-      extraMs={prompt.extraMs}
       uploadMs={prompt.uploadMs}
       serverEarliestMs={prompt.serverEarliestMs}
       serverEarliestMonoMs={prompt.serverEarliestMonoMs}
@@ -300,7 +305,6 @@ export function useScheduleRetry() {
 function ScheduleRetryDialog({
   message,
   value,
-  extraMs,
   uploadMs,
   serverEarliestMs,
   serverEarliestMonoMs,
@@ -312,7 +316,6 @@ function ScheduleRetryDialog({
 }: {
   message: string;
   value: string;
-  extraMs: number;
   uploadMs: number;
   serverEarliestMs: number;
   serverEarliestMonoMs: number;
@@ -326,11 +329,16 @@ function ScheduleRetryDialog({
   // against the current clock — same as the composer's ScheduleField.
   const now = useScheduleClock();
   const serverLeadMs = serverLeadNow({ serverEarliestMs, serverEarliestMonoMs });
+  // The picker floor and the confirmation must share one live lead. Freezing
+  // it at ask() time lets a backward clock correction make the dialog accept a
+  // slot that confirmation rejects — then re-seed the same too-early slot.
+  const liveExtraMs =
+    Math.max(0, serverLeadMs - MIN_SCHEDULE_MS) + uploadMs;
   const inputRef = useRef<HTMLInputElement>(null);
   const bounds = scheduleBounds(now);
   // The picker's min is the true earliest — confirmation judges against the
   // live clock anyway, so padding it would hide a currently valid minute.
-  const min = retryMinimum(now.getTime(), extraMs, afterMs) ?? bounds.min;
+  const min = retryMinimum(now.getTime(), liveExtraMs, afterMs) ?? bounds.min;
   const maxMs = now.getTime() + MAX_SCHEDULE_MS;
   // Local strings drop the offset: a ceiling inside a fall-back's second
   // occurrence parses to the earlier hour and would mark valid times out of
@@ -360,9 +368,9 @@ function ScheduleRetryDialog({
   } else if (
     chosenMs !== null &&
     uploadMs > 0 &&
-    chosenMs - now.getTime() < MIN_SCHEDULE_MS + extraMs
+    chosenMs - now.getTime() < MIN_SCHEDULE_MS + liveExtraMs
   ) {
-    error = uploadLeadMessage(uploadMs, MIN_SCHEDULE_MS + extraMs);
+    error = uploadLeadMessage(uploadMs, MIN_SCHEDULE_MS + liveExtraMs);
   }
   return (
     <Modal
