@@ -596,4 +596,26 @@ describe("VideosPage composer", () => {
     expect(sentForms).toHaveLength(1);
   });
 
+  it("refreshes the displayed server floor after the window regains focus", async () => {
+    script = [{ status: 400, body: {
+      error: SCHEDULE_TOO_SOON_ERROR,
+      earliest: new Date("2026-11-14T08:25").toISOString(),
+    }, onSend: () => vi.advanceTimersByTime(4 * 60_000) }];
+    render(<VideosPage />);
+    await flush();
+    pickVideo();
+    await flush();
+    fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+    fireEvent.change(screen.getByLabelText("Publish date and time"), { target: { value: "2026-11-14T08:15" } });
+    fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
+    expect(await screen.findByRole("button", { name: /Schedule at 2026-11-14 08:30/ })).toBeEnabled();
+    // Simulate sleep with a stopped monotonic clock and a backward wall-clock jump.
+    vi.setSystemTime(new Date("2026-11-14T07:59"));
+    serverEarliest = new Date("2026-11-14T08:30").getTime();
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    expect(screen.getByRole("button", { name: /Schedule at/ })).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("Pick 2026-11-14 08:34 or later");
+    expect(sentForms).toHaveLength(1);
+  });
+
 });

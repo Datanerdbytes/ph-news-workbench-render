@@ -129,6 +129,7 @@ export function useScheduleRetry() {
     afterMs: number;
     afterLabel: string;
     serverFloor?: ServerFloor;
+    refreshServerFloor?: () => Promise<ServerFloor>;
   } | null>(null);
   const resolveRef = useRef<((value: string | null) => void) | null>(null);
   const mountedRef = useRef(true);
@@ -139,7 +140,8 @@ export function useScheduleRetry() {
       seedAfterMs = 0,
       afterMs = 0,
       afterLabel = '',
-      serverFloor?: ServerFloor
+      serverFloor?: ServerFloor,
+      refreshServerFloor?: () => Promise<ServerFloor>
     ): Promise<string | null> => {
       return new Promise((resolve) => {
         resolveRef.current = resolve;
@@ -151,11 +153,45 @@ export function useScheduleRetry() {
           afterMs,
           afterLabel,
           serverFloor,
+          refreshServerFloor,
         });
       });
     },
     []
   );
+
+  // Refresh after sleep or while the dialog is open, without relying on the
+  // device wall clock. Confirmation performs a separate authoritative check.
+  const refreshServerFloor = prompt?.refreshServerFloor;
+  useEffect(() => {
+    if (!refreshServerFloor) return;
+    let active = true;
+    let pending = false;
+    const refresh = () => {
+      if (pending) return;
+      pending = true;
+      void refreshServerFloor().then((floor) => {
+        if (!active) return;
+        setPrompt((current) => current?.refreshServerFloor === refreshServerFloor
+          ? { ...current, serverFloor: floor }
+          : current);
+      }).catch(() => {
+        // Confirmation reports errors and retains the prepared video.
+      }).finally(() => { pending = false; });
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') refresh();
+    };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', onVisibility);
+    const timer = window.setInterval(refresh, 30_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [refreshServerFloor]);
 
   const settle = useCallback((value: string | null) => {
     const resolve = resolveRef.current;
@@ -198,7 +234,8 @@ export function useScheduleRetry() {
           options.seedAfterMs,
           afterMs,
           options.afterLabel ?? '',
-          serverFloor
+          serverFloor,
+          options.refreshServerFloor
         );
         if (picked === null) return { kind: 'cancelled' };
         if (options.refreshServerFloor) {
