@@ -273,8 +273,22 @@ describe("VideosPage composer", () => {
     expect(
       screen.getByRole("button", { name: /Schedule at 2026-11-14 08:23/ })
     ).toBeInTheDocument();
+    // Videos re-uploads, so the copy must not promise a free retry.
+    expect(screen.getByText(/only the upload repeats/)).toBeInTheDocument();
     expect(sentForms).toHaveLength(1);
 
+    // An edited time must clear the next upload too, not just the floor.
+    fireEvent.change(screen.getByLabelText("New publish date and time"), {
+      target: { value: "2026-11-14T08:20" },
+    });
+    expect(screen.getByRole("button", { name: /Schedule at/ })).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "The last upload took about 6 min — pick at least 16 min ahead."
+    );
+
+    fireEvent.change(screen.getByLabelText("New publish date and time"), {
+      target: { value: "2026-11-14T08:23" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /Schedule at/ }));
     await waitFor(() => expect(sentForms).toHaveLength(2));
 
@@ -282,5 +296,34 @@ describe("VideosPage composer", () => {
       new Date("2026-11-14T08:23").toISOString()
     );
     expect(toast.success).toHaveBeenCalledWith("Video scheduled", expect.anything());
+  });
+
+  it("reopens the prompt when the server rejects a time the browser still accepts", async () => {
+    // No clock movement: the browser sees 08:15 as 15 minutes out, but the
+    // server refused it — the prompt must open anyway.
+    script = [{ status: 400, body: { error: SCHEDULE_TOO_SOON_ERROR } }];
+
+    render(<VideosPage />);
+    await flush();
+
+    pickVideo();
+    await flush();
+
+    fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+    fireEvent.change(screen.getByLabelText("Publish date and time"), {
+      target: { value: "2026-11-14T08:15" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
+
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(sentForms).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /Schedule at/ }));
+    await waitFor(() => expect(sentForms).toHaveLength(2));
+
+    expect(sentForms[1].scheduledFor).toBe(
+      new Date("2026-11-14T08:11").toISOString()
+    );
   });
 });

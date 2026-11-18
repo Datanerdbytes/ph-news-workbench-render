@@ -407,4 +407,43 @@ describe("ReelsPage composer", () => {
     );
     expect(reelPost()).toBeUndefined();
   });
+
+  it("releases the staged reel when staging finishes after the composer unmounts", async () => {
+    let finishStage: (() => void) | null = null;
+    stageUploadMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishStage = () => {
+            vi.setSystemTime(new Date("2026-11-14T08:10:00"));
+            resolve({
+              url: "https://bucket.public.blob.vercel-storage.com/reels/clip.mp4",
+            });
+          };
+        })
+    );
+
+    const { unmount } = render(<ReelsPage />);
+    await flush();
+
+    stageVideo();
+    await flush();
+
+    fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+    fireEvent.change(screen.getByLabelText("Publish date and time"), {
+      target: { value: "2026-11-14T08:15" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Schedule reel/ }));
+    await waitFor(() => expect(stageUploadMock).toHaveBeenCalled());
+
+    // The tab is gone before the upload lands; the slot has lapsed by then.
+    unmount();
+    await act(async () => finishStage!());
+    await flush();
+
+    expect(deleteStagedBlobMock).toHaveBeenCalledWith(
+      "https://bucket.public.blob.vercel-storage.com/reels/clip.mp4"
+    );
+    expect(reelPost()).toBeUndefined();
+  });
 });

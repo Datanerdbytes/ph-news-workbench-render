@@ -24,7 +24,10 @@ import {
   SCHEDULE_TOO_SOON_ERROR,
   resolveScheduledFor,
 } from '@/lib/publishing/schedule';
-import { useScheduleRetry } from '@/components/publishing/schedule-retry-dialog';
+import {
+  slowUploadMessage,
+  useScheduleRetry,
+} from '@/components/publishing/schedule-retry-dialog';
 import {
   MediaPreviewCard,
   MediaPreviewMedia,
@@ -376,7 +379,12 @@ export default function VideosPage() {
         const submit = await scheduleRetry.resolveSubmit(
           scheduledForRef.current,
           'video',
-          { seedAfterMs: Date.now() - sentAt }
+          {
+            seedAfterMs: Date.now() - sentAt,
+            // The browser clock may still accept what the server refused.
+            forcePrompt: true,
+            message: slowUploadMessage(scheduledForRef.current),
+          }
         );
         if (submit.kind === 'cancelled') return;
         if (submit.kind === 'error') {
