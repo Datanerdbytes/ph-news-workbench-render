@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { decryptToken, encryptToken } from '@/lib/facebook-token';
+import { getPumpManager } from '@/lib/live/pump';
+import { mapPumpStatus, pumpProcessRecord } from '@/lib/live/pump-state';
 import { requirePublishingConnection } from '@/lib/publishing/connection';
 import { facebookErrorResponse } from '@/lib/publishing/errors';
 import {
@@ -24,6 +26,10 @@ type StreamRow = {
   permalink_url: string | null;
   planned_start_time: string | Date | null;
   created_at: string | Date;
+  source_url: string | null;
+  pump_status: string;
+  pump_started_at: string | Date | null;
+  pump_error: string | null;
 };
 
 function splitStreamUrl(value: string | null) {
@@ -53,6 +59,13 @@ function toStream(row: StreamRow) {
     permalink: row.permalink_url,
     plannedStartTime: row.planned_start_time,
     createdAt: row.created_at,
+    sourceUrl: row.source_url,
+    pumpStatus: mapPumpStatus(
+      { pumpStatus: row.pump_status },
+      pumpProcessRecord(getPumpManager().status(row.id))
+    ),
+    pumpStartedAt: row.pump_started_at,
+    pumpError: row.pump_error,
   };
 }
 
@@ -63,7 +76,8 @@ async function loadRows(
 ): Promise<StreamRow[]> {
   const rows = (await sql`
     SELECT id, facebook_video_id, title, description, status, stream_key,
-           secure_stream_url, permalink_url, planned_start_time, created_at
+           secure_stream_url, permalink_url, planned_start_time, created_at,
+           source_url, pump_status, pump_started_at, pump_error
     FROM live_streams
     WHERE workspace_id = ${workspaceId}
     ORDER BY created_at DESC
@@ -173,7 +187,8 @@ export async function POST(request: Request) {
         planned_start_time = EXCLUDED.planned_start_time,
         updated_at = now()
       RETURNING id, facebook_video_id, title, description, status, stream_key,
-                secure_stream_url, permalink_url, planned_start_time, created_at
+                secure_stream_url, permalink_url, planned_start_time, created_at,
+                source_url, pump_status, pump_started_at, pump_error
     `) as unknown as StreamRow[];
 
     // A planned live stream is held by Facebook until its start time. Mirror

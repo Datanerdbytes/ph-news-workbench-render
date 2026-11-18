@@ -1,0 +1,166 @@
+import { NextResponse } from 'next/server';
+import { sql } from '@/lib/db';
+import { decryptToken } from '@/lib/facebook-token';
+import { getPumpManager } from '@/lib/live/pump';
+import {
+  buildIngestUrl,
+  parsePumpAction,
+  PumpStateError,
+} from '@/lib/live/pump-state';
+import { requirePublishingConnection } from '@/lib/publishing/connection';
+
+export const dynamic = 'force-dynamic';
+
+type PumpRow = {
+  id: number;
+  source_url: string | null;
+  secure_stream_url: string | null;
+  stream_key: string | null;
+  pump_started_at: string | Date | null;
+};
+
+async function findStream(workspaceId: string, id: string) {
+  const rows = (await sql`
+    SELECT id, source_url, secure_stream_url, stream_key, pump_started_at
+    FROM live_streams
+    WHERE workspace_id = ${workspaceId}
+      AND (facebook_video_id = ${id} OR id::text = ${id})
+  `) as unknown as PumpRow[];
+  return rows[0] ?? null;
+}
+
+async function startPump(workspaceId: string, stream: PumpRow) {
+  if (!stream.source_url) {
+    return NextResponse.json(
+      { error: 'Resolve a source URL for this stream before going live.' },
+      { status: 400 }
+    );
+  }
+
+  let streamKey: string | null = null;
+  if (stream.stream_key) {
+    try {
+      streamKey = decryptToken(stream.stream_key);
+    } catch {
+      return NextResponse.json(
+        {
+          error:
+            'The stored stream key could not be decrypted. Recreate the live stream to get a fresh key.',
+        },
+        { status: 400 }
+      );
+    }
+  }
+
+  let ingestUrl: string;
+  try {
+    ingestUrl = buildIngestUrl(stream.secure_stream_url, streamKey);
+  } catch (error) {
+    if (error instanceof PumpStateError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
+    throw error;
+  }
+
+  const manager = getPumpManager();
+  if (manager.status(stream.id).running) {
+    return NextResponse.json(
+      { error: 'The pump is already running for this stream.' },
+      { status: 409 }
+    );
+  }
+
+  const outcome = await manager.start({
+    id: stream.id,
+    source: stream.source_url,
+    // Never logged or returned — the manager redacts it everywhere it lands.
+    dest: ingestUrl,
+  });
+
+  if (!outcome.ok) {
+    if (outcome.reason === 'gate_disabled') {
+      return NextResponse.json({ error: outcome.error }, { status: 400 });
+    }
+    if (outcome.reason === 'already_running') {
+      return NextResponse.json({ error: outcome.error }, { status: 409 });
+    }
+    // spawn_failed — the manager's error text is already key-redacted.
+    await sql`
+      UPDATE live_streams
+      SET pump_status = 'failed', pump_error = ${outcome.error}, updated_at = now()
+      WHERE id = ${stream.id} AND workspace_id = ${workspaceId}
+    `;
+    return NextResponse.json({ error: outcome.error }, { status: 502 });
+  }
+
+  const updated = (await sql`
+    UPDATE live_streams
+    SET pump_status = 'running', pump_started_at = now(), pump_error = NULL,
+        updated_at = now()
+    WHERE id = ${stream.id} AND workspace_id = ${workspaceId}
+    RETURNING pump_started_at
+  `) as unknown as { pump_started_at: string | Date | null }[];
+
+  return NextResponse.json({
+    pump: {
+      status: 'running',
+      startedAt: updated[0]?.pump_started_at ?? null,
+    },
+  });
+}
+
+async function stopPump(workspaceId: string, stream: PumpRow) {
+  // Stop the process even when the DB row is stale; stopping an idle stream
+  // is a no-op success, not an error.
+  getPumpManager().stop(stream.id);
+
+  // pump_error keeps its history: a stopped pump that failed earlier still
+  // shows why. The next successful start clears it.
+  await sql`
+    UPDATE live_streams
+    SET pump_status = 'stopped', updated_at = now()
+    WHERE id = ${stream.id} AND workspace_id = ${workspaceId}
+  `;
+
+  return NextResponse.json({
+    pump: { status: 'stopped', startedAt: stream.pump_started_at ?? null },
+  });
+}
+
+export async function POST(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const body = await request.json().catch(() => null);
+  const action = parsePumpAction(body);
+  if (!action) {
+    return NextResponse.json(
+      { error: "Send { action: 'start' } or { action: 'stop' }." },
+      { status: 400 }
+    );
+  }
+
+  const result = await requirePublishingConnection(
+    request,
+    'control the live pump'
+  );
+  if (result.response) return result.response;
+  const { access } = result.context;
+  const { id } = await params;
+
+  const stream = await findStream(access.workspace.id, id);
+  if (!stream) {
+    return NextResponse.json({ error: 'Live stream not found.' }, { status: 404 });
+  }
+
+  try {
+    if (action === 'stop') return await stopPump(access.workspace.id, stream);
+    return await startPump(access.workspace.id, stream);
+  } catch {
+    // Unexpected DB failure — a plain 500 with no internals leaking.
+    return NextResponse.json(
+      { error: 'The live pump could not be updated. Try again.' },
+      { status: 500 }
+    );
+  }
+}
