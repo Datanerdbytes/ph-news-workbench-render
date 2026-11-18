@@ -41,6 +41,7 @@ type Stream = {
   plannedStartTime: string | null;
   createdAt: string;
   sourceUrl: string | null;
+  sourceMode: 'direct' | 'staged' | null;
   pumpStatus: PumpStatus;
   pumpStartedAt: string | null;
   pumpError: string | null;
@@ -73,7 +74,9 @@ function toLocalInput(value: string | null) {
 // A paste that resolves is stored as its resolved playable address; a direct
 // media file can feed the pump as pasted. Page links (YouTube, Facebook, …)
 // need yt-dlp first — ffmpeg cannot open them, so they are never attached
-// without a Preview.
+// without a Preview. Staged resolves (DASH-only sources such as Facebook
+// replay VODs) have no playable URL at all, so create keeps the original
+// pasted link and flags mode:'staged' — the pump pipes it through yt-dlp.
 const DIRECT_SOURCE_PATTERN = /^https?:\/\/\S+\.(mp4|webm)(?:[?#]|$)/i;
 
 export default function LivePage() {
@@ -166,9 +169,14 @@ export default function LivePage() {
     setBusy(true);
     try {
       const pastedUrl = sourceUrl.trim();
+      // Staged keeps the pasted page link (yt-dlp reads it itself); direct
+      // stores the resolved playable file. Unpreviewed direct-file pastes
+      // still attach as-is and stay 'direct'.
       const sourceUrlForCreate =
-        resolvedSource?.playableUrl ??
-        (DIRECT_SOURCE_PATTERN.test(pastedUrl) ? pastedUrl : undefined);
+        resolvedSource?.mode === 'staged'
+          ? pastedUrl
+          : resolvedSource?.playableUrl ??
+            (DIRECT_SOURCE_PATTERN.test(pastedUrl) ? pastedUrl : undefined);
       const res = await fetch('/api/live', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -177,6 +185,7 @@ export default function LivePage() {
           description,
           scheduledFor: scheduledForIso,
           sourceUrl: sourceUrlForCreate,
+          mode: resolvedSource?.mode ?? 'direct',
         }),
       });
       const data = await res.json().catch(() => null);

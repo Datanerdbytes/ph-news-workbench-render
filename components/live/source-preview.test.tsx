@@ -67,6 +67,7 @@ function renderPreview(props: Partial<Parameters<typeof SourcePreview>[0]> = {})
   return render(
     <SourcePreview
       playableUrl={MANIFEST_URL}
+      mode="direct"
       title="Midday briefing"
       isLive={false}
       extractor="youtube"
@@ -173,6 +174,30 @@ describe('SourcePreview', () => {
     expect(video.muted).toBe(true);
     expect(video.playsInline).toBe(true);
     expect(video.hasAttribute('controls')).toBe(true);
+  });
+
+  // Facebook replay VODs resolve with no playable URL — the pump pipes them
+  // through yt-dlp. The preview must say so honestly (a normal state, not an
+  // error) and never mount a player.
+  it('renders a staged resolve as a calm no-video card and never loads hls.js', () => {
+    renderPreview({
+      playableUrl: null,
+      mode: 'staged',
+      isLive: true,
+      extractor: 'facebook',
+    });
+
+    expect(screen.getByText('Midday briefing')).toBeInTheDocument();
+    expect(screen.getByText('facebook')).toBeInTheDocument();
+    expect(screen.getByText('LIVE')).toBeInTheDocument();
+    expect(
+      screen.getByText(/Preview unavailable for this source/)
+    ).toBeInTheDocument();
+
+    expect(document.querySelector('video')).toBeNull();
+    expect(hlsMock.Hls).not.toHaveBeenCalled();
+    // A staged resolve is not a failure — no alert styling anywhere.
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });
 
