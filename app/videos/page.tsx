@@ -386,23 +386,21 @@ export default function VideosPage() {
         // The transfer clock is monotonic; wall-clock jumps must not fake a
         // longer (or shorter) upload than actually happened.
         const uploadMs = performance.now() - startedAt;
-        // The server's clock can run ahead of this one, so its own earliest
-        // acceptable slot wins when it is later — and because the next upload
-        // lands that much later, the measured transfer is added to it.
-        const serverEarliest = earliest
-          ? new Date(earliest).getTime()
-          : Number.NaN;
-        const afterMs = Math.max(
-          sentIso ? new Date(sentIso).getTime() : 0,
-          Number.isNaN(serverEarliest) ? 0 : serverEarliest + uploadMs
-        );
+        // The server's own floor, recorded as a lead from the moment the
+        // refusal arrived so it keeps advancing while the dialog is open —
+        // a fixed instant would go stale if the user waits.
+        const serverEarliest = earliest ? new Date(earliest).getTime() : NaN;
+        const serverLeadMs = Number.isNaN(serverEarliest)
+          ? 0
+          : Math.max(0, serverEarliest - Date.now());
         const submit = await scheduleRetry.resolveSubmit(
           scheduledForRef.current,
           'video',
           {
             seedAfterMs: uploadMs,
-            // The refused slot is the floor the next pick must clear.
-            afterMs: afterMs || undefined,
+            serverLeadMs,
+            // The refused slot itself must not be offered again.
+            afterMs: sentIso ? new Date(sentIso).getTime() : undefined,
             afterLabel: sentLabel,
             // The browser clock may still accept what the server refused.
             forcePrompt: true,
