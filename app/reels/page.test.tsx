@@ -112,6 +112,7 @@ vi.mock("@/components/publishing/publish-page", () => {
       </>
     ),
     defaultScheduleValue: () => "2026-11-15T09:00",
+    toLocalInput: localInput,
     scheduleBounds: (now: Date = new Date()) => ({
       min: localInput(
         new Date(Math.ceil((now.getTime() + 11 * 60_000) / 60_000) * 60_000)

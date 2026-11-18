@@ -7,7 +7,12 @@ import {
   MIN_SCHEDULE_MS,
   resolveScheduledFor,
 } from '@/lib/publishing/schedule';
-import { inputClass, scheduleBounds, useScheduleClock } from './publish-page';
+import {
+  inputClass,
+  scheduleBounds,
+  toLocalInput,
+  useScheduleClock,
+} from './publish-page';
 
 /**
  * The composer's chosen slot elapsed while the bake/staging ran. The media is
@@ -32,15 +37,16 @@ export function uploadLeadMessage(seedAfterMs: number): string {
 
 /**
  * Earliest pickable time in the picker's local format. A DST fall-back repeats
- * an hour, and the first occurrence can parse earlier than the floor it was
- * rounded up from, so step past the repeated hour when that happens — the
- * check includes the expected wait, not just the 10-minute floor.
+ * an hour, and a formatted candidate in the second occurrence can parse to
+ * the first one and sit below the floor it was rounded up from, so scan
+ * forward a minute at a time until the parse clears the full minimum — the
+ * 10-minute floor plus the expected wait. The repeated hour ends within 60
+ * steps; a wait with no slot inside the 75-day window yields null rather than
+ * a candidate that fails the check.
  */
-function minScheduleValue(now: number, extraMs = 0): string {
-  for (let bump = 0; bump < 3; bump += 1) {
-    const value = scheduleBounds(
-      new Date(now + extraMs + bump * 60 * 60 * 1000)
-    ).min;
+function minScheduleValue(now: number, extraMs = 0): string | null {
+  for (let step = 0; step <= 60; step += 1) {
+    const value = scheduleBounds(new Date(now + extraMs + step * 60_000)).min;
     const resolved = resolveScheduledFor(value, new Date(now));
     if (
       resolved.iso !== null &&
@@ -49,7 +55,39 @@ function minScheduleValue(now: number, extraMs = 0): string {
       return value;
     }
   }
-  return scheduleBounds(new Date(now + extraMs)).min;
+  return null;
+}
+
+function nextMinuteValue(epochMs: number): string {
+  return toLocalInput(
+    new Date(Math.floor(epochMs / 60_000) * 60_000 + 60_000)
+  );
+}
+
+function laterValue(a: string | null, b: string | null): string | null {
+  if (!a) return b;
+  if (!b) return a;
+  return a > b ? a : b;
+}
+
+/**
+ * The slot the prompt opens with: the earliest that clears both the measured
+ * wait and the slot the server already refused. Local datetime strings sort
+ * chronologically, so the later candidate wins by comparison.
+ */
+function seedScheduleValue(
+  now: number,
+  extraMs: number,
+  afterMs: number
+): string {
+  const lead = minScheduleValue(now, extraMs);
+  if (!afterMs) return lead ?? '';
+  return laterValue(lead, nextMinuteValue(afterMs)) ?? '';
+}
+
+/** The server refused that slot; re-offering it just earns another 400. */
+export function retryAfterMessage(value: string): string {
+  return `The server already refused ${value.replace('T', ' ')} — pick a later time.`;
 }
 
 export type SubmitSchedule =
@@ -63,6 +101,14 @@ export type SubmitScheduleOptions = {
    * and the picked time must survive that wait, not just the 10-minute floor.
    */
   seedAfterMs?: number;
+  /**
+   * Epoch ms of the slot the server refused. The next pick must be strictly
+   * later — the server's clock may run ahead of ours, so re-offering the
+   * refused value just earns another rejection.
+   */
+  afterMs?: number;
+  /** The refused slot in picker format, for the "pick a later time" copy. */
+  afterLabel?: string;
   /** Ask even when the browser clock accepts it — the server rejected it. */
   forcePrompt?: boolean;
   /** Replaces the default "slot is no longer valid" sentence. */
@@ -80,19 +126,28 @@ export function useScheduleRetry() {
     message: string;
     value: string;
     minDelayMs: number;
+    afterMs: number;
+    afterLabel: string;
   } | null>(null);
   const resolveRef = useRef<((value: string | null) => void) | null>(null);
   const mountedRef = useRef(true);
 
   const ask = useCallback(
-    (message: string, seedAfterMs = 0): Promise<string | null> => {
+    (
+      message: string,
+      seedAfterMs = 0,
+      afterMs = 0,
+      afterLabel = ''
+    ): Promise<string | null> => {
       return new Promise((resolve) => {
         resolveRef.current = resolve;
         // Seeded with the earliest valid slot so one click is enough.
         setPrompt({
           message,
-          value: minScheduleValue(Date.now(), seedAfterMs),
+          value: seedScheduleValue(Date.now(), seedAfterMs, afterMs),
           minDelayMs: seedAfterMs,
+          afterMs,
+          afterLabel,
         });
       });
     },
@@ -131,19 +186,24 @@ export function useScheduleRetry() {
         if (direct.iso !== null) return { kind: 'ok', iso: direct.iso };
       }
       let current = value;
+      const afterMs = options.afterMs ?? 0;
       for (;;) {
         const picked = await ask(
           options.message ?? staleScheduleMessage(current, noun),
-          options.seedAfterMs
+          options.seedAfterMs,
+          afterMs,
+          options.afterLabel ?? ''
         );
         if (picked === null) return { kind: 'cancelled' };
         const chosen = resolveScheduledFor(picked);
+        const chosenMs =
+          chosen.iso === null ? null : new Date(chosen.iso).getTime();
         const clearsLead =
           !options.seedAfterMs ||
-          (chosen.iso !== null &&
-            new Date(chosen.iso).getTime() - Date.now() >=
-              MIN_SCHEDULE_MS + options.seedAfterMs);
-        if (chosen.iso !== null && clearsLead) {
+          (chosenMs !== null &&
+            chosenMs - Date.now() >= MIN_SCHEDULE_MS + options.seedAfterMs);
+        const clearsAfter = !afterMs || (chosenMs !== null && chosenMs > afterMs);
+        if (chosen.iso !== null && clearsLead && clearsAfter) {
           return { kind: 'ok', iso: chosen.iso, picked };
         }
         if (!mountedRef.current) return { kind: 'cancelled' };
@@ -161,6 +221,8 @@ export function useScheduleRetry() {
       message={prompt.message}
       value={prompt.value}
       minDelayMs={prompt.minDelayMs}
+      afterMs={prompt.afterMs}
+      afterLabel={prompt.afterLabel}
       onChange={(next) =>
         setPrompt((current) => (current ? { ...current, value: next } : current))
       }
@@ -176,6 +238,8 @@ function ScheduleRetryDialog({
   message,
   value,
   minDelayMs,
+  afterMs,
+  afterLabel,
   onChange,
   onConfirm,
   onCancel,
@@ -183,6 +247,8 @@ function ScheduleRetryDialog({
   message: string;
   value: string;
   minDelayMs: number;
+  afterMs: number;
+  afterLabel: string;
   onChange: (value: string) => void;
   onConfirm: () => void;
   onCancel: () => void;
@@ -192,11 +258,17 @@ function ScheduleRetryDialog({
   const now = useScheduleClock();
   const inputRef = useRef<HTMLInputElement>(null);
   const bounds = scheduleBounds(now);
-  const min = minScheduleValue(now.getTime(), minDelayMs);
+  const min =
+    laterValue(
+      minScheduleValue(now.getTime(), minDelayMs),
+      afterMs ? nextMinuteValue(afterMs) : null
+    ) ?? bounds.min;
   const resolution = resolveScheduledFor(value, now);
   let error: string | null = null;
   if (resolution.iso === null) {
     error = resolution.error;
+  } else if (afterMs && new Date(resolution.iso).getTime() <= afterMs) {
+    error = retryAfterMessage(afterLabel);
   } else if (
     minDelayMs > 0 &&
     new Date(resolution.iso).getTime() - now.getTime() <

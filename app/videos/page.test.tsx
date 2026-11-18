@@ -104,6 +104,7 @@ vi.mock("@/components/publishing/publish-page", () => {
       </>
     ),
     defaultScheduleValue: () => "2026-11-15T09:00",
+    toLocalInput: localInput,
     scheduleBounds: (now: Date = new Date()) => ({
       min: localInput(
         new Date(Math.ceil((now.getTime() + 11 * 60_000) / 60_000) * 60_000)
@@ -142,6 +143,10 @@ type ScriptedResponse = {
 };
 let script: ScriptedResponse[] = [];
 
+// A simulated server clock: every request is judged against one floor, so a
+// slot the browser still accepts can be refused however often it is offered.
+let serverMin: Date | null = null;
+
 // The composer posts the file through XMLHttpRequest (for real upload
 // progress); this stub records the form and answers with a published row.
 class FakeXmlHttpRequest {
@@ -161,13 +166,19 @@ class FakeXmlHttpRequest {
   open = vi.fn();
   setRequestHeader = vi.fn();
   send(body: FormData) {
-    sentForms.push(
-      Object.fromEntries(body as unknown as Iterable<[string, FormDataEntryValue]>)
+    const form = Object.fromEntries(
+      body as unknown as Iterable<[string, FormDataEntryValue]>
     );
+    sentForms.push(form);
     const step = script.shift();
     step?.onSend?.();
     if (step?.status) this.status = step.status;
     if (step?.body !== undefined) this.responseText = JSON.stringify(step.body);
+    const sentSlot = form.scheduledFor ? new Date(String(form.scheduledFor)) : null;
+    if (serverMin && sentSlot && sentSlot.getTime() < serverMin.getTime()) {
+      this.status = 400;
+      this.responseText = JSON.stringify({ error: SCHEDULE_TOO_SOON_ERROR });
+    }
     this.upload.onprogress?.({ lengthComputable: true, loaded: 1, total: 1 });
     queueMicrotask(() => this.onload?.());
   }
@@ -194,6 +205,7 @@ beforeEach(() => {
   vi.setSystemTime(new Date("2026-11-14T08:00:00"));
   sentForms = [];
   script = [];
+  serverMin = null;
   vi.stubGlobal("XMLHttpRequest", FakeXmlHttpRequest);
 });
 
@@ -301,13 +313,12 @@ describe("VideosPage composer", () => {
   });
 
   it("reopens the prompt when the server rejects a time the browser still accepts", async () => {
-    // No clock movement: the browser sees 08:15 as 15 minutes out, but a
-    // server clock running ahead refuses it — and it refuses the seeded 08:11
-    // replacement too, so passing cannot just rely on the stub's default.
-    script = [
-      { status: 400, body: { error: SCHEDULE_TOO_SOON_ERROR } },
-      { status: 400, body: { error: SCHEDULE_TOO_SOON_ERROR } },
-    ];
+    // No clock movement: the browser sees 08:15 as 15 minutes out, but the
+    // server clock runs ahead and applies a 08:17 floor to every request.
+    // Each suggestion must clear the slot that was actually refused, so the
+    // flow retries 08:16 and then 08:17 — never the refused slot — and only
+    // the final time passes the server's own check.
+    serverMin = new Date("2026-11-14T08:17:00");
 
     render(<VideosPage />);
     await flush();
@@ -325,26 +336,38 @@ describe("VideosPage composer", () => {
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
     expect(sentForms).toHaveLength(1);
 
-    fireEvent.click(screen.getByRole("button", { name: /Schedule at/ }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /Schedule at 2026-11-14 08:16/ })
+    );
     await waitFor(() => expect(sentForms).toHaveLength(2));
 
-    // The seed is the browser's earliest acceptable slot, not the server's.
-    expect(sentForms[1].scheduledFor).toBe(
-      new Date("2026-11-14T08:11").toISOString()
-    );
+    // Still under the server's floor; the prompt moves past the refused slot.
+    expect(
+      await screen.findByRole("button", { name: /Schedule at 2026-11-14 08:17/ })
+    ).toBeInTheDocument();
 
-    // That replacement is refused too; the prompt is still there to ask again,
-    // and a later time — one that clears the server's minimum — goes through.
-    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    // The refused slot cannot be re-confirmed even by editing back to it.
     fireEvent.change(screen.getByLabelText("New publish date and time"), {
-      target: { value: "2026-11-14T08:12" },
+      target: { value: "2026-11-14T08:16" },
     });
-    fireEvent.click(screen.getByRole("button", { name: /Schedule at/ }));
+    expect(screen.getByRole("button", { name: /Schedule at/ })).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "The server already refused 2026-11-14 08:16 — pick a later time."
+    );
+    fireEvent.change(screen.getByLabelText("New publish date and time"), {
+      target: { value: "2026-11-14T08:17" },
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Schedule at 2026-11-14 08:17/ })
+    );
     await waitFor(() => expect(sentForms).toHaveLength(3));
 
-    expect(sentForms[2].scheduledFor).toBe(
-      new Date("2026-11-14T08:12").toISOString()
-    );
+    expect(sentForms.map((form) => form.scheduledFor)).toEqual([
+      new Date("2026-11-14T08:15").toISOString(),
+      new Date("2026-11-14T08:16").toISOString(),
+      new Date("2026-11-14T08:17").toISOString(),
+    ]);
     expect(toast.success).toHaveBeenCalledWith("Video scheduled", expect.anything());
   });
 });

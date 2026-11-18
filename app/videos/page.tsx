@@ -385,6 +385,10 @@ export default function VideosPage() {
           'video',
           {
             seedAfterMs: uploadMs,
+            // The refused slot is the floor the next pick must clear: the
+            // server's clock can sit ahead of this one.
+            afterMs: sentIso ? new Date(sentIso).getTime() : undefined,
+            afterLabel: sentLabel,
             // The browser clock may still accept what the server refused.
             forcePrompt: true,
             message: slowUploadMessage(sentLabel),
