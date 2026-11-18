@@ -217,7 +217,7 @@ const FEEDER_FATAL_STDERR_SIGNATURES = [
 
 const MKFIFO_BIN = 'mkfifo';
 
-/** How long the write-end opens may wait for ffmpeg to show up. */
+/** Per-phase deadline for one fifo write-end open (see `openFifoWriteEnd`). */
 const FIFO_OPEN_TIMEOUT_MS = 10_000;
 
 type FifoPair = { video: string; audio: string };
@@ -631,17 +631,28 @@ export class PumpManager {
   // ------------------------------------------------------------------ staged
 
   /**
-   * One staged attempt: fresh fifo pair → ffmpeg → write-ends → feeders.
+   * One staged attempt: fresh fifo pair → ffmpeg → video pipe → audio pipe.
    *
-   * ORDERING — do not reorder into a deadlock:
+   * ORDERING — do not reorder into a deadlock (an earlier version that
+   * opened both write-ends up front timed out on every real run). ffmpeg
+   * opens and PROBES its inputs sequentially: open(v.fifo) pairs with the
+   * pending writer, then avformat probing BLOCKS READING BYTES from v.fifo
+   * before ffmpeg proceeds to open a.fifo at all. So each write-end must be
+   * opened and its feeder spawned BEFORE the next fifo is touched, letting
+   * bytes flow as soon as each pair forms (mirrors the shell PoC, where the
+   * feeder processes already held their write-ends before ffmpeg started):
+   *
    * 1. `mkfifo` creates the pair (nothing is open yet).
-   * 2. ffmpeg spawns FIRST and opens both fifo read-ends as it starts; a
-   *    read-end open blocks until a writer arrives, so ffmpeg simply waits.
-   * 3. Only then are the write-ends opened: they block until a reader
-   *    exists — which ffmpeg already provides — so they complete.
-   * 4. The feeders spawn last, each with its write-end fd as stdout.
-   * Spawning feeders before ffmpeg, or opening write-ends first, deadlocks
-   * the attempt.
+   * 2. ffmpeg spawns first; its open(v.fifo, O_RDONLY) pends.
+   * 3. the parent opens v.fifo O_WRONLY — pairs immediately.
+   * 4. the video feeder spawns at once and writes fragment bytes, feeding
+   *    ffmpeg's probe.
+   * 5. only then is a.fifo opened — it pairs when ffmpeg reaches input 1
+   *    (right after the video probe completes) — and the audio feeder
+   *    spawns.
+   * Opening both write-ends first deadlocks: ffmpeg never opens a.fifo's
+   * read-end until video probe bytes arrive, and no feeder exists yet to
+   * write them.
    */
   private async spawnStagedAttempt(proc: PumpProc): Promise<void> {
     proc.attempts += 1;
@@ -686,29 +697,11 @@ export class PumpManager {
       proc.running = true;
       this.attachFfmpegHandlers(proc, child);
 
-      // (3) Write-ends. A blocking O_WRONLY open waits for a reader; ffmpeg
-      // is already waiting as the reader, so these complete as soon as it
-      // has opened its read-ends. Raced against ffmpeg failing to start and
-      // an overall timeout so a dead attempt never pins libuv threadpool
-      // threads on opens that can never complete (see `unblockPendingOpens`).
-      proc.pendingOpens = [
-        fsOpen(fifos.video, fsConstants.O_WRONLY),
-        fsOpen(fifos.audio, fsConstants.O_WRONLY),
-      ];
-      const openTimeout = new Promise<never>((_, reject) => {
-        const timer = setTimeout(() => {
-          reject(
-            new Error('timed out waiting for ffmpeg to open the source pipes')
-          );
-        }, FIFO_OPEN_TIMEOUT_MS);
-        timer.unref?.();
-      });
-      [videoHandle, audioHandle] = (await Promise.race([
-        Promise.all(proc.pendingOpens),
-        this.setupFailureGuard(child),
-        openTimeout,
-      ])) as [FileHandle, FileHandle];
-      proc.pendingOpens = [];
+      // (3)+(4) Video write-end, then the video feeder AT ONCE — its bytes
+      // are what lets ffmpeg's probe of v.fifo complete (and with it the
+      // opening of a.fifo's read-end below).
+      videoHandle = await this.openFifoWriteEnd(proc, child, fifos.video);
+      await this.spawnFeeder(proc, 'video', videoHandle);
 
       if (proc.stopping) {
         // stop() already signalled ffmpeg; its close settled this attempt.
@@ -716,9 +709,9 @@ export class PumpManager {
         return;
       }
 
-      // (4) Feeders last — stdout IS the fifo write-end fd. If the first
-      // candidate cannot spawn, the next one in the lookup order is tried.
-      await this.spawnFeeder(proc, 'video', videoHandle);
+      // (5) Audio write-end — it can only pair once ffmpeg reaches input 1,
+      // i.e. right after the video probe completes — then the audio feeder.
+      audioHandle = await this.openFifoWriteEnd(proc, child, fifos.audio);
       await this.spawnFeeder(proc, 'audio', audioHandle);
       proc.starting = false;
     } catch (error) {
@@ -736,6 +729,50 @@ export class PumpManager {
       if (videoHandle) void videoHandle.close().catch(() => {});
       if (audioHandle) void audioHandle.close().catch(() => {});
     }
+  }
+
+  /**
+   * Opens one fifo write-end for the parent — a blocking O_WRONLY open that
+   * pairs with ffmpeg's read-end open. Raced against ffmpeg failing to
+   * start/dying before the pair forms and a per-phase timeout, so a dead
+   * attempt never pins libuv threadpool threads on an open that can never
+   * complete (the still-pending open is rescued in `unblockPendingOpens`).
+   * `proc.pendingOpens` stays populated while the open is in flight so every
+   * teardown path can rescue it.
+   */
+  private async openFifoWriteEnd(
+    proc: PumpProc,
+    child: ChildProcess,
+    fifoPath: string
+  ): Promise<FileHandle> {
+    const opening = fsOpen(fifoPath, fsConstants.O_WRONLY);
+    proc.pendingOpens = [opening];
+    const handle = (await Promise.race([
+      opening,
+      this.setupFailureGuard(child),
+      this.openPhaseTimeout(),
+    ])) as FileHandle;
+    proc.pendingOpens = [];
+    if (proc.attemptSettled || proc.stopping) {
+      // The attempt died while this open was resolving (e.g. a feeder death
+      // tore it down and the rescue paired this open) — the handle is ours
+      // to close; using it would spawn a feeder into a dead attempt.
+      void handle.close().catch(() => {});
+      throw new Error('the attempt ended while the source pipe was opening');
+    }
+    return handle;
+  }
+
+  /** Per-phase deadline for one write-end open (see `openFifoWriteEnd`). */
+  private openPhaseTimeout(): Promise<never> {
+    return new Promise((_, reject) => {
+      const timer = setTimeout(() => {
+        reject(
+          new Error('timed out waiting for ffmpeg to open the source pipes')
+        );
+      }, FIFO_OPEN_TIMEOUT_MS);
+      timer.unref?.();
+    });
   }
 
   /** Rejects when ffmpeg cannot start or dies before the write-ends are open. */
@@ -932,6 +969,7 @@ export class PumpManager {
    */
   private teardownStagedAttempt(proc: PumpProc): void {
     proc.starting = false;
+    proc.running = false;
     const pending = proc.pendingOpens;
     proc.pendingOpens = [];
     if (pending.length && proc.fifos) {

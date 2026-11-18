@@ -809,22 +809,40 @@ describe('PumpManager staged mode', () => {
     expect(feederCalls[0][2].stdio).toEqual(['ignore', 31, 'pipe']);
     expect(feederCalls[1][2].stdio).toEqual(['ignore', 32, 'pipe']);
 
-    // ORDERING: ffmpeg spawns before the parent opens the write-ends, and
-    // the feeders spawn only after those opens — reordering deadlocks.
+    // ORDERING (regression guard — opening both write-ends up front
+    // deadlocks ffmpeg's sequential open+probe of its inputs):
+    // ffmpeg spawn → video open → video feeder → audio open → audio feeder.
     const spawnOrder = (callIndex: number) =>
       spawnMock.mock.invocationCallOrder[callIndex];
     const ffmpegCallIndex = spawnMock.mock.calls.findIndex(
       ([command]) => command === 'ffmpeg'
     );
-    const firstFeederIndex = spawnMock.mock.calls.findIndex(
-      ([command]) => command === 'yt-dlp'
+    const feederCallIndexes = spawnMock.mock.calls.reduce<number[]>(
+      (acc, call, index) => (call[0] === 'yt-dlp' ? [...acc, index] : acc),
+      []
     );
+    // ffmpeg's open(v.fifo, O_RDONLY) pends before the parent's writer arrives.
     expect(spawnOrder(ffmpegCallIndex)).toBeLessThan(
       fsMocks.open.mock.invocationCallOrder[0]
     );
+    // The video feeder spawns right after the video open resolves — it must
+    // already be writing while ffmpeg probes v.fifo.
     expect(fsMocks.open.mock.invocationCallOrder[0]).toBeLessThan(
-      spawnOrder(firstFeederIndex)
+      spawnOrder(feederCallIndexes[0])
     );
+    // a.fifo is only opened once the video feeder exists.
+    expect(spawnOrder(feederCallIndexes[0])).toBeLessThan(
+      fsMocks.open.mock.invocationCallOrder[1]
+    );
+    // The audio feeder spawns right after the audio open resolves.
+    expect(fsMocks.open.mock.invocationCallOrder[1]).toBeLessThan(
+      spawnOrder(feederCallIndexes[1])
+    );
+    // The opens interleave per-fifo: video first, audio second.
+    expect(fsMocks.open.mock.calls.map((call) => call[0])).toEqual([
+      latestFifoPaths().video,
+      latestFifoPaths().audio,
+    ]);
 
     // The parent closed its copies of the write-end fds after spawning.
     expect(fsMocks.open).toHaveBeenCalledTimes(2);
