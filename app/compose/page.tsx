@@ -210,6 +210,9 @@ function ComposeWorkspace() {
   const [scheduleError, setScheduleError] = useState('');
   const [scheduledFor, setScheduledFor] = useState(defaultScheduleValue);
   const [scheduling, setScheduling] = useState(false);
+  // The draft editor lock is separate from `scheduling`: cancelling a long
+  // bake hands editing back immediately while the abandoned attempt unwinds.
+  const [editorLocked, setEditorLocked] = useState(false);
   // True once the schedule request is on the wire: past that point Cancel
   // cannot abort it, so the button becomes a non-cancellable waiting state.
   const [dispatching, setDispatching] = useState(false);
@@ -222,6 +225,16 @@ function ComposeWorkspace() {
   // Closing the picker bumps this so a bake in progress stops before it
   // prompts for a new time or posts against an abandoned schedule.
   const scheduleAttempt = useRef(0);
+  // Read by the assistant's reply handler, which can fire long after the
+  // render that started the request.
+  const editorLockedRef = useRef(false);
+  useEffect(() => {
+    editorLockedRef.current = editorLocked;
+  }, [editorLocked]);
+  const dispatchingRef = useRef(false);
+  useEffect(() => {
+    dispatchingRef.current = dispatching;
+  }, [dispatching]);
   // Leaving the page abandons a bake in flight: the attempt check makes it
   // stop before staging a blob for a post nobody can submit. The upload that
   // already started is cleaned up by the caller's generation check.
@@ -417,6 +430,7 @@ function ComposeWorkspace() {
     applyVideoFile(null);
     setConfirmDelete(false);
     setScheduleOpen(false);
+    setEditorLocked(false);
     setDraftLoadFailed(false);
     if (selected?.draft_id) void loadSavedDraft(selected);
   }, [selectedId, selected, loadSavedDraft]);
@@ -552,6 +566,7 @@ function ComposeWorkspace() {
     }
     setScheduleError('');
     setScheduling(true);
+    setEditorLocked(true);
     const attempt = ++scheduleAttempt.current;
     try {
       const finalVideoUrl = videoUrl
@@ -604,7 +619,13 @@ function ComposeWorkspace() {
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Could not schedule the post.');
+      if (!res.ok) {
+        // 400/404 are pre-insert rejections: the schedule row does not exist,
+        // so nothing will consume the freshly baked blob. An error or an
+        // ambiguous network failure may still be inserting — keep it.
+        if (res.status === 400 || res.status === 404) discardBake();
+        throw new Error(data.error ?? 'Could not schedule the post.');
+      }
       toast.success('Post scheduled', {
         description: when.toLocaleString('en-PH', {
           month: 'short',
@@ -625,6 +646,7 @@ function ComposeWorkspace() {
       });
     } finally {
       setDispatching(false);
+      setEditorLocked(false);
       setScheduling(false);
     }
   }
@@ -879,8 +901,8 @@ function ComposeWorkspace() {
                     <textarea
                       value={draft}
                       onChange={(event) => setDraft(event.target.value)}
-                      readOnly={scheduling}
-                      aria-busy={scheduling}
+                      readOnly={editorLocked}
+                      aria-busy={editorLocked}
                       placeholder="Generate a draft from the source story, or start writing here…"
                       aria-label="Facebook post draft"
                       className="min-h-[260px] w-full resize-y bg-transparent text-[15px] leading-7 text-foreground outline-none placeholder:text-muted-foreground"
@@ -899,7 +921,7 @@ function ComposeWorkspace() {
                         <button
                           type="button"
                           onClick={() => applyVideoFile(null)}
-                          disabled={scheduling}
+                          disabled={editorLocked}
                           aria-label="Remove video"
                           className="tap-target grid size-6 place-items-center rounded-full border border-border bg-card text-faint shadow-sm transition-colors hover:border-destructive/40 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
                         >
@@ -952,7 +974,7 @@ function ComposeWorkspace() {
                             <button
                               type="button"
                               onClick={() => removeImage(index)}
-                              disabled={scheduling}
+                              disabled={editorLocked}
                               aria-label={`Remove attachment ${index + 1}`}
                               className="tap-target absolute -right-1.5 -top-1.5 grid size-6 place-items-center rounded-full border border-border bg-card text-faint shadow-sm transition-colors hover:border-destructive/40 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
                             >
@@ -964,7 +986,7 @@ function ComposeWorkspace() {
                           type="button"
                           onClick={() => imageInputRef.current?.click()}
                           disabled={
-                            imagesBusy || scheduling || images.length >= MAX_IMAGES
+                            imagesBusy || editorLocked || images.length >= MAX_IMAGES
                           }
                           aria-label="Add images to the post"
                           title={`Attach up to ${MAX_IMAGES} images`}
@@ -1003,7 +1025,7 @@ function ComposeWorkspace() {
                           label="Attach a video — optional"
                           hint="MP4/MOV · 1 GB max"
                           file={videoFile}
-                          disabled={scheduling}
+                          disabled={editorLocked}
                           onPick={applyVideoFile}
                           onClear={() => applyVideoFile(null)}
                           icon={<Upload className="size-3.5" />}
@@ -1025,7 +1047,7 @@ function ComposeWorkspace() {
                         slots={animSlots}
                         loops={animLoops}
                         values={animValues}
-                        disabled={videoStaging || baking || scheduling}
+                        disabled={videoStaging || baking || editorLocked}
                         onSelect={selectAnimation}
                         onLoopChange={(slot, loop) =>
                           setAnimLoops((current) => ({
@@ -1045,6 +1067,7 @@ function ComposeWorkspace() {
                         selected={pages.selected}
                         onSelect={pages.selectOne}
                         loading={pages.loading}
+                        disabled={editorLocked}
                       />
                     </div>
                     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] tabular-nums text-muted-foreground">
@@ -1247,6 +1270,9 @@ function ComposeWorkspace() {
                               scheduleAttempt.current += 1;
                               scheduleRetry.cancel();
                               setScheduleOpen(false);
+                              // Hand the editor back now; the abandoned bake
+                              // can keep unwinding in the background.
+                              setEditorLocked(false);
                             }}
                             disabled={dispatching}
                           >
@@ -1318,11 +1344,20 @@ function ComposeWorkspace() {
       <AssistantChat
         draft={draft}
         storyId={selected?.id}
-        // A schedule attempt already captured this draft; letting the
-        // assistant rewrite it mid-flight would publish text the user can no
-        // longer see in the request.
+        disabled={scheduling}
+        // A reply can land after the attempt started; read the live lock from
+        // the ref, not the render that sent the request. Before dispatch the
+        // attempt is abandoned so the new text is what gets scheduled; after
+        // dispatch the request already carries the old text, so the reply is
+        // dropped rather than showing a draft that was not published.
         onDraftChange={(text) => {
-          if (!scheduling) setDraft(text);
+          if (dispatchingRef.current) return;
+          if (editorLockedRef.current) {
+            scheduleAttempt.current += 1;
+            scheduleRetry.cancel();
+            setEditorLocked(false);
+          }
+          setDraft(text);
         }}
         contextLabel="story draft"
       />

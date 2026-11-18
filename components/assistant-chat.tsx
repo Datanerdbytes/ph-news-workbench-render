@@ -23,12 +23,15 @@ export function AssistantChat({
   storyId,
   onDraftChange,
   contextLabel,
+  disabled = false,
 }: {
   draft?: string;
   storyId?: number;
   onDraftChange?: (text: string) => void;
   /** Tells the model what it is editing, e.g. "reel caption (2,200 character limit)". */
   contextLabel?: string;
+  /** Blocks new requests while a submit owns the draft it would rewrite. */
+  disabled?: boolean;
 }) {
   // Composer pages (onDraftChange present) always work in draft mode: the
   // reply populates the field — including when it starts empty ("write me a
@@ -86,7 +89,7 @@ export function AssistantChat({
 
   async function send(message: string) {
     const text = message.trim();
-    if (!text || busy) return;
+    if (!text || busy || disabled) return;
 
     setMessages((history) => [...history, { role: 'user', content: text }]);
     setInput('');
@@ -226,7 +229,7 @@ export function AssistantChat({
                         key={suggestion}
                         type="button"
                         onClick={() => send(suggestion)}
-                        disabled={busy}
+                        disabled={busy || disabled}
                         className="rounded-full border border-border bg-background px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-brand/30 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
                       >
                         {suggestion}
@@ -295,13 +298,13 @@ export function AssistantChat({
                       : 'Ask the assistant to write or revise'
                   }
                   className="h-9 bg-background"
-                  disabled={busy}
+                  disabled={busy || disabled}
                 />
                 <Button
                   type="submit"
                   size="sm"
                   className="h-9 px-3"
-                  disabled={!input.trim() || busy}
+                  disabled={!input.trim() || busy || disabled}
                   aria-label={chatMode ? 'Send message' : 'Send revision request'}
                 >
                   {busy ? (
