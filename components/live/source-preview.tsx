@@ -5,9 +5,12 @@ import { Play, RotateCcw, Square } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from 'cn';
 
-/** The 200-shape of POST /api/live/resolve. */
+/** The 200-shape of POST /api/live/resolve. `staged` means the pump can pipe
+ * the source even though nothing here is playable in a browser: playableUrl
+ * is null and Go live hands the original link to yt-dlp. */
 export type ResolvedSource = {
-  playableUrl: string;
+  playableUrl: string | null;
+  mode: 'direct' | 'staged';
   title: string;
   isLive: boolean;
   extractor: string;
@@ -24,10 +27,14 @@ const DIRECT_FILE_PATTERN = /\.(mp4|webm)(?:[?#]|$)/i;
  * Inline preview of a resolved source. The page owns all fetching — this
  * component only plays `playableUrl`: direct files and native HLS (Safari)
  * get `src` set directly, everything else goes through hls.js, which is
- * imported lazily exactly when a browser needs it.
+ * imported lazily exactly when a browser needs it. A `staged` source has no
+ * playable URL at all (the pump pipes it through yt-dlp), so it renders a
+ * calm "preview unavailable" card instead of a player — that is a normal
+ * state, not an error.
  */
 export function SourcePreview({
   playableUrl,
+  mode,
   title,
   isLive,
   extractor,
@@ -38,6 +45,8 @@ export function SourcePreview({
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !playableUrl) return;
+    // Local const so the closure below keeps the narrowed non-null type.
+    const source: string = playableUrl;
     const media: HTMLVideoElement = video;
 
     setPlayerError(null);
@@ -65,7 +74,7 @@ export function SourcePreview({
             'The stream stopped playing. Preview the link again to retry.'
           );
         });
-        instance.loadSource(playableUrl);
+        instance.loadSource(source);
         instance.attachMedia(media);
       } catch {
         if (!cancelled) {
@@ -75,10 +84,10 @@ export function SourcePreview({
     }
 
     if (
-      DIRECT_FILE_PATTERN.test(playableUrl) ||
+      DIRECT_FILE_PATTERN.test(source) ||
       video.canPlayType('application/vnd.apple.mpegurl')
     ) {
-      video.src = playableUrl;
+      video.src = source;
     } else {
       void playManifest();
     }
@@ -92,6 +101,8 @@ export function SourcePreview({
       video.removeAttribute('src');
     };
   }, [playableUrl]);
+
+  const staged = mode === 'staged';
 
   return (
     <figure className="overflow-hidden rounded-lg border border-border bg-background">
@@ -114,22 +125,35 @@ export function SourcePreview({
           </span>
         )}
       </div>
-      {/* muted + playsInline keep an autoplaying live preview allowed in
-          every browser; controls leave the user in charge of playback. */}
-      <video
-        ref={videoRef}
-        muted
-        playsInline
-        controls
-        className="aspect-video w-full bg-black"
-      />
-      {playerError && (
-        <p
-          role="alert"
-          className="border-t border-border/60 px-2.5 py-2 text-[11px] text-destructive"
-        >
-          {playerError}
-        </p>
+      {staged ? (
+        // Same footprint as the player above so the card keeps its shape,
+        // but muted text and no player chrome: nothing is broken here.
+        <div className="flex aspect-video items-center justify-center px-6 text-center">
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            Preview unavailable for this source — Go live streams it through
+            the pump.
+          </p>
+        </div>
+      ) : (
+        <>
+          {/* muted + playsInline keep an autoplaying live preview allowed in
+              every browser; controls leave the user in charge of playback. */}
+          <video
+            ref={videoRef}
+            muted
+            playsInline
+            controls
+            className="aspect-video w-full bg-black"
+          />
+          {playerError && (
+            <p
+              role="alert"
+              className="border-t border-border/60 px-2.5 py-2 text-[11px] text-destructive"
+            >
+              {playerError}
+            </p>
+          )}
+        </>
       )}
     </figure>
   );
