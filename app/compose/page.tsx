@@ -541,14 +541,13 @@ function ComposeWorkspace() {
         scheduledForRef.current,
         'post'
       );
-      if (submit.kind !== 'ok') {
+      if (submit.kind === 'cancelled') {
         // The animated bake re-stages a fresh blob; with the schedule
         // abandoned, no request will consume it — remove it instead of
         // leaving it orphaned in the store.
         if (finalVideoUrl && finalVideoUrl !== videoUrl) {
           deleteStagedBlob(finalVideoUrl);
         }
-        if (submit.kind === 'error') setScheduleError(submit.error);
         return;
       }
       if (submit.picked) setScheduledFor(submit.picked);

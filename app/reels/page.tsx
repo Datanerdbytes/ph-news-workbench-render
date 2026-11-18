@@ -253,10 +253,6 @@ export default function ReelsPage() {
           'reel'
         );
         if (submit.kind === 'cancelled') return;
-        if (submit.kind === 'error') {
-          setScheduleError(submit.error);
-          return;
-        }
         scheduledForIso = submit.iso;
         if (submit.picked) {
           // Mirror into the ref too: the post-staging check below runs before
@@ -283,16 +279,15 @@ export default function ReelsPage() {
       // inside Facebook's 10-minute window by the time the reel is staged.
       // Re-check against the submit-time clock; on a miss, ask for a new time
       // right here so the staged reel is reused instead of baked and uploaded
-      // again. Cancel or an invalid pick means no request will consume the
-      // staged blob, so remove it rather than orphaning it in the store.
+      // again. Cancelling means no request will consume the staged blob, so
+      // remove it rather than orphaning it in the store.
       if (scheduleOn) {
         const submit = await scheduleRetry.resolveSubmit(
           scheduledForRef.current,
           'reel'
         );
-        if (submit.kind !== 'ok') {
+        if (submit.kind === 'cancelled') {
           deleteStagedBlob(staged.url);
-          if (submit.kind === 'error') setScheduleError(submit.error);
           return;
         }
         scheduledForIso = submit.iso;

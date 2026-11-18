@@ -33,22 +33,28 @@ export function uploadLeadMessage(seedAfterMs: number): string {
 /**
  * Earliest pickable time in the picker's local format. A DST fall-back repeats
  * an hour, and the first occurrence can parse earlier than the floor it was
- * rounded up from, so step past the repeated hour when that happens.
+ * rounded up from, so step past the repeated hour when that happens — the
+ * check includes the expected wait, not just the 10-minute floor.
  */
 function minScheduleValue(now: number, extraMs = 0): string {
   for (let bump = 0; bump < 3; bump += 1) {
     const value = scheduleBounds(
       new Date(now + extraMs + bump * 60 * 60 * 1000)
     ).min;
-    if (resolveScheduledFor(value, new Date(now)).iso !== null) return value;
+    const resolved = resolveScheduledFor(value, new Date(now));
+    if (
+      resolved.iso !== null &&
+      new Date(resolved.iso).getTime() - now >= MIN_SCHEDULE_MS + extraMs
+    ) {
+      return value;
+    }
   }
   return scheduleBounds(new Date(now + extraMs)).min;
 }
 
 export type SubmitSchedule =
   | { kind: 'ok'; iso: string; picked?: string }
-  | { kind: 'cancelled' }
-  | { kind: 'error'; error: string };
+  | { kind: 'cancelled' };
 
 export type SubmitScheduleOptions = {
   /**
@@ -124,24 +130,28 @@ export function useScheduleRetry() {
         const direct = resolveScheduledFor(value);
         if (direct.iso !== null) return { kind: 'ok', iso: direct.iso };
       }
-      const picked = await ask(
-        options.message ?? staleScheduleMessage(value, noun),
-        options.seedAfterMs
-      );
-      if (picked === null) return { kind: 'cancelled' };
-      // The dialog disables confirm out of window, but re-resolve so an
-      // invalid time can never fall through as an unscheduled publish.
-      const chosen = resolveScheduledFor(picked);
-      if (chosen.iso === null) return { kind: 'error', error: chosen.error };
-      // An edited time must also clear the expected wait, not just the floor.
-      if (
-        options.seedAfterMs &&
-        new Date(chosen.iso).getTime() - Date.now() <
-          MIN_SCHEDULE_MS + options.seedAfterMs
-      ) {
-        return { kind: 'error', error: uploadLeadMessage(options.seedAfterMs) };
+      let current = value;
+      for (;;) {
+        const picked = await ask(
+          options.message ?? staleScheduleMessage(current, noun),
+          options.seedAfterMs
+        );
+        if (picked === null) return { kind: 'cancelled' };
+        const chosen = resolveScheduledFor(picked);
+        const clearsLead =
+          !options.seedAfterMs ||
+          (chosen.iso !== null &&
+            new Date(chosen.iso).getTime() - Date.now() >=
+              MIN_SCHEDULE_MS + options.seedAfterMs);
+        if (chosen.iso !== null && clearsLead) {
+          return { kind: 'ok', iso: chosen.iso, picked };
+        }
+        if (!mountedRef.current) return { kind: 'cancelled' };
+        // The click can outlive the dialog's last clock tick, so the confirm
+        // is judged again here. Reopen with a fresh seed instead of
+        // discarding the prepared media over a time the dialog let through.
+        current = picked;
       }
-      return { kind: 'ok', iso: chosen.iso, picked };
     },
     [ask]
   );

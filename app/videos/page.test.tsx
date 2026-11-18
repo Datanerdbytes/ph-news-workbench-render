@@ -188,7 +188,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   // The composer validates the schedule against the real clock, so pin it:
   // the mocked default ("2026-11-15T09:00") has to land inside the window.
-  vi.useFakeTimers({ toFake: ["Date"] });
+  // performance is faked too: the slow-upload retry measures the transfer with
+  // the monotonic clock, and advancing the fake timers moves both.
+  vi.useFakeTimers({ toFake: ["Date", "performance"] });
   vi.setSystemTime(new Date("2026-11-14T08:00:00"));
   sentForms = [];
   script = [];
@@ -251,7 +253,7 @@ describe("VideosPage composer", () => {
       {
         status: 400,
         body: { error: SCHEDULE_TOO_SOON_ERROR },
-        onSend: () => vi.setSystemTime(new Date("2026-11-14T08:06:00")),
+        onSend: () => vi.advanceTimersByTime(6 * 60_000),
       },
     ];
 
@@ -299,9 +301,13 @@ describe("VideosPage composer", () => {
   });
 
   it("reopens the prompt when the server rejects a time the browser still accepts", async () => {
-    // No clock movement: the browser sees 08:15 as 15 minutes out, but the
-    // server refused it — the prompt must open anyway.
-    script = [{ status: 400, body: { error: SCHEDULE_TOO_SOON_ERROR } }];
+    // No clock movement: the browser sees 08:15 as 15 minutes out, but a
+    // server clock running ahead refuses it — and it refuses the seeded 08:11
+    // replacement too, so passing cannot just rely on the stub's default.
+    script = [
+      { status: 400, body: { error: SCHEDULE_TOO_SOON_ERROR } },
+      { status: 400, body: { error: SCHEDULE_TOO_SOON_ERROR } },
+    ];
 
     render(<VideosPage />);
     await flush();
@@ -322,8 +328,23 @@ describe("VideosPage composer", () => {
     fireEvent.click(screen.getByRole("button", { name: /Schedule at/ }));
     await waitFor(() => expect(sentForms).toHaveLength(2));
 
+    // The seed is the browser's earliest acceptable slot, not the server's.
     expect(sentForms[1].scheduledFor).toBe(
       new Date("2026-11-14T08:11").toISOString()
     );
+
+    // That replacement is refused too; the prompt is still there to ask again,
+    // and a later time — one that clears the server's minimum — goes through.
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("New publish date and time"), {
+      target: { value: "2026-11-14T08:12" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Schedule at/ }));
+    await waitFor(() => expect(sentForms).toHaveLength(3));
+
+    expect(sentForms[2].scheduledFor).toBe(
+      new Date("2026-11-14T08:12").toISOString()
+    );
+    expect(toast.success).toHaveBeenCalledWith("Video scheduled", expect.anything());
   });
 });

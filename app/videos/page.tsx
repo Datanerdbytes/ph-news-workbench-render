@@ -285,12 +285,9 @@ export default function VideosPage() {
           'video'
         );
         if (submit.kind === 'cancelled') return;
-        if (submit.kind === 'error') {
-          setScheduleError(submit.error);
-          return;
-        }
         scheduledForIso = submit.iso;
         if (submit.picked) {
+          scheduledForRef.current = submit.picked;
           setScheduledFor(submit.picked);
           setScheduleError('');
         }
@@ -357,10 +354,14 @@ export default function VideosPage() {
       // reused, only the transfer repeats.
       let data: VideosPublishResponse | null = null;
       let rejected = 0;
+      // The picker value behind the slot in flight: a later edit must not
+      // relabel the rejection message for a request already sent.
+      let sentLabel = scheduledForRef.current;
       while (!data) {
         if (scheduledForIso) form.set('scheduledFor', scheduledForIso);
         setUploadPct(0);
-        const sentAt = Date.now();
+        const sentIso = scheduledForIso;
+        const startedAt = performance.now();
         const result = await send(form);
         if ('response' in result) {
           data = result.response;
@@ -376,26 +377,26 @@ export default function VideosPage() {
         ) {
           throw error;
         }
+        // The transfer clock is monotonic; wall-clock jumps must not fake a
+        // longer (or shorter) upload than actually happened.
+        const uploadMs = performance.now() - startedAt;
         const submit = await scheduleRetry.resolveSubmit(
           scheduledForRef.current,
           'video',
           {
-            seedAfterMs: Date.now() - sentAt,
+            seedAfterMs: uploadMs,
             // The browser clock may still accept what the server refused.
             forcePrompt: true,
-            message: slowUploadMessage(scheduledForRef.current),
+            message: slowUploadMessage(sentLabel),
           }
         );
         if (submit.kind === 'cancelled') return;
-        if (submit.kind === 'error') {
-          setScheduleError(submit.error);
-          return;
-        }
         // Browser/server clock skew can re-confirm the value just rejected;
         // surface the 400 rather than retrying it forever.
-        if (submit.iso === scheduledForIso) throw error;
+        if (submit.iso === sentIso) throw error;
         scheduledForIso = submit.iso;
         if (submit.picked) {
+          sentLabel = submit.picked;
           scheduledForRef.current = submit.picked;
           setScheduledFor(submit.picked);
           setScheduleError('');
