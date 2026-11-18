@@ -58,31 +58,54 @@ function minScheduleValue(now: number, extraMs = 0): string | null {
   return null;
 }
 
-function nextMinuteValue(epochMs: number): string {
-  return toLocalInput(
-    new Date(Math.floor(epochMs / 60_000) * 60_000 + 60_000)
-  );
-}
-
-function laterValue(a: string | null, b: string | null): string | null {
-  if (!a) return b;
-  if (!b) return a;
-  return a > b ? a : b;
+/** What a local datetime-local value actually parses to. */
+function parsedMs(value: string): number {
+  return new Date(value).getTime();
 }
 
 /**
- * The slot the prompt opens with: the earliest that clears both the measured
- * wait and the slot the server already refused. Local datetime strings sort
- * chronologically, so the later candidate wins by comparison.
+ * First local minute strictly after the refused slot. In a DST fall-back the
+ * second occurrence formats to the first one's wall time, which parses an
+ * hour early, so step until the parse lands after the slot; the repeated hour
+ * is at most 60 minutes wide.
  */
+function nextMinuteValue(afterMs: number): { value: string; ms: number } {
+  const start = Math.floor(afterMs / 60_000) * 60_000 + 60_000;
+  for (let step = 0; step <= 60; step += 1) {
+    const value = toLocalInput(new Date(start + step * 60_000));
+    const ms = parsedMs(value);
+    if (ms > afterMs) return { value, ms };
+  }
+  // An hour past the start is past the repeated hour, so its formatting
+  // parses to itself and always clears the slot.
+  const value = toLocalInput(new Date(start + 60 * 60_000));
+  return { value, ms: parsedMs(value) };
+}
+
+/**
+ * The earliest pickable value that clears both minima: the 10-minute floor
+ * plus the expected wait, and the slot the server already refused. Compared
+ * by parsed epoch, since a fall-back's strings do not sort chronologically.
+ */
+function retryMinimum(
+  now: number,
+  extraMs: number,
+  afterMs: number
+): string | null {
+  const lead = minScheduleValue(now, extraMs);
+  if (!afterMs) return lead;
+  const next = nextMinuteValue(afterMs);
+  if (!lead) return next.value;
+  return parsedMs(lead) > next.ms ? lead : next.value;
+}
+
+/** The slot the prompt opens with — '' only when no slot can clear both. */
 function seedScheduleValue(
   now: number,
   extraMs: number,
   afterMs: number
 ): string {
-  const lead = minScheduleValue(now, extraMs);
-  if (!afterMs) return lead ?? '';
-  return laterValue(lead, nextMinuteValue(afterMs)) ?? '';
+  return retryMinimum(now, extraMs, afterMs) ?? '';
 }
 
 /** The server refused that slot; re-offering it just earns another 400. */
@@ -259,10 +282,7 @@ function ScheduleRetryDialog({
   const inputRef = useRef<HTMLInputElement>(null);
   const bounds = scheduleBounds(now);
   const min =
-    laterValue(
-      minScheduleValue(now.getTime(), minDelayMs),
-      afterMs ? nextMinuteValue(afterMs) : null
-    ) ?? bounds.min;
+    retryMinimum(now.getTime(), minDelayMs, afterMs) ?? bounds.min;
   const resolution = resolveScheduledFor(value, now);
   let error: string | null = null;
   if (resolution.iso === null) {
