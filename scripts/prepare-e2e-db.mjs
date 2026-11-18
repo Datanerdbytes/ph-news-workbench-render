@@ -179,6 +179,10 @@ const requiredColumns = [
   ["news_items", "workspace_id"],
   ["facebook_connections", "workspace_id"],
   ["workspaces", "ai_model"],
+  ["live_streams", "source_url"],
+  ["live_streams", "pump_status"],
+  ["live_streams", "pump_started_at"],
+  ["live_streams", "pump_error"],
 ];
 for (const [table, column] of requiredColumns) {
   const rows = await sql`
