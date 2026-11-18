@@ -52,5 +52,6 @@ if [ "$status" -eq 2 ]; then
 fi
 if [ "$status" -ne 0 ]; then
   echo "CodeRabbit review could not finish (exit $status) — pushing anyway; CI still gates the merge."
+  echo "If the CLI is signed in and this repeats, upgrade it (--gate needs 0.9.1+): brew upgrade coderabbit."
 fi
 exit 0

@@ -179,11 +179,20 @@ class FakeXmlHttpRequest {
     if (step?.status) this.status = step.status;
     if (step?.body !== undefined) this.responseText = JSON.stringify(step.body);
     const sentSlot = form.scheduledFor ? new Date(String(form.scheduledFor)) : null;
-    if (serverMin && sentSlot && sentSlot.getTime() < serverMin.getTime()) {
+    // The real route rejects a form with neither title nor description before
+    // it ever looks at the schedule, so the fake does too.
+    const missingText = !form.title && !form.description;
+    if (missingText) {
+      this.status = 400;
+      this.responseText = JSON.stringify({
+        error: 'Add a title or description for the video.',
+      });
+    }
+    if (!missingText && serverMin && sentSlot && sentSlot.getTime() < serverMin.getTime()) {
       this.status = 400;
       this.responseText = JSON.stringify({ error: SCHEDULE_TOO_SOON_ERROR });
     }
-    if (serverOffsetMs !== null && sentSlot) {
+    if (!missingText && serverOffsetMs !== null && sentSlot) {
       const earliest = new Date(
         Date.now() + serverOffsetMs + 10 * 60_000
       );
@@ -209,6 +218,10 @@ function pickVideo() {
   Object.defineProperty(file, "size", { value: 1024 });
   const input = document.querySelector<HTMLInputElement>("#video-file")!;
   fireEvent.change(input, { target: { files: [file] } });
+  // The route requires some text alongside the clip.
+  fireEvent.change(screen.getByLabelText("Title"), {
+    target: { value: "Clip title" },
+  });
 }
 
 beforeEach(() => {

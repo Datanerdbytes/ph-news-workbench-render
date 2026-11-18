@@ -258,6 +258,9 @@ export default function ReelsPage() {
           'reel'
         );
         if (submit.kind === 'cancelled') return;
+        // A Downloads import can replace the reel while the prompt is open;
+        // its picked time must not land in the new reel's composer.
+        if (generation !== pickGeneration.current) return;
         scheduledForIso = submit.iso;
         if (submit.picked) {
           // Mirror into the ref too: the post-staging check below runs before
@@ -298,6 +301,12 @@ export default function ReelsPage() {
           'reel'
         );
         if (submit.kind === 'cancelled') {
+          deleteStagedBlob(staged.url);
+          return;
+        }
+        // The prompt can outlive a replacement: the staged reel is abandoned,
+        // so release it and never post it under the new caption or slot.
+        if (generation !== pickGeneration.current) {
           deleteStagedBlob(staged.url);
           return;
         }

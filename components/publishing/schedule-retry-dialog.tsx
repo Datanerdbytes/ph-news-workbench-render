@@ -98,6 +98,11 @@ export function retryFloorMessage(minValue: string): string {
   return `Pick ${minValue.replace('T', ' ')} or later — the server's clock runs ahead of this one.`;
 }
 
+/** A spring-forward gap: the local clock never reaches this time. */
+export function missingLocalTimeMessage(value: string): string {
+  return `${value.replace('T', ' ')} does not exist on that date — the clock skips over it. Pick another time.`;
+}
+
 export type SubmitSchedule =
   | { kind: 'ok'; iso: string; picked?: string }
   | { kind: 'cancelled' };
@@ -191,10 +196,6 @@ export function useScheduleRetry() {
       options: SubmitScheduleOptions = {}
     ): Promise<SubmitSchedule> => {
       if (!mountedRef.current) return { kind: 'cancelled' };
-      if (!options.forcePrompt) {
-        const direct = resolveScheduledFor(value);
-        if (direct.iso !== null) return { kind: 'ok', iso: direct.iso };
-      }
       const limits: RetryLimits = {
         extraMs: 0,
         uploadMs: options.seedAfterMs ?? 0,
@@ -206,6 +207,20 @@ export function useScheduleRetry() {
       const requiredLeadMs =
         Math.max(MIN_SCHEDULE_MS, limits.serverLeadMs) + limits.uploadMs;
       limits.extraMs = requiredLeadMs - MIN_SCHEDULE_MS;
+      // The direct path skips the dialog, so it must still honour the caller's
+      // limits — a supplied lead or refused slot can make an otherwise valid
+      // window time fail.
+      if (!options.forcePrompt) {
+        const direct = resolveScheduledFor(value);
+        if (direct.iso !== null) {
+          const directMs = new Date(direct.iso).getTime();
+          const clearsLead = directMs - Date.now() >= requiredLeadMs;
+          const clearsAfter = !limits.afterMs || directMs > limits.afterMs;
+          if (clearsLead && clearsAfter) {
+            return { kind: 'ok', iso: direct.iso };
+          }
+        }
+      }
       let current = value;
       for (;;) {
         const picked = await ask(
@@ -295,9 +310,15 @@ function ScheduleRetryDialog({
   const resolution = resolveScheduledFor(value, now);
   const chosenMs =
     resolution.iso === null ? null : new Date(resolution.iso).getTime();
+  // A spring-forward day parses a skipped local time as the minute after the
+  // gap; submitting that instant would publish an hour off the shown time.
+  const roundTrips =
+    chosenMs !== null && toLocalInput(new Date(chosenMs)) === value;
   let error: string | null = null;
   if (resolution.iso === null) {
     error = resolution.error;
+  } else if (!roundTrips) {
+    error = missingLocalTimeMessage(value);
   } else if (afterMs && chosenMs !== null && chosenMs <= afterMs) {
     error = retryAfterMessage(afterLabel);
   } else if (

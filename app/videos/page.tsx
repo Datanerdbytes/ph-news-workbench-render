@@ -298,6 +298,9 @@ export default function VideosPage() {
           'video'
         );
         if (submit.kind === 'cancelled') return;
+        // The dialog can sit open while the clip is replaced; the picked time
+        // belongs to the abandoned attempt, so don't write it into the new one.
+        if (generation !== fileGeneration.current) return;
         scheduledForIso = submit.iso;
         if (submit.picked) {
           scheduledForRef.current = submit.picked;
@@ -406,6 +409,9 @@ export default function VideosPage() {
         const serverLeadMs = Number.isNaN(serverEarliest)
           ? 0
           : Math.max(0, serverEarliest - Date.now());
+        // A replacement during the transfer makes this rejection stale: the
+        // prompt and any picked time belong to the abandoned clip.
+        if (generation !== fileGeneration.current) return;
         const submit = await scheduleRetry.resolveSubmit(
           scheduledForRef.current,
           'video',
@@ -421,6 +427,7 @@ export default function VideosPage() {
           }
         );
         if (submit.kind === 'cancelled') return;
+        if (generation !== fileGeneration.current) return;
         scheduledForIso = submit.iso;
         if (submit.picked) {
           sentLabel = submit.picked;
