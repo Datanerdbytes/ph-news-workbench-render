@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Modal } from '@/components/ui/modal';
 import { resolveScheduledFor } from '@/lib/publishing/schedule';
@@ -20,6 +20,15 @@ export type SubmitSchedule =
   | { kind: 'cancelled' }
   | { kind: 'error'; error: string };
 
+export type SubmitScheduleOptions = {
+  /**
+   * How far ahead of "now" the next known wait sits before the prompt opens —
+   * e.g. the upload time of the attempt the server just rejected. The seed
+   * must survive that wait, not just the 10-minute floor.
+   */
+  seedAfterMs?: number;
+};
+
 /**
  * Promise plumbing for the retry dialog. Call `resolveSubmit` once the bake and
  * staging are done: it returns the ISO time to submit, opens the dialog when
@@ -33,13 +42,19 @@ export function useScheduleRetry() {
   } | null>(null);
   const resolveRef = useRef<((value: string | null) => void) | null>(null);
 
-  const ask = useCallback((message: string): Promise<string | null> => {
-    return new Promise((resolve) => {
-      resolveRef.current = resolve;
-      // Seeded with the earliest valid slot so one click is enough.
-      setPrompt({ message, value: scheduleBounds(new Date()).min });
-    });
-  }, []);
+  const ask = useCallback(
+    (message: string, seedAfterMs = 0): Promise<string | null> => {
+      return new Promise((resolve) => {
+        resolveRef.current = resolve;
+        // Seeded with the earliest valid slot so one click is enough.
+        setPrompt({
+          message,
+          value: scheduleBounds(new Date(Date.now() + seedAfterMs)).min,
+        });
+      });
+    },
+    []
+  );
 
   const settle = useCallback((value: string | null) => {
     const resolve = resolveRef.current;
@@ -48,11 +63,29 @@ export function useScheduleRetry() {
     resolve?.(value);
   }, []);
 
+  // Navigating away with the prompt open must still settle the awaiting
+  // submit: the cancellation branch is what releases the staged media.
+  useEffect(
+    () => () => {
+      const resolve = resolveRef.current;
+      resolveRef.current = null;
+      resolve?.(null);
+    },
+    []
+  );
+
   const resolveSubmit = useCallback(
-    async (value: string, noun: string): Promise<SubmitSchedule> => {
+    async (
+      value: string,
+      noun: string,
+      options: SubmitScheduleOptions = {}
+    ): Promise<SubmitSchedule> => {
       const direct = resolveScheduledFor(value);
       if (direct.iso !== null) return { kind: 'ok', iso: direct.iso };
-      const picked = await ask(staleScheduleMessage(value, noun));
+      const picked = await ask(
+        staleScheduleMessage(value, noun),
+        options.seedAfterMs
+      );
       if (picked === null) return { kind: 'cancelled' };
       // The dialog disables confirm out of window, but re-resolve so an
       // invalid time can never fall through as an unscheduled publish.

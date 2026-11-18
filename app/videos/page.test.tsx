@@ -124,12 +124,23 @@ vi.mock("@/components/publishing/publish-page", () => {
 });
 
 import { bakeAndFinalizeVideo } from "@/lib/videos/bake";
+import { SCHEDULE_TOO_SOON_ERROR } from "@/lib/publishing/schedule";
+import { toast } from "sonner";
 import VideosPage from "./page";
 
 const bakeMock = bakeAndFinalizeVideo as unknown as Mock;
 
 type SentForm = Record<string, unknown>;
 let sentForms: SentForm[] = [];
+
+// Per-request script: lets a test make one upload slow and/or rejected, the
+// way a slow transfer crosses the server's post-upload schedule check.
+type ScriptedResponse = {
+  status?: number;
+  body?: unknown;
+  onSend?: () => void;
+};
+let script: ScriptedResponse[] = [];
 
 // The composer posts the file through XMLHttpRequest (for real upload
 // progress); this stub records the form and answers with a published row.
@@ -153,6 +164,10 @@ class FakeXmlHttpRequest {
     sentForms.push(
       Object.fromEntries(body as unknown as Iterable<[string, FormDataEntryValue]>)
     );
+    const step = script.shift();
+    step?.onSend?.();
+    if (step?.status) this.status = step.status;
+    if (step?.body !== undefined) this.responseText = JSON.stringify(step.body);
     this.upload.onprogress?.({ lengthComputable: true, loaded: 1, total: 1 });
     queueMicrotask(() => this.onload?.());
   }
@@ -176,6 +191,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-11-14T08:00:00"));
   sentForms = [];
+  script = [];
   vi.stubGlobal("XMLHttpRequest", FakeXmlHttpRequest);
 });
 
@@ -190,9 +206,10 @@ describe("VideosPage composer", () => {
   it("asks for a new time when the slot elapses during the bake, reusing the baked file", async () => {
     // The bake runs for the clip's length: this one finishes at 08:10,
     // leaving the chosen 08:15 slot five minutes out.
+    const baked = new File(["baked"], "baked.mp4", { type: "video/mp4" });
     bakeMock.mockImplementation(async () => {
       vi.setSystemTime(new Date("2026-11-14T08:10:00"));
-      return new File(["baked"], "baked.mp4", { type: "video/mp4" });
+      return baked;
     });
 
     render(<VideosPage />);
@@ -220,7 +237,50 @@ describe("VideosPage composer", () => {
     expect(sentForms[0].scheduledFor).toBe(
       new Date("2026-11-14T08:21").toISOString()
     );
+    // The baked file is what gets uploaded, not the original clip. FormData
+    // clones the File, so compare the name it was appended with.
+    expect((sentForms[0].video as File).name).toBe("baked.mp4");
     // The baked file is reused — the bake never runs twice.
     expect(bakeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reopens the prompt when the server rejects the time after a slow upload", async () => {
+    // The transfer itself takes 6 minutes; the server checks the schedule
+    // only once the body has arrived, so the 08:15 slot is 9 minutes out.
+    script = [
+      {
+        status: 400,
+        body: { error: SCHEDULE_TOO_SOON_ERROR },
+        onSend: () => vi.setSystemTime(new Date("2026-11-14T08:06:00")),
+      },
+    ];
+
+    render(<VideosPage />);
+    await flush();
+
+    pickVideo();
+    await flush();
+
+    fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+    fireEvent.change(screen.getByLabelText("Publish date and time"), {
+      target: { value: "2026-11-14T08:15" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
+
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    // The seed clears the measured 6-minute upload plus the 10-minute floor.
+    expect(
+      screen.getByRole("button", { name: /Schedule at 2026-11-14 08:23/ })
+    ).toBeInTheDocument();
+    expect(sentForms).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /Schedule at/ }));
+    await waitFor(() => expect(sentForms).toHaveLength(2));
+
+    expect(sentForms[1].scheduledFor).toBe(
+      new Date("2026-11-14T08:23").toISOString()
+    );
+    expect(toast.success).toHaveBeenCalledWith("Video scheduled", expect.anything());
   });
 });

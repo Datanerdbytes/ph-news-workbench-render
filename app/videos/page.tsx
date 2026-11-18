@@ -20,7 +20,10 @@ import {
   useManagedPages,
   type PublishResult,
 } from '@/components/publishing/publish-page';
-import { resolveScheduledFor } from '@/lib/publishing/schedule';
+import {
+  SCHEDULE_TOO_SOON_ERROR,
+  resolveScheduledFor,
+} from '@/lib/publishing/schedule';
 import { useScheduleRetry } from '@/components/publishing/schedule-retry-dialog';
 import {
   MediaPreviewCard,
@@ -296,14 +299,16 @@ export default function VideosPage() {
       form.append('description', description);
       if (thumbnail) form.append('thumbnail', thumbnail);
       if (targeting.trim()) form.append('feedTargeting', targeting.trim());
-      if (scheduledForIso) form.append('scheduledFor', scheduledForIso);
       form.append('pageIds', JSON.stringify(pages.selected));
 
       // Real progress for the browser→workbench leg (GB-scale transfers sit
       // on this path for minutes); the chunked server→Facebook leg that
       // follows is the "Publishing…" phase.
-      const data = await new Promise<VideosPublishResponse>(
-        (resolve, reject) => {
+      const send = (body: FormData) =>
+        new Promise<
+          | { response: VideosPublishResponse }
+          | { failure: { status: number; error: Error } }
+        >((resolve) => {
           const xhr = new XMLHttpRequest();
           xhr.open('POST', '/api/videos');
           xhr.upload.onprogress = (event) => {
@@ -312,25 +317,82 @@ export default function VideosPage() {
             }
           };
           xhr.onload = () => {
-            let body: VideosPublishResponse | null = null;
+            let response: VideosPublishResponse | null = null;
             try {
-              body = JSON.parse(xhr.responseText) as VideosPublishResponse;
+              response = JSON.parse(xhr.responseText) as VideosPublishResponse;
             } catch {
-              body = null;
+              response = null;
             }
             if (xhr.status >= 200 && xhr.status < 300) {
-              resolve(body ?? {});
+              resolve({ response: response ?? {} });
             } else {
-              reject(
-                new Error(body?.error ?? 'The video could not be published.')
-              );
+              resolve({
+                failure: {
+                  status: xhr.status,
+                  error: new Error(
+                    response?.error ?? 'The video could not be published.'
+                  ),
+                },
+              });
             }
           };
           xhr.onerror = () =>
-            reject(new Error('The video could not be published.'));
-          xhr.send(form);
+            resolve({
+              failure: {
+                status: 0,
+                error: new Error('The video could not be published.'),
+              },
+            });
+          xhr.send(body);
+        });
+
+      // Unlike Reels/Compose this request carries the media itself, and the
+      // server validates the slot only after the body arrives. A transfer
+      // slower than the prompt's headroom would 400 the fresh time, so a
+      // schedule rejection reopens the prompt with the measured upload time
+      // added to the seed and resends — the bake and file in memory are
+      // reused, only the transfer repeats.
+      let data: VideosPublishResponse | null = null;
+      let rejected = 0;
+      while (!data) {
+        if (scheduledForIso) form.set('scheduledFor', scheduledForIso);
+        setUploadPct(0);
+        const sentAt = Date.now();
+        const result = await send(form);
+        if ('response' in result) {
+          data = result.response;
+          break;
         }
-      );
+        const { status, error } = result.failure;
+        rejected += 1;
+        if (
+          !scheduleOn ||
+          status !== 400 ||
+          error.message !== SCHEDULE_TOO_SOON_ERROR ||
+          rejected > 2
+        ) {
+          throw error;
+        }
+        const submit = await scheduleRetry.resolveSubmit(
+          scheduledForRef.current,
+          'video',
+          { seedAfterMs: Date.now() - sentAt }
+        );
+        if (submit.kind === 'cancelled') return;
+        if (submit.kind === 'error') {
+          setScheduleError(submit.error);
+          return;
+        }
+        // Browser/server clock skew can re-confirm the value just rejected;
+        // surface the 400 rather than retrying it forever.
+        if (submit.iso === scheduledForIso) throw error;
+        scheduledForIso = submit.iso;
+        if (submit.picked) {
+          scheduledForRef.current = submit.picked;
+          setScheduledFor(submit.picked);
+          setScheduleError('');
+        }
+      }
       setResults(data.results ?? []);
       toast.success(scheduleOn ? 'Video scheduled' : 'Video published', {
         description: data.warning,

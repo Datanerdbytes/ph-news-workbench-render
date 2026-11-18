@@ -375,4 +375,36 @@ describe("ReelsPage composer", () => {
       "https://bucket.public.blob.vercel-storage.com/reels/clip.mp4"
     );
   });
+
+  it("releases the staged reel when the composer unmounts with the prompt open", async () => {
+    const { unmount } = render(<ReelsPage />);
+    await flush();
+
+    stageVideo();
+    await flush();
+
+    fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+    fireEvent.change(screen.getByLabelText("Publish date and time"), {
+      target: { value: "2026-11-14T08:15" },
+    });
+    stageUploadMock.mockImplementation(async () => {
+      vi.setSystemTime(new Date("2026-11-14T08:10:00"));
+      return {
+        url: "https://bucket.public.blob.vercel-storage.com/reels/clip.mp4",
+      };
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Schedule reel/ }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+
+    // Navigating away settles the pending prompt as a cancellation, which is
+    // what releases the staged upload.
+    unmount();
+    await flush();
+
+    expect(deleteStagedBlobMock).toHaveBeenCalledWith(
+      "https://bucket.public.blob.vercel-storage.com/reels/clip.mp4"
+    );
+    expect(reelPost()).toBeUndefined();
+  });
 });
