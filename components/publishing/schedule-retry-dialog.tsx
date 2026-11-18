@@ -53,19 +53,20 @@ function retryMinimum(
   now: number,
   extraMs: number,
   afterMs: number,
-  serverMin = 0
+  serverMin = 0,
+  paddingMs = 0
 ): string | null {
   const minimum = Math.max(now + MIN_SCHEDULE_MS + extraMs, serverMin);
   const start = Math.max(
-    Math.ceil((now + MIN_SCHEDULE_MS + extraMs + 60_000) / 60_000) * 60_000,
-    Math.floor(Math.max(afterMs, serverMin) / 60_000) * 60_000 + 60_000
+    Math.ceil((minimum + paddingMs) / 60_000) * 60_000,
+    Math.floor(afterMs / 60_000) * 60_000 + 60_000
   );
   for (let step = 0; step <= 180; step += 1) {
     const value = toLocalInput(new Date(start + step * 60_000));
     const resolved = resolveScheduledFor(value, new Date(now));
     if (resolved.iso === null) continue;
     const ms = new Date(resolved.iso).getTime();
-    if (ms >= minimum && ms > afterMs) return value;
+    if (ms >= minimum + paddingMs && ms > afterMs) return value;
   }
   return null;
 }
@@ -77,7 +78,7 @@ function seedScheduleValue(
   afterMs: number,
   serverFloor?: ServerFloor
 ): string {
-  return retryMinimum(now, extraMs, afterMs, serverMinimum(serverFloor)) ?? '';
+  return retryMinimum(now, extraMs, afterMs, serverMinimum(serverFloor), 60_000) ?? '';
 }
 
 /** The server refused that slot; re-offering it just earns another 400. */
@@ -104,6 +105,8 @@ export type SubmitScheduleOptions = {
   afterMs?: number;
   /** Server minimum plus upload duration, measured when the refusal arrives. */
   serverFloor?: ServerFloor;
+  /** Refresh the server floor at confirmation, including after device sleep. */
+  refreshServerFloor?: () => Promise<ServerFloor>;
   /** The refused slot in picker format, for the "pick a later time" copy. */
   afterLabel?: string;
   /** Ask even when the browser clock accepts it — the server rejected it. */
@@ -187,15 +190,28 @@ export function useScheduleRetry() {
       }
       let current = value;
       const afterMs = options.afterMs ?? 0;
+      let serverFloor = options.serverFloor;
+      let message = options.message ?? staleScheduleMessage(current, noun);
       for (;;) {
         const picked = await ask(
-          options.message ?? staleScheduleMessage(current, noun),
+          message,
           options.seedAfterMs,
           afterMs,
           options.afterLabel ?? '',
-          options.serverFloor
+          serverFloor
         );
         if (picked === null) return { kind: 'cancelled' };
+        if (options.refreshServerFloor) {
+          try {
+            serverFloor = await options.refreshServerFloor();
+          } catch {
+            if (!mountedRef.current) return { kind: 'cancelled' };
+            message = 'Could not check the server time. Please try again.';
+            continue;
+          }
+          if (!mountedRef.current) return { kind: 'cancelled' };
+          message = options.message ?? staleScheduleMessage(current, noun);
+        }
         const chosen = resolveScheduledFor(picked);
         const chosenMs =
           chosen.iso === null ? null : new Date(chosen.iso).getTime();
@@ -205,7 +221,7 @@ export function useScheduleRetry() {
             chosenMs - Date.now() >= MIN_SCHEDULE_MS + options.seedAfterMs);
         const clearsAfter = !afterMs || (chosenMs !== null && chosenMs > afterMs);
         if (chosen.iso !== null && clearsLead && clearsAfter &&
-          chosenMs !== null && chosenMs >= serverMinimum(options.serverFloor)) {
+          chosenMs !== null && chosenMs >= serverMinimum(serverFloor)) {
           return { kind: 'ok', iso: chosen.iso, picked };
         }
         if (!mountedRef.current) return { kind: 'cancelled' };

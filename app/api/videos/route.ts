@@ -31,6 +31,17 @@ const MAX_THUMBNAIL_BYTES = 20 * 1024 * 1024;
 const VIDEO_TYPES = new Set(['video/mp4', 'video/quicktime']);
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
+// Refresh the scheduling floor before retrying a large transfer. The server is
+// authoritative even when a device sleeps or its wall clock changes.
+export async function GET(request: Request) {
+  const result = await requirePublishingConnection(request, 'publish videos');
+  if (result.response) return result.response;
+  return NextResponse.json(
+    { earliest: new Date(Date.now() + MIN_SCHEDULE_MS).toISOString() },
+    { headers: { 'Cache-Control': 'no-store' } }
+  );
+}
+
 export async function POST(request: Request) {
   const result = await requirePublishingConnection(request, 'publish videos');
   if (result.response) return result.response;

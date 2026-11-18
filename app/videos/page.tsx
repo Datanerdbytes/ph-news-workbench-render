@@ -402,6 +402,21 @@ export default function VideosPage() {
           {
             seedAfterMs: uploadMs,
             serverFloor,
+            refreshServerFloor: serverFloor ? async () => {
+              const started = performance.now();
+              const response = await fetch('/api/videos', { cache: 'no-store' });
+              if (!response.ok) throw new Error('Could not check server time');
+              const data = await response.json() as { earliest?: unknown };
+              const fresh = typeof data.earliest === 'string'
+                ? new Date(data.earliest).getTime()
+                : Number.NaN;
+              if (!Number.isFinite(fresh)) throw new Error('Invalid server time');
+              const receivedAt = performance.now();
+              return {
+                minimumMs: fresh + uploadMs + Math.max(0, receivedAt - started),
+                receivedAt,
+              };
+            } : undefined,
             // The refused slot is the floor the next pick must clear.
             afterMs: afterMs || undefined,
             afterLabel: sentLabel,

@@ -121,6 +121,9 @@ jobs:
       - name: Unit and integration tests
         run: npx vitest run
 
+      - name: Schedule retry across two-hour DST fallback
+        run: TZ=Antarctica/Troll npx vitest run app/videos/page.test.tsx
+
   docker:
     name: Docker build & scan
     needs: [static, test]

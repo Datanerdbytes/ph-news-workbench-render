@@ -156,6 +156,8 @@ let script: ScriptedResponse[] = [];
 // A simulated server clock: every request is judged against one floor, so a
 // slot the browser still accepts can be refused however often it is offered.
 let serverMin: Date | null = null;
+let serverEarliest: number | null = null;
+let earliestRecordedAt = 0;
 
 // The composer posts the file through XMLHttpRequest (for real upload
 // progress); this stub records the form and answers with a published row.
@@ -184,6 +186,11 @@ class FakeXmlHttpRequest {
     step?.onSend?.();
     if (step?.status) this.status = step.status;
     if (step?.body !== undefined) this.responseText = JSON.stringify(step.body);
+    const earliest = (step?.body as { earliest?: string } | undefined)?.earliest;
+    if (earliest) {
+      serverEarliest = new Date(earliest).getTime();
+      earliestRecordedAt = performance.now();
+    }
     const sentSlot = form.scheduledFor ? new Date(String(form.scheduledFor)) : null;
     if (serverMin && sentSlot && sentSlot.getTime() < serverMin.getTime()) {
       this.status = 400;
@@ -216,6 +223,13 @@ beforeEach(() => {
   sentForms = [];
   script = [];
   serverMin = null;
+  serverEarliest = null;
+  vi.stubGlobal("fetch", vi.fn(async () => ({
+    ok: true,
+    json: async () => ({ earliest: new Date(
+      (serverEarliest ?? Date.now()) + performance.now() - earliestRecordedAt
+    ).toISOString() }),
+  })));
   vi.stubGlobal("XMLHttpRequest", FakeXmlHttpRequest);
 });
 
@@ -416,7 +430,7 @@ describe("VideosPage composer", () => {
     fireEvent.change(screen.getByLabelText("New publish date and time"), {
       target: { value: "2026-11-14T08:27" },
     });
-    expect(screen.getByRole("alert")).toHaveTextContent("Pick 2026-11-14 08:30 or later");
+    expect(screen.getByRole("alert")).toHaveTextContent("Pick 2026-11-14 08:29 or later");
     expect(screen.getByRole("button", { name: /Schedule at/ })).toBeDisabled();
     fireEvent.change(screen.getByLabelText("New publish date and time"), {
       target: { value: "2026-11-14T08:30" },
@@ -424,7 +438,7 @@ describe("VideosPage composer", () => {
     await act(async () => { vi.advanceTimersByTime(waitMinutes * 60_000); clock.tick(); });
     if (waitMinutes) {
       expect(screen.getByRole("button", { name: /Schedule at/ })).toBeDisabled();
-      expect(screen.getByRole("alert")).toHaveTextContent("Pick 2026-11-14 08:35 or later");
+      expect(screen.getByRole("alert")).toHaveTextContent("Pick 2026-11-14 08:34 or later");
       fireEvent.change(screen.getByLabelText("New publish date and time"), {
         target: { value: "2026-11-14T08:35" },
       });
@@ -470,7 +484,116 @@ describe("VideosPage composer", () => {
     expect(new Date(input.value).getTime()).toBeGreaterThanOrEqual(
       new Date("2026-10-25T01:00:00Z").getTime()
     );
-    expect(input.min).toBe(input.value);
+    expect(new Date(input.min).getTime()).toBeGreaterThanOrEqual(
+      new Date("2026-10-25T01:00:00Z").getTime()
+    );
+    if (process.env.TZ === "Antarctica/Troll") {
+      expect(input.value).toBe("2026-10-25T03:00");
+    }
+  });
+
+  it("rechecks the server after sleep before uploading again", async () => {
+    script = [{ status: 400, body: {
+      error: SCHEDULE_TOO_SOON_ERROR,
+      earliest: new Date("2026-11-14T08:25").toISOString(),
+    }, onSend: () => vi.advanceTimersByTime(4 * 60_000) }];
+    render(<VideosPage />);
+    await flush();
+    pickVideo();
+    await flush();
+    fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+    fireEvent.change(screen.getByLabelText("Publish date and time"), { target: { value: "2026-11-14T08:15" } });
+    fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    // The monotonic clock is frozen and the device clock moves backwards.
+    vi.setSystemTime(new Date("2026-11-14T07:59"));
+    serverEarliest = new Date("2026-11-14T08:30").getTime();
+    fireEvent.click(screen.getByRole("button", { name: /Schedule at/ }));
+    expect(await screen.findByRole("button", { name: /Schedule at 2026-11-14 08:35/ })).toBeEnabled();
+    expect(sentForms).toHaveLength(1);
+  });
+
+  it("offers a buffered server-bound seed near a minute boundary", async () => {
+    script = [{ status: 400, body: {
+      error: SCHEDULE_TOO_SOON_ERROR,
+      earliest: new Date("2026-11-14T08:29:59.900").toISOString(),
+    } }];
+    render(<VideosPage />);
+    await flush();
+    pickVideo();
+    await flush();
+    fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+    fireEvent.change(screen.getByLabelText("Publish date and time"), { target: { value: "2026-11-14T08:15" } });
+    fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
+    expect(await screen.findByRole("button", { name: /Schedule at 2026-11-14 08:31/ })).toBeEnabled();
+    fireEvent.change(screen.getByLabelText("New publish date and time"), { target: { value: "2026-11-14T08:30" } });
+    expect(screen.getByRole("button", { name: /Schedule at/ })).toBeEnabled();
+    fireEvent.change(screen.getByLabelText("New publish date and time"), { target: { value: "2026-11-14T08:31" } });
+    await act(async () => { vi.advanceTimersByTime(200); clock.tick(); });
+    expect(screen.getByRole("button", { name: /Schedule at/ })).toBeEnabled();
+  });
+
+  it("retains the retry dialog when the server time cannot be checked", async () => {
+    script = [{ status: 400, body: {
+      error: SCHEDULE_TOO_SOON_ERROR,
+      earliest: new Date("2026-11-14T08:25").toISOString(),
+    } }];
+    render(<VideosPage />);
+    await flush();
+    pickVideo();
+    await flush();
+    fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+    fireEvent.change(screen.getByLabelText("Publish date and time"), { target: { value: "2026-11-14T08:15" } });
+    fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    vi.mocked(fetch).mockRejectedValueOnce(new Error("offline"));
+    fireEvent.click(screen.getByRole("button", { name: /Schedule at/ }));
+    expect(await screen.findByText("Could not check the server time. Please try again.")).toBeInTheDocument();
+    expect(sentForms).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: /Schedule at/ }));
+    await waitFor(() => expect(sentForms).toHaveLength(2));
+  });
+
+  it.skipIf(process.env.TZ !== "Antarctica/Troll")("keeps a valid pre-fallback minute inside the picker range", async () => {
+    vi.setSystemTime(new Date("2026-10-25T00:28:10Z"));
+    script = [{ status: 400, body: {
+      error: SCHEDULE_TOO_SOON_ERROR,
+      earliest: "2026-10-25T00:48:40Z",
+    }, onSend: () => vi.advanceTimersByTime(10 * 60_000) }];
+    render(<VideosPage />);
+    await flush();
+    pickVideo();
+    await flush();
+    fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+    fireEvent.change(screen.getByLabelText("Publish date and time"), { target: { value: "2026-10-25T02:50" } });
+    fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    const input = screen.getByLabelText("New publish date and time") as HTMLInputElement;
+    expect(input.value).toBe("2026-10-25T03:00");
+    expect(input.min).toBe("2026-10-25T02:59");
+    fireEvent.change(input, { target: { value: "2026-10-25T02:59" } });
+    expect(input.validity.rangeUnderflow).toBe(false);
+    expect(screen.getByRole("button", { name: /Schedule at/ })).toBeEnabled();
+  });
+
+  it("rechecks a stale confirmation before starting a second upload", async () => {
+    script = [{ status: 400, body: {
+      error: SCHEDULE_TOO_SOON_ERROR,
+      earliest: new Date("2026-11-14T08:25").toISOString(),
+    }, onSend: () => vi.advanceTimersByTime(4 * 60_000) }];
+    render(<VideosPage />);
+    await flush();
+    pickVideo();
+    await flush();
+    fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+    fireEvent.change(screen.getByLabelText("Publish date and time"), { target: { value: "2026-11-14T08:15" } });
+    fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
+    expect(await screen.findByRole("button", { name: /Schedule at 2026-11-14 08:30/ })).toBeEnabled();
+    // Advance both clocks without refreshing the rendered dialog.
+    await act(async () => { vi.advanceTimersByTime(5 * 60_000); });
+    fireEvent.click(screen.getByRole("button", { name: /Schedule at/ }));
+    expect(await screen.findByRole("button", { name: /Schedule at 2026-11-14 08:35/ })).toBeEnabled();
+    expect(sentForms).toHaveLength(1);
   });
 
 });

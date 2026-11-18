@@ -23,7 +23,7 @@ import { crosspostResponse, publishToSelectedPages } from "@/lib/publishing/cros
 import { requirePublishingConnection } from "@/lib/publishing/connection";
 import { publishPageVideo } from "@/lib/publishing/videos";
 import { readMp4DurationSecondsFromFile } from "@/lib/reel-meta";
-import { POST } from "./route";
+import { GET, POST } from "./route";
 
 const requireMock = requirePublishingConnection as unknown as Mock;
 const publishMock = publishToSelectedPages as unknown as Mock;
@@ -107,6 +107,20 @@ beforeEach(() => {
   responseMock.mockReturnValue(
     new Response(JSON.stringify({ ok: true }), { status: 201 })
   );
+});
+
+describe("GET /api/videos", () => {
+  it("requires a publishing connection and returns an uncached server floor", async () => {
+    const request = new Request("http://localhost/api/videos");
+    const before = Date.now();
+    const res = await GET(request);
+    expect(requireMock).toHaveBeenCalledWith(request, "publish videos");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    const { earliest } = await res.json();
+    expect(new Date(earliest).getTime()).toBeGreaterThanOrEqual(before + 600_000);
+    requireMock.mockResolvedValueOnce({ response: new Response(null, { status: 401 }) });
+    expect((await GET(request)).status).toBe(401);
+  });
 });
 
 describe("POST /api/videos", () => {
