@@ -39,8 +39,20 @@ ENV NODE_ENV=production \
 # revision, which breaks the build rather than hardening it.
 # hadolint ignore=DL3008
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
+# yt-dlp resolves public video links behind the Live Page's Source URL field
+# (lib/live/resolve.ts runs `yt-dlp -J --no-playlist <url>`). The official
+# static Linux binary is pinned to one release so the artifact is reproducible
+# and Trivy scans of the image stay clean — bump the pin deliberately, and
+# check the release notes for CVE fixes when you do. x86-64 only: the deploy
+# target (Render) is amd64.
+ARG YTDLP_VERSION=2026.10.26
+RUN curl -fsSL \
+      "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_linux" \
+      -o /usr/local/bin/yt-dlp \
+    && chmod 0755 /usr/local/bin/yt-dlp \
+    && yt-dlp --version
 # Hugging Face Spaces require the container to run as uid 1000; the base
 # image's `node` user is exactly that, so reuse it. The numeric form is what
 # the runtime resolves to anyway, and hadolint cannot look a name up.
