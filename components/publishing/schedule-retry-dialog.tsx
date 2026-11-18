@@ -149,13 +149,14 @@ type RetryLimits = {
  * the next upload has to clear.
  */
 function serverLeadNow(
-  limits: Pick<RetryLimits, 'serverEarliestMs' | 'serverEarliestMonoMs'>
+  limits: Pick<RetryLimits, 'serverEarliestMs' | 'serverEarliestMonoMs'>,
+  nowMs = Date.now()
 ): number {
   if (!limits.serverEarliestMs) return 0;
   const earliest =
     limits.serverEarliestMs +
     (performance.now() - limits.serverEarliestMonoMs);
-  return Math.max(0, earliest - Date.now());
+  return Math.max(0, earliest - nowMs);
 }
 
 /**
@@ -258,12 +259,18 @@ export function useScheduleRetry() {
           chosen.iso === null ? null : new Date(chosen.iso).getTime();
         // Judged against the clock at confirm time: a user who waits in the
         // dialog has to pick later, because the next upload lands later too.
+        const confirmNow = Date.now();
         const leadNow =
-          Math.max(MIN_SCHEDULE_MS, serverLeadNow(limits)) + limits.uploadMs;
-        const clearsLead = chosenMs !== null && chosenMs - Date.now() >= leadNow;
+          Math.max(MIN_SCHEDULE_MS, serverLeadNow(limits, confirmNow)) +
+          limits.uploadMs;
+        const clearsLead = chosenMs !== null && chosenMs - confirmNow >= leadNow;
         const clearsAfter =
           !limits.afterMs || (chosenMs !== null && chosenMs > limits.afterMs);
-        if (chosen.iso !== null && clearsLead && clearsAfter) {
+        // The zone can change between the pick and this check: a value that no
+        // longer round-trips would publish at a different local time.
+        const roundTrips =
+          chosenMs !== null && toLocalInput(new Date(chosenMs)) === picked;
+        if (chosen.iso !== null && roundTrips && clearsLead && clearsAfter) {
           return { kind: 'ok', iso: chosen.iso, picked };
         }
         if (!mountedRef.current) return { kind: 'cancelled' };
@@ -273,7 +280,7 @@ export function useScheduleRetry() {
         // Refresh the frozen floor too: a backward clock correction while the
         // dialog sat open must not keep seeding the same too-early slot.
         limits.extraMs =
-          Math.max(MIN_SCHEDULE_MS, serverLeadNow(limits)) +
+          Math.max(MIN_SCHEDULE_MS, serverLeadNow(limits, confirmNow)) +
           limits.uploadMs -
           MIN_SCHEDULE_MS;
         current = picked;
@@ -328,7 +335,14 @@ function ScheduleRetryDialog({
   // The window keeps closing while the prompt is open, so the value is judged
   // against the current clock — same as the composer's ScheduleField.
   const now = useScheduleClock();
-  const serverLeadMs = serverLeadNow({ serverEarliestMs, serverEarliestMonoMs });
+  // One clock sample feeds both the picker bounds and the server lead, so a
+  // clock correction between the two cannot advertise a time confirmation
+  // refuses.
+  const nowMs = now.getTime();
+  const serverLeadMs = serverLeadNow(
+    { serverEarliestMs, serverEarliestMonoMs },
+    nowMs
+  );
   // The picker floor and the confirmation must share one live lead. Freezing
   // it at ask() time lets a backward clock correction make the dialog accept a
   // slot that confirmation rejects — then re-seed the same too-early slot.
@@ -338,8 +352,8 @@ function ScheduleRetryDialog({
   const bounds = scheduleBounds(now);
   // The picker's min is the true earliest — confirmation judges against the
   // live clock anyway, so padding it would hide a currently valid minute.
-  const min = retryMinimum(now.getTime(), liveExtraMs, afterMs) ?? bounds.min;
-  const maxMs = now.getTime() + MAX_SCHEDULE_MS;
+  const min = retryMinimum(nowMs, liveExtraMs, afterMs) ?? bounds.min;
+  const maxMs = nowMs + MAX_SCHEDULE_MS;
   // Local strings drop the offset: a ceiling inside a fall-back's second
   // occurrence parses to the earlier hour and would mark valid times out of
   // range, so the native cap is dropped when it cannot round-trip.
@@ -362,13 +376,13 @@ function ScheduleRetryDialog({
   } else if (
     chosenMs !== null &&
     serverLeadMs > MIN_SCHEDULE_MS &&
-    chosenMs - now.getTime() < serverLeadMs
+    chosenMs - nowMs < serverLeadMs
   ) {
     error = retryFloorMessage(min);
   } else if (
     chosenMs !== null &&
     uploadMs > 0 &&
-    chosenMs - now.getTime() < MIN_SCHEDULE_MS + liveExtraMs
+    chosenMs - nowMs < MIN_SCHEDULE_MS + liveExtraMs
   ) {
     error = uploadLeadMessage(uploadMs, MIN_SCHEDULE_MS + liveExtraMs);
   }
