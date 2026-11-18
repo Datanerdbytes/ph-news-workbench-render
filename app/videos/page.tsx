@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Film, Play, TriangleAlert, Upload, Video } from 'lucide-react';
 import { toast } from 'sonner';
 import { AssistantChat } from '@/components/assistant-chat';
@@ -21,6 +21,7 @@ import {
   type PublishResult,
 } from '@/components/publishing/publish-page';
 import { resolveScheduledFor } from '@/lib/publishing/schedule';
+import { useScheduleRetry } from '@/components/publishing/schedule-retry-dialog';
 import {
   MediaPreviewCard,
   MediaPreviewMedia,
@@ -59,6 +60,13 @@ export default function VideosPage() {
   const [scheduleOn, setScheduleOn] = useState(false);
   const [scheduledFor, setScheduledFor] = useState(defaultScheduleValue);
   const [scheduleError, setScheduleError] = useState('');
+  // The picker stays editable while the bake runs, so the submit-time value is
+  // read from a ref instead of the closure that started publish().
+  const scheduledForRef = useRef(scheduledFor);
+  useEffect(() => {
+    scheduledForRef.current = scheduledFor;
+  }, [scheduledFor]);
+  const scheduleRetry = useScheduleRetry();
   const [busy, setBusy] = useState(false);
   const [uploadPct, setUploadPct] = useState<number | null>(null);
   const [results, setResults] = useState<PublishResult[] | null>(null);
@@ -261,13 +269,24 @@ export default function VideosPage() {
         }
       }
 
-      // The bake can run for the clip's full length; re-check the schedule so
-      // the request lands above the server's 10-minute minimum.
-      if (scheduledForIso) {
-        const recheck = resolveScheduledFor(scheduledFor);
-        if (recheck.iso === null) {
-          setScheduleError(recheck.error);
+      // The bake can run for the clip's full length; re-check against the
+      // submit-time clock so the slot is still valid when the request lands.
+      // On a miss, ask for a new time here — the baked file is reused, so
+      // nothing is rendered or uploaded twice.
+      if (scheduleOn) {
+        const submit = await scheduleRetry.resolveSubmit(
+          scheduledForRef.current,
+          'video'
+        );
+        if (submit.kind === 'cancelled') return;
+        if (submit.kind === 'error') {
+          setScheduleError(submit.error);
           return;
+        }
+        scheduledForIso = submit.iso;
+        if (submit.picked) {
+          setScheduledFor(submit.picked);
+          setScheduleError('');
         }
       }
 
@@ -503,6 +522,7 @@ export default function VideosPage() {
         </div>
         <aside className="self-start xl:sticky xl:top-[70px]">{videoPreview}</aside>
       </div>
+      {scheduleRetry.dialog}
       <AssistantChat
         draft={description}
         onDraftChange={setDescription}
