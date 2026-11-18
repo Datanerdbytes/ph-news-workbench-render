@@ -535,6 +535,7 @@ export function ScheduleField({
   value,
   onChange,
   error,
+  disabled = false,
   label = 'Schedule with Facebook',
   hint = '10 minutes to 75 days from now. Facebook publishes it from its own queue.',
 }: {
@@ -543,6 +544,8 @@ export function ScheduleField({
   value: string;
   onChange: (value: string) => void;
   error?: string;
+  /** Locked while a submit is in flight so its slot cannot be abandoned mid-upload. */
+  disabled?: boolean;
   /** Toggle copy — FB composers keep the default. */
   label?: string;
   /** Explainer under the picker — FB composers keep the default. */
@@ -562,6 +565,7 @@ export function ScheduleField({
         <input
           type="checkbox"
           checked={enabled}
+          disabled={disabled}
           onChange={(event) => onEnabled(event.target.checked)}
           className="size-4 accent-[var(--brand)]"
         />

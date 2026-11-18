@@ -56,6 +56,9 @@ export default function ReelsPage() {
     scheduledForRef.current = scheduledFor;
   }, [scheduledFor]);
   const scheduleRetry = useScheduleRetry();
+  // Stable across renders, so handlePick can cancel an obsolete prompt without
+  // re-triggering the Downloads handover effect that depends on it.
+  const cancelRetry = scheduleRetry.cancel;
   const [busy, setBusy] = useState(false);
   const [results, setResults] = useState<PublishResult[] | null>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
@@ -112,6 +115,9 @@ export default function ReelsPage() {
       }
     }
     const generation = ++pickGeneration.current;
+    // A retry prompt opened for the previous reel is obsolete now: settle it
+    // as cancelled so that attempt releases its staged upload and stops.
+    cancelRetry();
     setFile(picked);
     if (!picked) return;
     setNormalizing(true);
@@ -148,6 +154,7 @@ export default function ReelsPage() {
     // Invalidates any in-flight normalization so the cleared file can't
     // come back when the async work settles.
     pickGeneration.current += 1;
+    cancelRetry();
     setFile(null);
     setNormalizing(false);
     setNormalizePct(null);
@@ -173,7 +180,7 @@ export default function ReelsPage() {
     return () => {
       cancelled = true;
     };
-  }, [handlePick]);
+  }, [cancelRetry]);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -435,6 +442,7 @@ export default function ReelsPage() {
             setScheduleError('');
           }}
           error={scheduleError}
+          disabled={busy}
         />
 
         <div className="flex flex-wrap items-center gap-2">

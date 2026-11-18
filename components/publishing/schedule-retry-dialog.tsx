@@ -114,11 +114,11 @@ export type SubmitScheduleOptions = {
    */
   seedAfterMs?: number;
   /**
-   * The server's floor relative to the rejection — its clock offset plus its
-   * own 10-minute minimum, measured when the refusal arrived. A duration, not
-   * an instant, so the limit still advances while the user sits in the dialog.
+   * The server's own earliest acceptable slot, as an absolute instant. It is
+   * advanced with the monotonic clock, so a wall-clock correction while the
+   * dialog is open cannot make a doomed slot look acceptable.
    */
-  serverLeadMs?: number;
+  serverEarliestMs?: number;
   /**
    * Epoch ms of the slot the server refused. The next pick must be strictly
    * later — re-offering the refused value just earns another rejection.
@@ -136,10 +136,27 @@ type RetryLimits = {
   /** Required lead beyond the 10-minute floor. */
   extraMs: number;
   uploadMs: number;
-  serverLeadMs: number;
+  serverEarliestMs: number;
+  /** Monotonic reading taken when that earliest slot was received. */
+  serverEarliestMonoMs: number;
   afterMs: number;
   afterLabel: string;
 };
+
+/**
+ * The server's floor as a lead from this moment. Only the elapsed time is
+ * monotonic, so a browser clock that jumps backwards cannot shrink the lead
+ * the next upload has to clear.
+ */
+function serverLeadNow(
+  limits: Pick<RetryLimits, 'serverEarliestMs' | 'serverEarliestMonoMs'>
+): number {
+  if (!limits.serverEarliestMs) return 0;
+  const earliest =
+    limits.serverEarliestMs +
+    (performance.now() - limits.serverEarliestMonoMs);
+  return Math.max(0, earliest - Date.now());
+}
 
 /**
  * Promise plumbing for the retry dialog. Call `resolveSubmit` once the bake and
@@ -176,6 +193,11 @@ export function useScheduleRetry() {
     resolve?.(value);
   }, []);
 
+  // A replacement or a closed picker outside the dialog ends the pending
+  // submit through the same path as its Cancel button, so the caller releases
+  // staged media instead of waiting on a prompt nobody should answer.
+  const cancel = useCallback(() => settle(null), [settle]);
+
   // Navigating away must still settle the awaiting submit — the cancellation
   // branch is what releases staged media — and staging that finishes after
   // the unmount must not open a prompt nobody can answer.
@@ -199,24 +221,27 @@ export function useScheduleRetry() {
       const limits: RetryLimits = {
         extraMs: 0,
         uploadMs: options.seedAfterMs ?? 0,
-        serverLeadMs: options.serverLeadMs ?? 0,
+        serverEarliestMs: options.serverEarliestMs ?? 0,
+        serverEarliestMonoMs: performance.now(),
         afterMs: options.afterMs ?? 0,
         afterLabel: options.afterLabel ?? '',
       };
       // Whichever floor is higher wins; the upload wait stacks on top of it.
       const requiredLeadMs =
-        Math.max(MIN_SCHEDULE_MS, limits.serverLeadMs) + limits.uploadMs;
+        Math.max(MIN_SCHEDULE_MS, serverLeadNow(limits)) + limits.uploadMs;
       limits.extraMs = requiredLeadMs - MIN_SCHEDULE_MS;
       // The direct path skips the dialog, so it must still honour the caller's
       // limits — a supplied lead or refused slot can make an otherwise valid
-      // window time fail.
+      // window time fail. A spring-forward gap is refused too: its parsed
+      // instant is an hour off the time the user typed.
       if (!options.forcePrompt) {
         const direct = resolveScheduledFor(value);
         if (direct.iso !== null) {
           const directMs = new Date(direct.iso).getTime();
+          const roundTrips = toLocalInput(new Date(directMs)) === value;
           const clearsLead = directMs - Date.now() >= requiredLeadMs;
           const clearsAfter = !limits.afterMs || directMs > limits.afterMs;
-          if (clearsLead && clearsAfter) {
+          if (roundTrips && clearsLead && clearsAfter) {
             return { kind: 'ok', iso: direct.iso };
           }
         }
@@ -233,8 +258,9 @@ export function useScheduleRetry() {
           chosen.iso === null ? null : new Date(chosen.iso).getTime();
         // Judged against the clock at confirm time: a user who waits in the
         // dialog has to pick later, because the next upload lands later too.
-        const clearsLead =
-          chosenMs !== null && chosenMs - Date.now() >= requiredLeadMs;
+        const leadNow =
+          Math.max(MIN_SCHEDULE_MS, serverLeadNow(limits)) + limits.uploadMs;
+        const clearsLead = chosenMs !== null && chosenMs - Date.now() >= leadNow;
         const clearsAfter =
           !limits.afterMs || (chosenMs !== null && chosenMs > limits.afterMs);
         if (chosen.iso !== null && clearsLead && clearsAfter) {
@@ -256,7 +282,8 @@ export function useScheduleRetry() {
       value={prompt.value}
       extraMs={prompt.extraMs}
       uploadMs={prompt.uploadMs}
-      serverLeadMs={prompt.serverLeadMs}
+      serverEarliestMs={prompt.serverEarliestMs}
+      serverEarliestMonoMs={prompt.serverEarliestMonoMs}
       afterMs={prompt.afterMs}
       afterLabel={prompt.afterLabel}
       onChange={(next) =>
@@ -267,7 +294,7 @@ export function useScheduleRetry() {
     />
   ) : null;
 
-  return { resolveSubmit, dialog };
+  return { resolveSubmit, cancel, dialog };
 }
 
 function ScheduleRetryDialog({
@@ -275,7 +302,8 @@ function ScheduleRetryDialog({
   value,
   extraMs,
   uploadMs,
-  serverLeadMs,
+  serverEarliestMs,
+  serverEarliestMonoMs,
   afterMs,
   afterLabel,
   onChange,
@@ -286,7 +314,8 @@ function ScheduleRetryDialog({
   value: string;
   extraMs: number;
   uploadMs: number;
-  serverLeadMs: number;
+  serverEarliestMs: number;
+  serverEarliestMonoMs: number;
   afterMs: number;
   afterLabel: string;
   onChange: (value: string) => void;
@@ -296,6 +325,7 @@ function ScheduleRetryDialog({
   // The window keeps closing while the prompt is open, so the value is judged
   // against the current clock — same as the composer's ScheduleField.
   const now = useScheduleClock();
+  const serverLeadMs = serverLeadNow({ serverEarliestMs, serverEarliestMonoMs });
   const inputRef = useRef<HTMLInputElement>(null);
   const bounds = scheduleBounds(now);
   // The picker's min is the true earliest — confirmation judges against the

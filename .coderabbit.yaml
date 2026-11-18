@@ -15,9 +15,11 @@ reviews:
   # request-changes reviews. Two review paths: the hosted app (while installed)
   # auto-reviews every push to an open PR, and the local pre-push hook
   # (`.husky/pre-push`) runs the CodeRabbit CLI against this file so findings
-  # surface before a push spends CI. What blocks a merge is the required CI
-  # checks alone. (The old gate — CodeRabbit's approval satisfying the
-  # 1-approval branch rule — was removed on purpose.)
+  # surface before a push spends CI — eligible feature-branch pushes whose tip
+  # is checked out here; main/master, tags, deletions, and other branches are
+  # skipped, and an unavailable or unsigned-in CLI is skipped too. What blocks
+  # a merge is the required CI checks alone. (The old gate — CodeRabbit's
+  # approval satisfying the 1-approval branch rule — was removed on purpose.)
   auto_approvals:
     enabled: false
   # A review that errors out fails the CodeRabbit check instead of passing it,

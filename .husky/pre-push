@@ -38,14 +38,24 @@ fi
 # .coderabbit.yaml is picked up automatically, so profile and path rules match
 # the old PR reviews.
 base=main
-if git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then
+if git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null 2>&1; then
   base=origin/main
+fi
+
+# No base ref to compare against — nothing this worktree can review.
+if ! git rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
+  echo "CodeRabbit: no $base to review against."
+  echo "Fetch one so the hook can review this branch: git fetch origin main."
+  exit 0
 fi
 
 echo "CodeRabbit: reviewing committed changes against $base…"
 status=0
 coderabbit review --committed --base "$base" --gate major || status=$?
 
+# The hook blocks only on exit 2: major/critical findings in a completed
+# review. A non-zero exit from an incomplete review never blocks a push;
+# CI remains the merge gate and a fresh local review still shows findings.
 if [ "$status" -eq 2 ]; then
   echo "CodeRabbit flagged major or critical findings — fix them, or skip with: git push --no-verify"
   exit 1

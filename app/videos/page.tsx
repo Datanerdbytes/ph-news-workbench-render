@@ -131,6 +131,9 @@ export default function VideosPage() {
     // Every pick or clear invalidates an in-flight publish: it must not retry
     // under a replaced clip, nor clear fields the user has since re-filled.
     fileGeneration.current += 1;
+    // Settles a retry prompt opened for the replaced clip as cancelled, so
+    // the abandoned attempt stops instead of waiting on an answer.
+    scheduleRetry.cancel();
     if (fileUrl) URL.revokeObjectURL(fileUrl);
     setFile(next);
     setFileUrl(next ? URL.createObjectURL(next) : null);
@@ -402,13 +405,10 @@ export default function VideosPage() {
         // The transfer clock is monotonic; wall-clock jumps must not fake a
         // longer (or shorter) upload than actually happened.
         const uploadMs = performance.now() - startedAt;
-        // The server's own floor, recorded as a lead from the moment the
-        // refusal arrived so it keeps advancing while the dialog is open —
-        // a fixed instant would go stale if the user waits.
+        // The server's own floor, kept as an absolute instant so the retry
+        // hook can advance it with the monotonic clock while the dialog is
+        // open — a browser clock correction must not shrink the lead.
         const serverEarliest = earliest ? new Date(earliest).getTime() : NaN;
-        const serverLeadMs = Number.isNaN(serverEarliest)
-          ? 0
-          : Math.max(0, serverEarliest - Date.now());
         // A replacement during the transfer makes this rejection stale: the
         // prompt and any picked time belong to the abandoned clip.
         if (generation !== fileGeneration.current) return;
@@ -417,7 +417,9 @@ export default function VideosPage() {
           'video',
           {
             seedAfterMs: uploadMs,
-            serverLeadMs,
+            serverEarliestMs: Number.isNaN(serverEarliest)
+              ? undefined
+              : serverEarliest,
             // The refused slot itself must not be offered again.
             afterMs: sentIso ? new Date(sentIso).getTime() : undefined,
             afterLabel: sentLabel,
@@ -592,6 +594,7 @@ export default function VideosPage() {
               setScheduleError('');
             }}
             error={scheduleError}
+            disabled={busy}
           />
 
           <div className="flex flex-wrap items-center gap-2">

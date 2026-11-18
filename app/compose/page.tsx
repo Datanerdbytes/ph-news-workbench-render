@@ -310,6 +310,10 @@ function ComposeWorkspace() {
   // removal — a scheduled post may still reference it; the scheduler cleans
   // it up after publishing.
   function applyVideoFile(next: File | null) {
+    // The clip a pending schedule was baking no longer exists: abandon that
+    // attempt so its prompt cannot schedule the removed video.
+    scheduleAttempt.current += 1;
+    scheduleRetry.cancel();
     if (videoPreviewUrl) URL.revokeObjectURL(videoPreviewUrl);
     setVideoFile(next);
     setVideoPreviewUrl(next ? URL.createObjectURL(next) : null);
@@ -333,7 +337,7 @@ function ComposeWorkspace() {
    * playback), finalizes the recording to MP4, then re-stages the result;
    * any failure falls back to posting the original clip.
    */
-  async function animatedVideoUrl(): Promise<string | null> {
+  async function animatedVideoUrl(isCurrent?: () => boolean): Promise<string | null> {
     if (!videoUrl) return videoUrl;
     if (!animations.length || !videoPreviewUrl) return videoUrl;
     setBaking(true);
@@ -345,6 +349,8 @@ function ComposeWorkspace() {
         values: animValues,
         onProgress: setBakePct,
       });
+      // A cancelled schedule must not pay for staging a blob nobody will post.
+      if (isCurrent && !isCurrent()) return null;
       const staged = await stageUpload(
         `compose/${Date.now()}-${finalized.name.replace(/[^\w.-]+/g, '_')}`,
         finalized,
@@ -536,7 +542,9 @@ function ComposeWorkspace() {
     setScheduling(true);
     const attempt = ++scheduleAttempt.current;
     try {
-      const finalVideoUrl = videoUrl ? await animatedVideoUrl() : null;
+      const finalVideoUrl = videoUrl
+        ? await animatedVideoUrl(() => attempt === scheduleAttempt.current)
+        : null;
       // The animated bake re-stages a fresh blob; with the schedule abandoned,
       // no request will consume it — remove it instead of leaving it orphaned
       // in the store.
@@ -1094,7 +1102,10 @@ function ComposeWorkspace() {
                           onClick={() => {
                             // Closing the picker abandons any bake still
                             // running for it.
-                            if (scheduleOpen) scheduleAttempt.current += 1;
+                            if (scheduleOpen) {
+                              scheduleAttempt.current += 1;
+                              scheduleRetry.cancel();
+                            }
                             setScheduleOpen((open) => !open);
                           }}
                           disabled={
@@ -1208,6 +1219,7 @@ function ComposeWorkspace() {
                               // Abandons a bake still in progress instead of
                               // leaving it to prompt or post after Cancel.
                               scheduleAttempt.current += 1;
+                              scheduleRetry.cancel();
                               setScheduleOpen(false);
                             }}
                           >
