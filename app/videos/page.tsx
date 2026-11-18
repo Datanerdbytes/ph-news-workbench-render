@@ -392,15 +392,16 @@ export default function VideosPage() {
         const serverEarliest = earliest
           ? new Date(earliest).getTime()
           : Number.NaN;
-        const afterMs = Math.max(
-          sentIso ? new Date(sentIso).getTime() : 0,
-          Number.isNaN(serverEarliest) ? 0 : serverEarliest + uploadMs
-        );
+        const afterMs = sentIso ? new Date(sentIso).getTime() : 0;
+        const serverFloor = Number.isNaN(serverEarliest)
+          ? undefined
+          : { minimumMs: serverEarliest + uploadMs, receivedAt: performance.now() };
         const submit = await scheduleRetry.resolveSubmit(
           scheduledForRef.current,
           'video',
           {
             seedAfterMs: uploadMs,
+            serverFloor,
             // The refused slot is the floor the next pick must clear.
             afterMs: afterMs || undefined,
             afterLabel: sentLabel,

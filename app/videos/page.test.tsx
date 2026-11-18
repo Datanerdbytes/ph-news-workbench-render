@@ -3,6 +3,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { ReactNode } from "react";
 
+const clock = vi.hoisted(() => ({ tick: () => {} }));
+
 vi.mock("sonner", () => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn() },
 }));
@@ -35,7 +37,8 @@ vi.mock("@/components/videos/video-animation-picker", () => ({
 vi.mock("@/lib/videos/bake", () => ({
   bakeAndFinalizeVideo: vi.fn(),
 }));
-vi.mock("@/components/publishing/publish-page", () => {
+vi.mock("@/components/publishing/publish-page", async () => {
+  const { useState, useEffect } = await import("react");
   // Mirrors the real bounds helper closely enough for the reschedule prompt:
   // the 10-minute floor padded a further minute, rounded up to the minute.
   const localInput = (date: Date) => {
@@ -111,7 +114,14 @@ vi.mock("@/components/publishing/publish-page", () => {
       ),
       max: localInput(new Date(now.getTime() + 75 * 24 * 60 * 60_000)),
     }),
-    useScheduleClock: () => new Date(),
+    useScheduleClock: () => {
+      const [now, setNow] = useState(() => new Date());
+      useEffect(() => {
+        clock.tick = () => setNow(new Date());
+        return () => { clock.tick = () => {}; };
+      }, []);
+      return now;
+    },
     mediaFileError: () => null,
     inputClass: "",
     textareaClass: "",
@@ -371,7 +381,7 @@ describe("VideosPage composer", () => {
     expect(toast.success).toHaveBeenCalledWith("Video scheduled", expect.anything());
   });
 
-  it("seeds the retry from the server's earliest acceptable slot", async () => {
+  it.each([0, 5])("seeds a server-safe retry after waiting %i minutes", async (waitMinutes) => {
     // The server clock runs minutes ahead: it refuses 08:15 and reports its
     // own floor, 08:25. The next upload takes 4 minutes, so the retry must
     // clear 08:25 + 4 min — later than the browser's own floor.
@@ -400,19 +410,67 @@ describe("VideosPage composer", () => {
     fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
 
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
-    // Browser floor lands at 08:19; the server's floor plus the transfer at
-    // 08:29, so the seed is 08:30.
-    expect(
-      screen.getByRole("button", { name: /Schedule at 2026-11-14 08:30/ })
-    ).toBeInTheDocument();
-
-    fireEvent.click(
-      screen.getByRole("button", { name: /Schedule at 2026-11-14 08:30/ })
-    );
+    // The same server clock advances through the dialog wait and both uploads.
+    expect(screen.getByRole("button", { name: /Schedule at 2026-11-14 08:30/ }))
+      .toBeEnabled();
+    fireEvent.change(screen.getByLabelText("New publish date and time"), {
+      target: { value: "2026-11-14T08:27" },
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("Pick 2026-11-14 08:30 or later");
+    expect(screen.getByRole("button", { name: /Schedule at/ })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("New publish date and time"), {
+      target: { value: "2026-11-14T08:30" },
+    });
+    await act(async () => { vi.advanceTimersByTime(waitMinutes * 60_000); clock.tick(); });
+    if (waitMinutes) {
+      expect(screen.getByRole("button", { name: /Schedule at/ })).toBeDisabled();
+      expect(screen.getByRole("alert")).toHaveTextContent("Pick 2026-11-14 08:35 or later");
+      fireEvent.change(screen.getByLabelText("New publish date and time"), {
+        target: { value: "2026-11-14T08:35" },
+      });
+    }
+    script.push({ onSend: () => {
+      vi.advanceTimersByTime(4 * 60_000);
+      serverMin = new Date("2026-11-14T08:29");
+      serverMin.setMinutes(serverMin.getMinutes() + waitMinutes);
+    } });
+    fireEvent.click(screen.getByRole("button", { name: /Schedule at/ }));
     await waitFor(() => expect(sentForms).toHaveLength(2));
-
     expect(sentForms[1].scheduledFor).toBe(
-      new Date("2026-11-14T08:30").toISOString()
+      new Date(`2026-11-14T08:${waitMinutes ? "35" : "30"}`).toISOString()
     );
+    expect(toast.success).toHaveBeenCalledWith("Video scheduled", expect.anything());
   });
+  it("seeds a valid local minute across a two-hour fallback", async () => {
+    // Run with TZ=Antarctica/Troll to exercise its two-hour repeated interval.
+    vi.setSystemTime(new Date("2026-10-25T00:30:00Z"));
+    script = [{
+      status: 400,
+      body: {
+        error: SCHEDULE_TOO_SOON_ERROR,
+        earliest: "2026-10-25T00:46:00Z",
+      },
+      onSend: () => vi.advanceTimersByTime(10 * 60_000),
+    }];
+    render(<VideosPage />);
+    await flush();
+    pickVideo();
+    await flush();
+    fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+    const date = new Date("2026-10-25T00:45:00Z");
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const local = `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    fireEvent.change(screen.getByLabelText("Publish date and time"), {
+      target: { value: local },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Schedule at/ })).toBeEnabled();
+    const input = screen.getByLabelText("New publish date and time") as HTMLInputElement;
+    expect(new Date(input.value).getTime()).toBeGreaterThanOrEqual(
+      new Date("2026-10-25T01:00:00Z").getTime()
+    );
+    expect(input.min).toBe(input.value);
+  });
+
 });

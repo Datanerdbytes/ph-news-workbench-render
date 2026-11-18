@@ -35,77 +35,49 @@ export function uploadLeadMessage(seedAfterMs: number): string {
   return `The last upload took about ${upload} min — pick at least ${ahead} min ahead.`;
 }
 
-/**
- * Earliest pickable time in the picker's local format. A DST fall-back repeats
- * an hour, and a formatted candidate in the second occurrence can parse to
- * the first one and sit below the floor it was rounded up from, so scan
- * forward a minute at a time until the parse clears the full minimum — the
- * 10-minute floor plus the expected wait. The repeated hour ends within 60
- * steps; a wait with no slot inside the 75-day window yields null rather than
- * a candidate that fails the check.
- */
-function minScheduleValue(now: number, extraMs = 0): string | null {
-  for (let step = 0; step <= 60; step += 1) {
-    const value = scheduleBounds(new Date(now + extraMs + step * 60_000)).min;
-    const resolved = resolveScheduledFor(value, new Date(now));
-    if (
-      resolved.iso !== null &&
-      new Date(resolved.iso).getTime() - now >= MIN_SCHEDULE_MS + extraMs
-    ) {
-      return value;
-    }
-  }
-  return null;
-}
+/** A server limit advances with elapsed time even if the device clock jumps. */
+type ServerFloor = { minimumMs: number; receivedAt: number };
 
-/** What a local datetime-local value actually parses to. */
-function parsedMs(value: string): number {
-  return new Date(value).getTime();
+function serverMinimum(floor?: ServerFloor): number {
+  return floor
+    ? floor.minimumMs + Math.max(0, performance.now() - floor.receivedAt)
+    : 0;
 }
 
 /**
- * First local minute strictly after the refused slot. A DST fall-back repeats
- * its local range (two hours in some zones), and formatting the second
- * occurrence parses to the first, so step until the parse lands after the
- * slot; return null rather than a value that fails that check.
- */
-function nextMinuteValue(
-  afterMs: number
-): { value: string; ms: number } | null {
-  const start = Math.floor(afterMs / 60_000) * 60_000 + 60_000;
-  for (let step = 0; step <= 180; step += 1) {
-    const value = toLocalInput(new Date(start + step * 60_000));
-    const ms = parsedMs(value);
-    if (ms > afterMs) return { value, ms };
-  }
-  return null;
-}
-
-/**
- * The earliest pickable value that clears both minima: the 10-minute floor
- * plus the expected wait, and the slot the server already refused. Compared
- * by parsed epoch, since a fall-back's strings do not sort chronologically.
+ * Search from the later instant, then validate the formatted local value.
+ * A two-hour DST fall-back can parse a formatted time as its first occurrence.
+ * Never return a candidate that fails either minimum or the 75-day window.
  */
 function retryMinimum(
   now: number,
   extraMs: number,
-  afterMs: number
+  afterMs: number,
+  serverMin = 0
 ): string | null {
-  const lead = minScheduleValue(now, extraMs);
-  if (!afterMs) return lead;
-  const next = nextMinuteValue(afterMs);
-  if (!lead) return next?.value ?? null;
-  if (!next) return parsedMs(lead) > afterMs ? lead : null;
-  return parsedMs(lead) > next.ms ? lead : next.value;
+  const minimum = Math.max(now + MIN_SCHEDULE_MS + extraMs, serverMin);
+  const start = Math.max(
+    Math.ceil((now + MIN_SCHEDULE_MS + extraMs + 60_000) / 60_000) * 60_000,
+    Math.floor(Math.max(afterMs, serverMin) / 60_000) * 60_000 + 60_000
+  );
+  for (let step = 0; step <= 180; step += 1) {
+    const value = toLocalInput(new Date(start + step * 60_000));
+    const resolved = resolveScheduledFor(value, new Date(now));
+    if (resolved.iso === null) continue;
+    const ms = new Date(resolved.iso).getTime();
+    if (ms >= minimum && ms > afterMs) return value;
+  }
+  return null;
 }
 
 /** The slot the prompt opens with — '' only when no slot can clear both. */
 function seedScheduleValue(
   now: number,
   extraMs: number,
-  afterMs: number
+  afterMs: number,
+  serverFloor?: ServerFloor
 ): string {
-  return retryMinimum(now, extraMs, afterMs) ?? '';
+  return retryMinimum(now, extraMs, afterMs, serverMinimum(serverFloor)) ?? '';
 }
 
 /** The server refused that slot; re-offering it just earns another 400. */
@@ -130,6 +102,8 @@ export type SubmitScheduleOptions = {
    * refused value just earns another rejection.
    */
   afterMs?: number;
+  /** Server minimum plus upload duration, measured when the refusal arrives. */
+  serverFloor?: ServerFloor;
   /** The refused slot in picker format, for the "pick a later time" copy. */
   afterLabel?: string;
   /** Ask even when the browser clock accepts it — the server rejected it. */
@@ -151,6 +125,7 @@ export function useScheduleRetry() {
     minDelayMs: number;
     afterMs: number;
     afterLabel: string;
+    serverFloor?: ServerFloor;
   } | null>(null);
   const resolveRef = useRef<((value: string | null) => void) | null>(null);
   const mountedRef = useRef(true);
@@ -160,17 +135,19 @@ export function useScheduleRetry() {
       message: string,
       seedAfterMs = 0,
       afterMs = 0,
-      afterLabel = ''
+      afterLabel = '',
+      serverFloor?: ServerFloor
     ): Promise<string | null> => {
       return new Promise((resolve) => {
         resolveRef.current = resolve;
         // Seeded with the earliest valid slot so one click is enough.
         setPrompt({
           message,
-          value: seedScheduleValue(Date.now(), seedAfterMs, afterMs),
+          value: seedScheduleValue(Date.now(), seedAfterMs, afterMs, serverFloor),
           minDelayMs: seedAfterMs,
           afterMs,
           afterLabel,
+          serverFloor,
         });
       });
     },
@@ -215,7 +192,8 @@ export function useScheduleRetry() {
           options.message ?? staleScheduleMessage(current, noun),
           options.seedAfterMs,
           afterMs,
-          options.afterLabel ?? ''
+          options.afterLabel ?? '',
+          options.serverFloor
         );
         if (picked === null) return { kind: 'cancelled' };
         const chosen = resolveScheduledFor(picked);
@@ -226,7 +204,8 @@ export function useScheduleRetry() {
           (chosenMs !== null &&
             chosenMs - Date.now() >= MIN_SCHEDULE_MS + options.seedAfterMs);
         const clearsAfter = !afterMs || (chosenMs !== null && chosenMs > afterMs);
-        if (chosen.iso !== null && clearsLead && clearsAfter) {
+        if (chosen.iso !== null && clearsLead && clearsAfter &&
+          chosenMs !== null && chosenMs >= serverMinimum(options.serverFloor)) {
           return { kind: 'ok', iso: chosen.iso, picked };
         }
         if (!mountedRef.current) return { kind: 'cancelled' };
@@ -246,6 +225,7 @@ export function useScheduleRetry() {
       minDelayMs={prompt.minDelayMs}
       afterMs={prompt.afterMs}
       afterLabel={prompt.afterLabel}
+      serverFloor={prompt.serverFloor}
       onChange={(next) =>
         setPrompt((current) => (current ? { ...current, value: next } : current))
       }
@@ -263,6 +243,7 @@ function ScheduleRetryDialog({
   minDelayMs,
   afterMs,
   afterLabel,
+  serverFloor,
   onChange,
   onConfirm,
   onCancel,
@@ -272,6 +253,7 @@ function ScheduleRetryDialog({
   minDelayMs: number;
   afterMs: number;
   afterLabel: string;
+  serverFloor?: ServerFloor;
   onChange: (value: string) => void;
   onConfirm: () => void;
   onCancel: () => void;
@@ -281,8 +263,9 @@ function ScheduleRetryDialog({
   const now = useScheduleClock();
   const inputRef = useRef<HTMLInputElement>(null);
   const bounds = scheduleBounds(now);
-  const min =
-    retryMinimum(now.getTime(), minDelayMs, afterMs) ?? bounds.min;
+  const serverMin = serverMinimum(serverFloor);
+  const minimum = retryMinimum(now.getTime(), minDelayMs, afterMs, serverMin);
+  const min = minimum ?? bounds.max;
   const resolution = resolveScheduledFor(value, now);
   let error: string | null = null;
   if (resolution.iso === null) {
@@ -295,6 +278,10 @@ function ScheduleRetryDialog({
       MIN_SCHEDULE_MS + minDelayMs
   ) {
     error = uploadLeadMessage(minDelayMs);
+  } else if (new Date(resolution.iso).getTime() < serverMin) {
+    error = minimum
+      ? `Pick ${minimum.replace('T', ' ')} or later to allow time for the upload.`
+      : 'No available time clears the upload limit within the scheduling window.';
   }
   return (
     <Modal
