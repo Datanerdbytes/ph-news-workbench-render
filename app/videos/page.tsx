@@ -25,6 +25,7 @@ import {
   resolveScheduledFor,
 } from '@/lib/publishing/schedule';
 import {
+  SERVER_FLOOR_TRANSIT_MS,
   retryAfterMessage,
   slowUploadMessage,
   useScheduleRetry,
@@ -86,6 +87,9 @@ export default function VideosPage() {
   useEffect(() => {
     busyRef.current = busy;
   }, [busy]);
+  // Bumped whenever the composer is replaced or reset, so an assistant reply
+  // that outlives its post cannot refill the next one.
+  const [composerRevision, setComposerRevision] = useState(0);
   // The last slot the server refused. Cancelling the retry dialog must not
   // let the next attempt upload to the same refused time.
   const refusedSlotRef = useRef<{
@@ -148,6 +152,9 @@ export default function VideosPage() {
     // Every pick or clear invalidates an in-flight publish: it must not retry
     // under a replaced clip, nor clear fields the user has since re-filled.
     fileGeneration.current += 1;
+    // A new clip (or the reset after publishing) starts a new composer, so a
+    // revision reply still in flight belongs to the old one.
+    setComposerRevision((revision) => revision + 1);
     // Settles a retry prompt opened for the replaced clip as cancelled, so
     // the abandoned attempt stops instead of waiting on an answer.
     scheduleRetry.cancel();
@@ -256,6 +263,20 @@ export default function VideosPage() {
       }
     }
     let scheduledForIso: string | null = null;
+    // The refused slot and the server's reported floor advance with the
+    // monotonic clock. The pre-bake check and the post-bake recheck share one
+    // projection so a long bake cannot leave a slot below the server's floor.
+    const serverFloorNow = () => {
+      const refused = refusedSlotRef.current;
+      if (!refused) return 0;
+      return Math.max(
+        refused.ms,
+        refused.earliestMs
+          ? refused.earliestMs +
+              (performance.now() - refused.observedMonoMs)
+          : 0
+      );
+    };
     if (scheduleOn) {
       const schedule = resolveScheduledFor(scheduledFor);
       if (schedule.iso === null) {
@@ -266,20 +287,10 @@ export default function VideosPage() {
       // the composer with that time still selected, so block it here instead
       // of uploading the same video to earn the same 400.
       const refused = refusedSlotRef.current;
-      if (refused) {
-        // A slot later than the refused one is not necessarily past the
-        // server's own floor, so keep that floor advancing monotonic.
-        const floorMs = Math.max(
-          refused.ms,
-          refused.earliestMs
-            ? refused.earliestMs +
-                (performance.now() - refused.observedMonoMs)
-            : 0
-        );
-        if (new Date(schedule.iso).getTime() <= floorMs) {
-          setScheduleError(retryAfterMessage(refused.label));
-          return;
-        }
+      const floorMs = serverFloorNow();
+      if (refused && new Date(schedule.iso).getTime() <= floorMs) {
+        setScheduleError(retryAfterMessage(refused.label));
+        return;
       }
       scheduledForIso = schedule.iso;
       setScheduleError('');
@@ -334,7 +345,15 @@ export default function VideosPage() {
       if (scheduleOn) {
         const submit = await scheduleRetry.resolveSubmit(
           scheduledForRef.current,
-          'video'
+          'video',
+          {
+            // The bake may have outlasted the slot's clearance of the server
+            // floor, so the recheck must see the same advancing floor the
+            // pre-bake check used.
+            serverEarliestMs: serverFloorNow() || undefined,
+            afterMs: refusedSlotRef.current?.ms,
+            afterLabel: refusedSlotRef.current?.label,
+          }
         );
         if (submit.kind === 'cancelled') return;
         // The dialog can sit open while the clip is replaced; the picked time
@@ -448,7 +467,12 @@ export default function VideosPage() {
           refusedSlotRef.current = {
             ms: new Date(sentIso).getTime(),
             label: sentLabel,
-            earliestMs: Number.isNaN(serverEarliest) ? 0 : serverEarliest,
+            // Pad the received floor: the server sampled its clock before the
+            // response travelled back, so treating it as exact would project a
+            // floor behind the server's and re-earn the rejection.
+            earliestMs: Number.isNaN(serverEarliest)
+              ? 0
+              : serverEarliest + SERVER_FLOOR_TRANSIT_MS,
             observedMonoMs: performance.now(),
           };
         }
@@ -687,6 +711,7 @@ export default function VideosPage() {
       <AssistantChat
         draft={description}
         disabled={busy}
+        revision={composerRevision}
         // A reply that lands mid-attempt must not rewrite the description the
         // retry already captured; a ref avoids the stale closure from the
         // render that sent the request.

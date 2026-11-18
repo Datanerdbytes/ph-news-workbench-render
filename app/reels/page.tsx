@@ -41,6 +41,13 @@ import type { SlotLoops, SlotSelection } from '@/components/reels/animation-pick
 
 const MAX_BYTES = 1024 * 1024 * 1024;
 
+/** Connection-guard responses that return before the request body is read. */
+const PRE_BODY_REJECTION_CODES = new Set([
+  'not_connected',
+  'scope_missing',
+  'connection_failed',
+]);
+
 export default function ReelsPage() {
   const pages = useManagedPages();
   const [file, setFile] = useState<File | null>(null);
@@ -66,6 +73,9 @@ export default function ReelsPage() {
   useEffect(() => {
     busyRef.current = busy;
   }, [busy]);
+  // Bumped when the reel is replaced or the composer resets after publishing,
+  // so an assistant reply for the old clip cannot refill the new caption.
+  const [composerRevision, setComposerRevision] = useState(0);
   const [results, setResults] = useState<PublishResult[] | null>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
   // Each pick/clear bumps this; an in-flight normalization whose generation
@@ -121,6 +131,8 @@ export default function ReelsPage() {
       }
     }
     const generation = ++pickGeneration.current;
+    // A reply in flight belongs to the previous clip's composer.
+    setComposerRevision((revision) => revision + 1);
     // A retry prompt opened for the previous reel is obsolete now: settle it
     // as cancelled so that attempt releases its staged upload and stops.
     cancelRetry();
@@ -160,6 +172,7 @@ export default function ReelsPage() {
     // Invalidates any in-flight normalization so the cleared file can't
     // come back when the async work settles.
     pickGeneration.current += 1;
+    setComposerRevision((revision) => revision + 1);
     cancelRetry();
     setFile(null);
     setNormalizing(false);
@@ -345,12 +358,19 @@ export default function ReelsPage() {
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
-        // A 400 is a pre-publish rejection: the server never consumed the
-        // staged copy, and this attempt ends without a URL that could retry
-        // it, so release the blob instead of orphaning it in the store. Any
-        // other status may have started publishing — or is an ambiguous
-        // network failure — so that blob is left to the scheduler.
-        if (res.status === 400) deleteStagedBlob(staged.url);
+        // A pre-body rejection never consumed the staged copy. That includes
+        // 400s (the route's own validation), 401 (no session), and the
+        // connection guard's not_connected/scope_missing/connection_failed
+        // responses, which all return before the body is read. Any other
+        // status may have started publishing — or is an ambiguous network
+        // failure — so that blob is left to the scheduler.
+        if (
+          res.status === 400 ||
+          res.status === 401 ||
+          PRE_BODY_REJECTION_CODES.has(data?.code)
+        ) {
+          deleteStagedBlob(staged.url);
+        }
         throw new Error(data?.error ?? 'The reel could not be posted.');
       }
       setResults(data.results ?? []);
@@ -363,6 +383,7 @@ export default function ReelsPage() {
         setFile(null);
         setCaption('');
         setScheduleOn(false);
+        setComposerRevision((revision) => revision + 1);
       }
     } catch (error) {
       toast.error('Reel upload failed', {
@@ -522,9 +543,10 @@ export default function ReelsPage() {
       <AssistantChat
         draft={caption}
         disabled={busy}
+        revision={composerRevision}
         // A reply that lands mid-attempt must not replace the caption the
         // request already captured (the textarea is locked for the same
-        // reason); a ref avoids the stale closure from the sending render.
+        // reason); a ref avoids the stale closure from the rendering send.
         onDraftChange={(text) => {
           if (busyRef.current) return false;
           setCaption(text);

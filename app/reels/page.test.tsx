@@ -398,11 +398,13 @@ describe("ReelsPage composer", () => {
 
     // A pre-publish 400 means the server never read the staged file: keeping
     // the blob around would orphan it, since the composer forgets its URL.
+    // The staged-video check is a real early 400 in the route (an omitted
+    // schedule never reaches the too-soon parser), so this mock is reachable.
     fetchMock.mockImplementationOnce(async () => ({
       ok: false,
       status: 400,
       json: async () => ({
-        error: "Scheduled time must be at least 10 minutes from now.",
+        error: "The staged video is empty.",
       }),
     }));
 
@@ -416,8 +418,35 @@ describe("ReelsPage composer", () => {
     expect(toast.error).toHaveBeenCalledWith(
       "Reel upload failed",
       expect.objectContaining({
-        description: "Scheduled time must be at least 10 minutes from now.",
+        description: "The staged video is empty.",
       })
+    );
+  });
+
+  it("releases the staged reel when the connection guard rejects before reading it", async () => {
+    render(<ReelsPage />);
+    await flush();
+
+    stageVideo();
+    await flush();
+
+    // requirePublishingConnection returns before the body is read, and the
+    // route's own cleanup only runs inside the publish attempt.
+    fetchMock.mockImplementationOnce(async () => ({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        error: "Connect your Facebook Page before posting a reel.",
+        code: "not_connected",
+      }),
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: /Publish reel/ }));
+
+    await waitFor(() =>
+      expect(deleteStagedBlobMock).toHaveBeenCalledWith(
+        "https://bucket.public.blob.vercel-storage.com/reels/clip.mp4"
+      )
     );
   });
 

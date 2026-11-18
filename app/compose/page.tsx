@@ -204,6 +204,9 @@ function ComposeWorkspace() {
   const [draftLoadFailed, setDraftLoadFailed] = useState(false);
   const [drafting, setDrafting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // Bumped when the composer switches stories or drops the draft, so an
+  // assistant reply for the old draft cannot refill the new one.
+  const [composerRevision, setComposerRevision] = useState(0);
   const [deleting, setDeleting] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
@@ -230,6 +233,9 @@ function ComposeWorkspace() {
   // Closing the picker bumps this so a bake in progress stops before it
   // prompts for a new time or posts against an abandoned schedule.
   const scheduleAttempt = useRef(0);
+  // Increments for every bake; an abandoned bake must not move the progress
+  // of the one that replaced it.
+  const bakeSequence = useRef(0);
   // Read by the assistant's reply handler, which can fire long after the
   // render that started the request.
   const editorLockedRef = useRef(false);
@@ -341,13 +347,18 @@ function ComposeWorkspace() {
   // it up after publishing.
   function applyVideoFile(next: File | null) {
     // The clip a pending schedule was baking no longer exists: abandon that
-    // attempt so its prompt cannot schedule the removed video.
-    scheduleAttempt.current += 1;
-    scheduleRetry.cancel();
-    // An abandoned attempt no longer owns the controls; its own finally will
-    // skip the reset because the attempt id moved on.
-    setScheduling(false);
-    setEditorLocked(false);
+    // attempt so its prompt cannot schedule the removed video. Once the
+    // request is on the wire Cancel cannot abort it, so leave the lock alone —
+    // otherwise a removal would open the composer for a second dispatch while
+    // the first POST is still pending.
+    if (!dispatching) {
+      scheduleAttempt.current += 1;
+      scheduleRetry.cancel();
+      // An abandoned attempt no longer owns the controls; its own finally will
+      // skip the reset because the attempt id moved on.
+      setScheduling(false);
+      setEditorLocked(false);
+    }
     if (videoPreviewUrl) URL.revokeObjectURL(videoPreviewUrl);
     setVideoFile(next);
     setVideoPreviewUrl(next ? URL.createObjectURL(next) : null);
@@ -374,6 +385,10 @@ function ComposeWorkspace() {
   async function animatedVideoUrl(isCurrent?: () => boolean): Promise<string | null> {
     if (!videoUrl) return videoUrl;
     if (!animations.length || !videoPreviewUrl) return videoUrl;
+    // A cancelled attempt can leave its bake running while a newer one starts;
+    // only the newest bake may move progress, warn, or clear the flags.
+    const bakeId = ++bakeSequence.current;
+    const ownsBake = () => bakeId === bakeSequence.current;
     setBaking(true);
     setBakePct(0);
     try {
@@ -381,7 +396,9 @@ function ComposeWorkspace() {
         videoUrl: videoPreviewUrl,
         attachments: animations,
         values: animValues,
-        onProgress: setBakePct,
+        onProgress: (pct) => {
+          if (ownsBake()) setBakePct(pct);
+        },
       });
       // A cancelled schedule must not pay for staging a blob nobody will post.
       if (isCurrent && !isCurrent()) return null;
@@ -392,16 +409,22 @@ function ComposeWorkspace() {
       );
       return staged.url;
     } catch (error) {
-      toast.warning('Posting without the animation', {
-        description:
-          error instanceof Error
-            ? error.message
-            : 'The animation could not be rendered in this browser.',
-      });
+      if (ownsBake()) {
+        toast.warning('Posting without the animation', {
+          description:
+            error instanceof Error
+              ? error.message
+              : 'The animation could not be rendered in this browser.',
+        });
+      }
       return videoUrl;
     } finally {
-      setBaking(false);
-      setBakePct(null);
+      // An abandoned bake still clears its own flags when no newer bake owns
+      // them; when one does, its state belongs to the newer bake.
+      if (ownsBake()) {
+        setBaking(false);
+        setBakePct(null);
+      }
     }
   }
 
@@ -436,6 +459,7 @@ function ComposeWorkspace() {
     setDraft('');
     setStats(null);
     setImages([]);
+    setComposerRevision((revision) => revision + 1);
     applyVideoFile(null);
     setConfirmDelete(false);
     setScheduleOpen(false);
@@ -445,7 +469,7 @@ function ComposeWorkspace() {
   }, [selectedId, selected, loadSavedDraft]);
 
   async function generateDraft() {
-    if (!selected) return;
+    if (!selected || drafting || publishing || scheduling || deleting) return;
     setDrafting(true);
     setConfirmDelete(false);
     try {
@@ -566,6 +590,10 @@ function ComposeWorkspace() {
 
   async function schedulePost() {
     if (!selected || !draft.trim()) return;
+    // Regeneration will replace the draft this request would capture, so wait
+    // for it to land instead of scheduling text the editor is about to drop.
+    // A delete or a publish already in flight will clear or post this draft.
+    if (drafting || deleting || publishing) return;
     // A video must finish staging before the post can be scheduled.
     if (videoFile && !videoUrl) return;
     const schedule = resolveScheduledFor(scheduledFor);
@@ -629,10 +657,16 @@ function ComposeWorkspace() {
       });
       const data = await res.json();
       if (!res.ok) {
-        // 400/404 are pre-insert rejections: the schedule row does not exist,
-        // so nothing will consume the freshly baked blob. An error or an
-        // ambiguous network failure may still be inserting — keep it.
-        if (res.status === 400 || res.status === 404) discardBake();
+        // 400/401/404 are pre-insert rejections: the schedule row does not
+        // exist, so nothing will consume the freshly baked blob. An error or
+        // an ambiguous network failure may still be inserting — keep it.
+        if (
+          res.status === 400 ||
+          res.status === 401 ||
+          res.status === 404
+        ) {
+          discardBake();
+        }
         throw new Error(data.error ?? 'Could not schedule the post.');
       }
       toast.success('Post scheduled', {
@@ -667,6 +701,9 @@ function ComposeWorkspace() {
   }
 
   async function deleteDraftFor(item: QueueItem) {
+    // A dispatch or a delete already in flight owns the composer until it
+    // settles; overlapping them would let the other clear the first's locks.
+    if (scheduling || deleting || publishing) return;
     setDeleting(true);
     try {
       const res = await fetch(`/api/drafts?newsItemId=${item.id}`, {
@@ -678,6 +715,7 @@ function ComposeWorkspace() {
       }
       if (selected?.id === item.id) {
         setDraft('');
+        setComposerRevision((revision) => revision + 1);
         setStats(null);
         setImages([]);
         applyVideoFile(null);
@@ -699,6 +737,8 @@ function ComposeWorkspace() {
 
   async function publish() {
     if (!selected || !draft.trim()) return;
+    // The draft captured below would be replaced under the request.
+    if (drafting || deleting) return;
     // A video must finish staging before the post can go out.
     if (videoFile && !videoUrl) return;
 
@@ -1106,7 +1146,13 @@ function ComposeWorkspace() {
                             variant="outline"
                             size="sm"
                             onClick={generateDraft}
-                            disabled={drafting || scheduling || !selected}
+                            disabled={
+                              drafting ||
+                              scheduling ||
+                              publishing ||
+                              deleting ||
+                              !selected
+                            }
                           >
                             <RefreshCw
                               className={cn(
@@ -1122,7 +1168,13 @@ function ComposeWorkspace() {
                             variant="brand"
                             size="sm"
                             onClick={generateDraft}
-                            disabled={drafting || scheduling || !selected}
+                            disabled={
+                              drafting ||
+                              scheduling ||
+                              publishing ||
+                              deleting ||
+                              !selected
+                            }
                           >
                             <Sparkles className="size-3.5" aria-hidden />
                             {drafting ? 'Drafting…' : 'Draft post'}
@@ -1147,6 +1199,8 @@ function ComposeWorkspace() {
                             !pages.selected.length ||
                             publishing ||
                             scheduling ||
+                            drafting ||
+                            deleting ||
                             baking ||
                             imagesBusy ||
                             videoStaging ||
@@ -1194,7 +1248,7 @@ function ComposeWorkspace() {
                                 variant="destructive"
                                 size="sm"
                                 onClick={() => selected && deleteDraftFor(selected)}
-                                disabled={deleting}
+                                disabled={deleting || scheduling || publishing}
                               >
                                 <Trash2 className="size-3.5" aria-hidden />
                                 {deleting ? 'Deleting…' : 'Confirm delete'}
@@ -1203,7 +1257,7 @@ function ComposeWorkspace() {
                                 variant="ghost"
                                 size="sm"
                                 onClick={() => setConfirmDelete(false)}
-                                disabled={deleting}
+                                disabled={deleting || scheduling || publishing}
                               >
                                 Cancel
                               </Button>
@@ -1213,6 +1267,7 @@ function ComposeWorkspace() {
                               variant="ghost"
                               size="sm"
                               onClick={() => setConfirmDelete(true)}
+                              disabled={scheduling || publishing}
                             >
                               <Trash2 className="size-3.5" aria-hidden />
                               Delete draft
@@ -1272,7 +1327,9 @@ function ComposeWorkspace() {
                             size="sm"
                             variant="brand"
                             onClick={schedulePost}
-                            disabled={scheduling}
+                            disabled={
+                              scheduling || drafting || deleting || publishing
+                            }
                           >
                             {scheduling ? 'Scheduling…' : 'Confirm schedule'}
                           </Button>
@@ -1362,6 +1419,7 @@ function ComposeWorkspace() {
         draft={draft}
         storyId={selected?.id}
         disabled={scheduling}
+        revision={composerRevision}
         // A reply can land after the attempt started; read the live lock from
         // the ref, not the render that sent the request. Before dispatch the
         // attempt is abandoned so the new text is what gets scheduled; after

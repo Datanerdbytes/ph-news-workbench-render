@@ -142,6 +142,69 @@ describe("AssistantChat", () => {
     ).toBeInTheDocument();
   });
 
+  it("drops a reply whose composer was replaced", async () => {
+    const onDraftChange = vi.fn();
+    const chat = render(
+      <AssistantChat
+        draft=""
+        revision={0}
+        onDraftChange={onDraftChange}
+      />
+    );
+    await openPanel();
+
+    fireEvent.change(
+      screen.getByLabelText("Ask the assistant to write or revise"),
+      { target: { value: "Write a caption" } }
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Send revision request" })
+    );
+    await act(async () => {});
+
+    // Publishing reset the composer to the same empty caption, so the draft
+    // text alone cannot tell that the reply belongs to the previous post.
+    chat.rerender(
+      <AssistantChat
+        draft=""
+        revision={1}
+        onDraftChange={onDraftChange}
+      />
+    );
+    await respond({ text: "A caption for the old clip" });
+
+    expect(onDraftChange).not.toHaveBeenCalled();
+    expect(
+      screen.getByText(/composer was reset while the revision ran/)
+    ).toBeInTheDocument();
+  });
+
+  it("keeps Escape working after sending removes the focused suggestion", async () => {
+    render(<AssistantChat />);
+    await openPanel();
+
+    const suggestion = screen.getByRole("button", {
+      name: "Give me story ideas",
+    });
+    suggestion.focus();
+    fireEvent.click(suggestion);
+    await act(async () => {});
+
+    expect(
+      screen.queryByRole("button", { name: "Give me story ideas" })
+    ).toBeNull();
+    // Chromium clears focus with the removed button; the panel recovers it so
+    // Escape still reaches the handler.
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Close assistant" })
+    );
+
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    await act(async () => {});
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
   it("shows the mode-aware busy label in chat mode", async () => {
     render(<AssistantChat />);
     await openPanel();

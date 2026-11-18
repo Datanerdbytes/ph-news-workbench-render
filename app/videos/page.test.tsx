@@ -443,7 +443,8 @@ describe("VideosPage composer", () => {
   it("seeds the retry from the server's clock and confirms straight away", async () => {
     // The server clock runs 10 minutes ahead. The 08:15 attempt lands at
     // browser 08:04 after its 4-minute transfer, so the server's own floor is
-    // 08:24; with the next transfer on top, the retry must clear 08:28.
+    // 08:24; with the next transfer and the response-transit pad on top, the
+    // retry must clear 08:28:05, and the seed's minute padding lands on 08:30.
     serverOffsetMs = 10 * 60_000;
     const transfer = () => vi.advanceTimersByTime(4 * 60_000);
     script = [{ onSend: transfer }, { onSend: transfer }];
@@ -465,23 +466,23 @@ describe("VideosPage composer", () => {
     // The server's floor (20 minutes out) beats the browser's 14, so the
     // seed clears 08:04 + 24 minutes.
     expect(
-      screen.getByRole("button", { name: /Schedule at 2026-11-14 08:29/ })
+      screen.getByRole("button", { name: /Schedule at 2026-11-14 08:30/ })
     ).toBeInTheDocument();
 
     fireEvent.click(
-      screen.getByRole("button", { name: /Schedule at 2026-11-14 08:29/ })
+      screen.getByRole("button", { name: /Schedule at 2026-11-14 08:30/ })
     );
     await waitFor(() => expect(sentForms).toHaveLength(2));
 
     expect(sentForms[1].scheduledFor).toBe(
-      new Date("2026-11-14T08:29").toISOString()
+      new Date("2026-11-14T08:30").toISOString()
     );
     expect(toast.success).toHaveBeenCalledWith("Video scheduled", expect.anything());
   });
 
   it("re-seeds when the prompt sits open past the server's floor", async () => {
     // Same clock, but the user thinks for three minutes: confirming the
-    // 08:29 suggestion would land under the floor the next upload has to
+    // 08:30 suggestion would land under the floor the next upload has to
     // clear, so the prompt re-seeds instead of sending a doomed time.
     serverOffsetMs = 10 * 60_000;
     const transfer = () => vi.advanceTimersByTime(4 * 60_000);
@@ -505,22 +506,22 @@ describe("VideosPage composer", () => {
       vi.advanceTimersByTime(3 * 60_000);
     });
     fireEvent.click(
-      screen.getByRole("button", { name: /Schedule at 2026-11-14 08:29/ })
+      screen.getByRole("button", { name: /Schedule at 2026-11-14 08:30/ })
     );
 
-    // At 08:07 the stale 08:29 is only 22 minutes out; the re-seeded slot
-    // clears the full 24.
+    // At 08:07 the stale 08:30 is only 23 minutes out; the re-seeded slot
+    // clears the full 24 minutes plus the transit pad.
     expect(
-      await screen.findByRole("button", { name: /Schedule at 2026-11-14 08:32/ })
+      await screen.findByRole("button", { name: /Schedule at 2026-11-14 08:33/ })
     ).toBeInTheDocument();
 
     fireEvent.click(
-      screen.getByRole("button", { name: /Schedule at 2026-11-14 08:32/ })
+      screen.getByRole("button", { name: /Schedule at 2026-11-14 08:33/ })
     );
     await waitFor(() => expect(sentForms).toHaveLength(2));
 
     expect(sentForms[1].scheduledFor).toBe(
-      new Date("2026-11-14T08:32").toISOString()
+      new Date("2026-11-14T08:33").toISOString()
     );
   });
 });

@@ -24,6 +24,7 @@ export function AssistantChat({
   onDraftChange,
   contextLabel,
   disabled = false,
+  revision = 0,
 }: {
   draft?: string;
   storyId?: number;
@@ -32,6 +33,11 @@ export function AssistantChat({
   contextLabel?: string;
   /** Blocks new requests while a submit owns the draft it would rewrite. */
   disabled?: boolean;
+  /**
+   * Bumped whenever the composer is replaced or reset. A reply that outlives
+   * its composer must not fill the next post's field with old copy.
+   */
+  revision?: number;
 }) {
   // Composer pages (onDraftChange present) always work in draft mode: the
   // reply populates the field — including when it starts empty ("write me a
@@ -49,8 +55,13 @@ export function AssistantChat({
   useEffect(() => {
     draftRef.current = draft;
   }, [draft]);
+  const revisionRef = useRef(revision);
+  useEffect(() => {
+    revisionRef.current = revision;
+  }, [revision]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
   // The FAB stays mounted (hidden while the dialog is open) so focus can
   // return to it on close instead of dropping to <body>.
   const fabRef = useRef<HTMLButtonElement>(null);
@@ -65,6 +76,17 @@ export function AssistantChat({
     if (!open || !scrollRef.current) return;
     scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, busy, open]);
+
+  // Chromium clears focus when the focused suggestion button unmounts (the
+  // first message hides the suggestions), leaving the panel's Escape handler
+  // with focus on <body> and ignoring the key. Recover only when focus was
+  // lost entirely — a modal that owns focus is left alone.
+  useEffect(() => {
+    if (!open) return;
+    if (!document.activeElement || document.activeElement === document.body) {
+      closeRef.current?.focus();
+    }
+  }, [messages, open]);
 
   // Move focus into the dialog on open; restore it to the FAB on close.
   useEffect(() => {
@@ -101,6 +123,7 @@ export function AssistantChat({
     const text = message.trim();
     if (!text || busy || disabled) return;
     const baseDraft = draft;
+    const baseRevision = revision;
 
     setMessages((history) => [...history, { role: 'user', content: text }]);
     setInput('');
@@ -127,19 +150,26 @@ export function AssistantChat({
           { role: 'assistant', content: data.text },
         ]);
       } else {
-        // A reply that outlived its draft must not refill a field the user
-        // cleared or rewrote; say so instead of reporting a phantom update.
+        // A reply that outlived its composer must not refill a field the user
+        // cleared or rewrote, or the next post's field after a reset; say so
+        // instead of reporting a phantom update.
+        const composerReset = revisionRef.current !== baseRevision;
         const draftMoved = draftRef.current !== baseDraft;
-        const applied = draftMoved ? false : onDraftChange(data.text, baseDraft);
+        const applied =
+          composerReset || draftMoved
+            ? false
+            : onDraftChange(data.text, baseDraft);
         setMessages((history) => [
           ...history,
           {
             role: 'assistant',
             content:
               applied === false
-                ? draftMoved
-                  ? 'The field changed while the revision ran, so it was not applied. Ask again when the field is free.'
-                  : 'The revision finished while the field was busy with another submit, so it was not applied. Ask again when it is free.'
+                ? composerReset
+                  ? 'The composer was reset while the revision ran, so it was not applied. Ask again for the new post.'
+                  : draftMoved
+                    ? 'The field changed while the revision ran, so it was not applied. Ask again when the field is free.'
+                    : 'The revision finished while the field was busy with another submit, so it was not applied. Ask again when it is free.'
                 : 'Draft updated. The revision is in the draft panel.',
           },
         ]);
@@ -214,6 +244,7 @@ export function AssistantChat({
               </div>
               <button
                 type="button"
+                ref={closeRef}
                 onClick={() => setOpen(false)}
                 aria-label="Close assistant"
                 className="tap-target grid size-8 shrink-0 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"

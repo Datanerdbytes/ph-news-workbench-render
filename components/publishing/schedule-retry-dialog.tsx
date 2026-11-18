@@ -98,6 +98,11 @@ export function retryFloorMessage(minValue: string): string {
   return `Pick ${minValue.replace('T', ' ')} or later — the server's clock runs ahead of this one.`;
 }
 
+/** Every floor lands beyond the 75-day window, so no pick can pass. */
+export function retryUnavailableMessage(): string {
+  return 'No time in the 75-day scheduling window clears the server’s clock — scheduling is unavailable right now. Cancel and try again later.';
+}
+
 /** A spring-forward gap: the local clock never reaches this time. */
 export function missingLocalTimeMessage(value: string): string {
   return `${value.replace('T', ' ')} does not exist on that date — the clock skips over it. Pick another time.`;
@@ -142,6 +147,14 @@ type RetryLimits = {
   afterMs: number;
   afterLabel: string;
 };
+
+/**
+ * The server samples its clock before the response travels back, so the
+ * received floor is already older than the server's clock by the transit
+ * time. Padding it keeps a slot that clears the projected floor from still
+ * failing the upload-time check on the server.
+ */
+export const SERVER_FLOOR_TRANSIT_MS = 5_000;
 
 /**
  * The server's floor as a lead from this moment. Only the elapsed time is
@@ -222,7 +235,9 @@ export function useScheduleRetry() {
       const limits: RetryLimits = {
         extraMs: 0,
         uploadMs: options.seedAfterMs ?? 0,
-        serverEarliestMs: options.serverEarliestMs ?? 0,
+        serverEarliestMs: options.serverEarliestMs
+          ? options.serverEarliestMs + SERVER_FLOOR_TRANSIT_MS
+          : 0,
         serverEarliestMonoMs: performance.now(),
         afterMs: options.afterMs ?? 0,
         afterLabel: options.afterLabel ?? '',
@@ -352,7 +367,10 @@ function ScheduleRetryDialog({
   const bounds = scheduleBounds(now);
   // The picker's min is the true earliest — confirmation judges against the
   // live clock anyway, so padding it would hide a currently valid minute.
-  const min = retryMinimum(nowMs, liveExtraMs, afterMs) ?? bounds.min;
+  // A null result is not "use the browser minimum": it means every floor
+  // lands beyond the 75-day window, so no pick can pass.
+  const min = retryMinimum(nowMs, liveExtraMs, afterMs);
+  const noSlot = min === null;
   const maxMs = nowMs + MAX_SCHEDULE_MS;
   // Local strings drop the offset: a ceiling inside a fall-back's second
   // occurrence parses to the earlier hour and would mark valid times out of
@@ -367,7 +385,9 @@ function ScheduleRetryDialog({
   const roundTrips =
     chosenMs !== null && toLocalInput(new Date(chosenMs)) === value;
   let error: string | null = null;
-  if (resolution.iso === null) {
+  if (noSlot) {
+    error = retryUnavailableMessage();
+  } else if (resolution.iso === null) {
     error = resolution.error;
   } else if (!roundTrips) {
     error = missingLocalTimeMessage(value);
@@ -402,7 +422,7 @@ function ScheduleRetryDialog({
           aria-label="New publish date and time"
           aria-invalid={error !== null}
           aria-describedby={error !== null ? 'reschedule-error' : undefined}
-          min={min}
+          min={min ?? bounds.min}
           max={max}
           value={value}
           onChange={(event) => onChange(event.target.value)}
