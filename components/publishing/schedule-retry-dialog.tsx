@@ -133,6 +133,7 @@ export function useScheduleRetry() {
   } | null>(null);
   const resolveRef = useRef<((value: string | null) => void) | null>(null);
   const mountedRef = useRef(true);
+  const latestFloorRef = useRef<ServerFloor | undefined>(undefined);
 
   const ask = useCallback(
     (
@@ -141,14 +142,15 @@ export function useScheduleRetry() {
       afterMs = 0,
       afterLabel = '',
       serverFloor?: ServerFloor,
-      refreshServerFloor?: () => Promise<ServerFloor>
+      refreshServerFloor?: () => Promise<ServerFloor>,
+      selection?: string
     ): Promise<string | null> => {
       return new Promise((resolve) => {
         resolveRef.current = resolve;
         // Seeded with the earliest valid slot so one click is enough.
         setPrompt({
           message,
-          value: seedScheduleValue(Date.now(), seedAfterMs, afterMs, serverFloor),
+          value: selection ?? seedScheduleValue(Date.now(), seedAfterMs, afterMs, serverFloor),
           minDelayMs: seedAfterMs,
           afterMs,
           afterLabel,
@@ -172,6 +174,7 @@ export function useScheduleRetry() {
       pending = true;
       void refreshServerFloor().then((floor) => {
         if (!active) return;
+        latestFloorRef.current = floor;
         setPrompt((current) => current?.refreshServerFloor === refreshServerFloor
           ? { ...current, serverFloor: floor }
           : current);
@@ -226,7 +229,8 @@ export function useScheduleRetry() {
       }
       let current = value;
       const afterMs = options.afterMs ?? 0;
-      let serverFloor = options.serverFloor;
+      latestFloorRef.current = options.serverFloor;
+      let selection: string | undefined;
       let message = options.message ?? staleScheduleMessage(current, noun);
       for (;;) {
         const picked = await ask(
@@ -234,16 +238,24 @@ export function useScheduleRetry() {
           options.seedAfterMs,
           afterMs,
           options.afterLabel ?? '',
-          serverFloor,
-          options.refreshServerFloor
+          latestFloorRef.current,
+          options.refreshServerFloor,
+          selection
         );
         if (picked === null) return { kind: 'cancelled' };
         if (options.refreshServerFloor) {
           try {
-            serverFloor = await options.refreshServerFloor();
+            latestFloorRef.current = await options.refreshServerFloor();
           } catch {
             if (!mountedRef.current) return { kind: 'cancelled' };
             message = 'Could not check the server time. Please try again.';
+            const chosen = resolveScheduledFor(picked);
+            const ms = chosen.iso === null ? Number.NaN : new Date(chosen.iso).getTime();
+            selection = chosen.iso !== null &&
+              ms >= serverMinimum(latestFloorRef.current) &&
+              ms > afterMs &&
+              ms - Date.now() >= MIN_SCHEDULE_MS + (options.seedAfterMs ?? 0)
+              ? picked : undefined;
             continue;
           }
           if (!mountedRef.current) return { kind: 'cancelled' };
@@ -258,7 +270,7 @@ export function useScheduleRetry() {
             chosenMs - Date.now() >= MIN_SCHEDULE_MS + options.seedAfterMs);
         const clearsAfter = !afterMs || (chosenMs !== null && chosenMs > afterMs);
         if (chosen.iso !== null && clearsLead && clearsAfter &&
-          chosenMs !== null && chosenMs >= serverMinimum(serverFloor)) {
+          chosenMs !== null && chosenMs >= serverMinimum(latestFloorRef.current)) {
           return { kind: 'ok', iso: chosen.iso, picked };
         }
         if (!mountedRef.current) return { kind: 'cancelled' };
@@ -266,6 +278,7 @@ export function useScheduleRetry() {
         // is judged again here. Reopen with a fresh seed instead of
         // discarding the prepared media over a time the dialog let through.
         current = picked;
+        selection = undefined;
       }
     },
     [ask]

@@ -404,18 +404,26 @@ export default function VideosPage() {
             serverFloor,
             refreshServerFloor: serverFloor ? async () => {
               const started = performance.now();
-              const response = await fetch('/api/videos', { cache: 'no-store' });
-              if (!response.ok) throw new Error('Could not check server time');
-              const data = await response.json() as { earliest?: unknown };
-              const fresh = typeof data.earliest === 'string'
-                ? new Date(data.earliest).getTime()
-                : Number.NaN;
-              if (!Number.isFinite(fresh)) throw new Error('Invalid server time');
-              const receivedAt = performance.now();
-              return {
-                minimumMs: fresh + uploadMs + Math.max(0, receivedAt - started),
-                receivedAt,
-              };
+              const controller = new AbortController();
+              const deadline = setTimeout(() => controller.abort(), 10_000);
+              try {
+                const response = await fetch('/api/videos', {
+                  cache: 'no-store', signal: controller.signal,
+                });
+                if (!response.ok) throw new Error('Could not check server time');
+                const data = await response.json() as { earliest?: unknown };
+                const fresh = typeof data.earliest === 'string'
+                  ? new Date(data.earliest).getTime()
+                  : Number.NaN;
+                if (!Number.isFinite(fresh)) throw new Error('Invalid server time');
+                const receivedAt = performance.now();
+                return {
+                  minimumMs: fresh + uploadMs + Math.max(0, receivedAt - started),
+                  receivedAt,
+                };
+              } finally {
+                clearTimeout(deadline);
+              }
             } : undefined,
             // The refused slot is the floor the next pick must clear.
             afterMs: afterMs || undefined,

@@ -112,12 +112,14 @@ beforeEach(() => {
 describe("GET /api/videos", () => {
   it("requires a publishing connection and returns an uncached server floor", async () => {
     const request = new Request("http://localhost/api/videos");
-    const before = Date.now();
+    const now = new Date("2026-11-18T09:00:00.000Z");
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now.getTime());
     const res = await GET(request);
+    clock.mockRestore();
     expect(requireMock).toHaveBeenCalledWith(request, "publish videos");
     expect(res.headers.get("Cache-Control")).toBe("no-store");
     const { earliest } = await res.json();
-    expect(new Date(earliest).getTime()).toBeGreaterThanOrEqual(before + 600_000);
+    expect(earliest).toBe("2026-11-18T09:10:00.000Z");
     requireMock.mockResolvedValueOnce({ response: new Response(null, { status: 401 }) });
     expect((await GET(request)).status).toBe(401);
   });

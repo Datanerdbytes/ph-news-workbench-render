@@ -546,12 +546,21 @@ describe("VideosPage composer", () => {
     fireEvent.change(screen.getByLabelText("Publish date and time"), { target: { value: "2026-11-14T08:15" } });
     fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    serverEarliest = new Date("2026-11-14T08:30").getTime();
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    fireEvent.change(screen.getByLabelText("New publish date and time"), {
+      target: { value: "2026-11-15T09:00" },
+    });
     vi.mocked(fetch).mockRejectedValueOnce(new Error("offline"));
     fireEvent.click(screen.getByRole("button", { name: /Schedule at/ }));
     expect(await screen.findByText("Could not check the server time. Please try again.")).toBeInTheDocument();
     expect(sentForms).toHaveLength(1);
+    const input = screen.getByLabelText("New publish date and time") as HTMLInputElement;
+    expect(input.value).toBe("2026-11-15T09:00");
+    expect(input.min).toBe("2026-11-14T08:30");
     fireEvent.click(screen.getByRole("button", { name: /Schedule at/ }));
     await waitFor(() => expect(sentForms).toHaveLength(2));
+    expect(sentForms[1].scheduledFor).toBe(new Date("2026-11-15T09:00").toISOString());
   });
 
   it.skipIf(process.env.TZ !== "Antarctica/Troll")("keeps a valid pre-fallback minute inside the picker range", async () => {
@@ -615,6 +624,39 @@ describe("VideosPage composer", () => {
     await act(async () => { window.dispatchEvent(new Event("focus")); });
     expect(screen.getByRole("button", { name: /Schedule at/ })).toBeDisabled();
     expect(screen.getByRole("alert")).toHaveTextContent("Pick 2026-11-14 08:34 or later");
+    expect(sentForms).toHaveLength(1);
+  });
+
+  it.each(["headers", "body"])("reopens the dialog when server time %s stalls", async (phase) => {
+    script = [{ status: 400, body: {
+      error: SCHEDULE_TOO_SOON_ERROR,
+      earliest: new Date("2026-11-14T08:25").toISOString(),
+    } }];
+    render(<VideosPage />);
+    await flush();
+    pickVideo();
+    await flush();
+    fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+    fireEvent.change(screen.getByLabelText("Publish date and time"), { target: { value: "2026-11-14T08:15" } });
+    fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    const realTimeout = globalThis.setTimeout;
+    const timer = vi.spyOn(globalThis, "setTimeout").mockImplementation(
+      (handler, delay, ...args) => realTimeout(handler, delay === 10_000 ? 0 : delay, ...args)
+    );
+    let signal: AbortSignal | undefined;
+    vi.mocked(fetch).mockImplementationOnce(async (_url, init) => {
+      signal = init?.signal as AbortSignal;
+      const stalled = () => new Promise<never>((_resolve, reject) => {
+        signal!.addEventListener("abort", () => reject(new Error("timeout")), { once: true });
+      });
+      if (phase === "headers") return stalled();
+      return { ok: true, json: stalled } as unknown as Response;
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Schedule at/ }));
+    expect(await screen.findByText("Could not check the server time. Please try again.")).toBeInTheDocument();
+    expect(signal?.aborted).toBe(true);
+    expect(timer).toHaveBeenCalledWith(expect.any(Function), 10_000);
     expect(sentForms).toHaveLength(1);
   });
 
