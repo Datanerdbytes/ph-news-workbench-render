@@ -121,6 +121,12 @@ jobs:
       - name: Unit and integration tests
         run: npx vitest run
 
+      # The retry math is written in local time; this TZ swings two hours
+      # across its DST shift (UTC+0 <-> UTC+2), so a floor or window computed
+      # in wall-clock terms fails here before it fails for a real user.
+      - name: Schedule retry across two-hour DST fallback
+        run: TZ=Antarctica/Troll npx vitest run app/videos/page.test.tsx
+
   docker:
     name: Docker build & scan
     needs: [static, test]
