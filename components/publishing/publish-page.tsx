@@ -339,6 +339,7 @@ export function FilePicker({
   onClear,
   icon,
   validate,
+  disabled = false,
 }: {
   id: string;
   accept: string;
@@ -350,6 +351,8 @@ export function FilePicker({
   icon: React.ReactNode;
   /** Pick-time validation: return a human reason to reject, or null to accept. */
   validate?: (file: File) => string | null;
+  /** Locks the picker while a submit is in flight so its file cannot change. */
+  disabled?: boolean;
 }) {
   const [pickError, setPickError] = useState<string | null>(null);
   return (
@@ -360,7 +363,7 @@ export function FilePicker({
       <div className="mt-1.5 flex items-center gap-2 rounded-lg border border-dashed border-border bg-background/60 px-2 py-1.5">
         <label
           htmlFor={id}
-          className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
         >
           <span aria-hidden>{icon}</span>
           <span className="truncate">{file ? file.name : label}</span>
@@ -369,6 +372,7 @@ export function FilePicker({
           id={id}
           type="file"
           accept={accept}
+          disabled={disabled}
           className="sr-only"
           aria-invalid={Boolean(pickError)}
           aria-describedby={pickError ? `${id}-error` : undefined}
@@ -393,7 +397,8 @@ export function FilePicker({
               setPickError(null);
               onClear();
             }}
-            className="tap-target rounded px-2 py-1 text-[11px] font-semibold text-muted-foreground transition-colors hover:text-foreground"
+            disabled={disabled}
+            className="tap-target rounded px-2 py-1 text-[11px] font-semibold text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
           >
             Clear
           </button>

@@ -210,6 +210,9 @@ function ComposeWorkspace() {
   const [scheduleError, setScheduleError] = useState('');
   const [scheduledFor, setScheduledFor] = useState(defaultScheduleValue);
   const [scheduling, setScheduling] = useState(false);
+  // True once the schedule request is on the wire: past that point Cancel
+  // cannot abort it, so the button becomes a non-cancellable waiting state.
+  const [dispatching, setDispatching] = useState(false);
   // The picker stays editable while the bake runs, so the submit-time value is
   // read from a ref instead of the closure that started schedulePost().
   const scheduledForRef = useRef(scheduledFor);
@@ -219,6 +222,15 @@ function ComposeWorkspace() {
   // Closing the picker bumps this so a bake in progress stops before it
   // prompts for a new time or posts against an abandoned schedule.
   const scheduleAttempt = useRef(0);
+  // Leaving the page abandons a bake in flight: the attempt check makes it
+  // stop before staging a blob for a post nobody can submit. The upload that
+  // already started is cleaned up by the caller's generation check.
+  useEffect(
+    () => () => {
+      scheduleAttempt.current += 1;
+    },
+    []
+  );
   const scheduleRetry = useScheduleRetry();
   const scheduleNow = useScheduleClock();
   const scheduleProblem = resolveScheduledFor(scheduledFor, scheduleNow).error;
@@ -577,6 +589,8 @@ function ComposeWorkspace() {
       }
       if (submit.picked) setScheduledFor(submit.picked);
       const when = new Date(submit.iso);
+      // The request is on the wire now; Cancel can no longer abort it.
+      setDispatching(true);
       const res = await fetch('/api/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -599,7 +613,9 @@ function ComposeWorkspace() {
           minute: '2-digit',
         }),
       });
-      setScheduleOpen(false);
+      // A picker reopened while this request was pending belongs to a newer
+      // attempt — its close must not shut that one.
+      if (attempt === scheduleAttempt.current) setScheduleOpen(false);
       // Refresh the queue so the row's status stops showing its pre-schedule state.
       await load();
     } catch (error) {
@@ -608,6 +624,7 @@ function ComposeWorkspace() {
           error instanceof Error ? error.message : 'Please try again.',
       });
     } finally {
+      setDispatching(false);
       setScheduling(false);
     }
   }
@@ -862,6 +879,8 @@ function ComposeWorkspace() {
                     <textarea
                       value={draft}
                       onChange={(event) => setDraft(event.target.value)}
+                      readOnly={scheduling}
+                      aria-busy={scheduling}
                       placeholder="Generate a draft from the source story, or start writing here…"
                       aria-label="Facebook post draft"
                       className="min-h-[260px] w-full resize-y bg-transparent text-[15px] leading-7 text-foreground outline-none placeholder:text-muted-foreground"
@@ -880,8 +899,9 @@ function ComposeWorkspace() {
                         <button
                           type="button"
                           onClick={() => applyVideoFile(null)}
+                          disabled={scheduling}
                           aria-label="Remove video"
-                          className="tap-target grid size-6 place-items-center rounded-full border border-border bg-card text-faint shadow-sm transition-colors hover:border-destructive/40 hover:text-destructive"
+                          className="tap-target grid size-6 place-items-center rounded-full border border-border bg-card text-faint shadow-sm transition-colors hover:border-destructive/40 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           <X className="size-3" aria-hidden />
                         </button>
@@ -932,8 +952,9 @@ function ComposeWorkspace() {
                             <button
                               type="button"
                               onClick={() => removeImage(index)}
+                              disabled={scheduling}
                               aria-label={`Remove attachment ${index + 1}`}
-                              className="tap-target absolute -right-1.5 -top-1.5 grid size-6 place-items-center rounded-full border border-border bg-card text-faint shadow-sm transition-colors hover:border-destructive/40 hover:text-destructive"
+                              className="tap-target absolute -right-1.5 -top-1.5 grid size-6 place-items-center rounded-full border border-border bg-card text-faint shadow-sm transition-colors hover:border-destructive/40 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
                             >
                               <X className="size-3" aria-hidden />
                             </button>
@@ -942,7 +963,9 @@ function ComposeWorkspace() {
                         <button
                           type="button"
                           onClick={() => imageInputRef.current?.click()}
-                          disabled={imagesBusy || images.length >= MAX_IMAGES}
+                          disabled={
+                            imagesBusy || scheduling || images.length >= MAX_IMAGES
+                          }
                           aria-label="Add images to the post"
                           title={`Attach up to ${MAX_IMAGES} images`}
                           className="grid size-16 place-items-center rounded-md border border-dashed border-border text-faint transition-colors hover:border-brand/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
@@ -980,6 +1003,7 @@ function ComposeWorkspace() {
                           label="Attach a video — optional"
                           hint="MP4/MOV · 1 GB max"
                           file={videoFile}
+                          disabled={scheduling}
                           onPick={applyVideoFile}
                           onClear={() => applyVideoFile(null)}
                           icon={<Upload className="size-3.5" />}
@@ -1001,7 +1025,7 @@ function ComposeWorkspace() {
                         slots={animSlots}
                         loops={animLoops}
                         values={animValues}
-                        disabled={videoStaging || baking}
+                        disabled={videoStaging || baking || scheduling}
                         onSelect={selectAnimation}
                         onLoopChange={(slot, loop) =>
                           setAnimLoops((current) => ({
@@ -1044,7 +1068,7 @@ function ComposeWorkspace() {
                             variant="outline"
                             size="sm"
                             onClick={generateDraft}
-                            disabled={drafting || !selected}
+                            disabled={drafting || scheduling || !selected}
                           >
                             <RefreshCw
                               className={cn(
@@ -1060,7 +1084,7 @@ function ComposeWorkspace() {
                             variant="brand"
                             size="sm"
                             onClick={generateDraft}
-                            disabled={drafting || !selected}
+                            disabled={drafting || scheduling || !selected}
                           >
                             <Sparkles className="size-3.5" aria-hidden />
                             {drafting ? 'Drafting…' : 'Draft post'}
@@ -1084,6 +1108,7 @@ function ComposeWorkspace() {
                             !facebook.connected ||
                             !pages.selected.length ||
                             publishing ||
+                            scheduling ||
                             baking ||
                             imagesBusy ||
                             videoStaging ||
@@ -1112,6 +1137,7 @@ function ComposeWorkspace() {
                             !draft ||
                             !facebook.connected ||
                             !pages.selected.length ||
+                            scheduling ||
                             baking ||
                             imagesBusy ||
                             videoStaging ||
@@ -1222,8 +1248,9 @@ function ComposeWorkspace() {
                               scheduleRetry.cancel();
                               setScheduleOpen(false);
                             }}
+                            disabled={dispatching}
                           >
-                            Cancel
+                            {dispatching ? 'Sending…' : 'Cancel'}
                           </Button>
                         </div>
                       )}
@@ -1291,7 +1318,12 @@ function ComposeWorkspace() {
       <AssistantChat
         draft={draft}
         storyId={selected?.id}
-        onDraftChange={setDraft}
+        // A schedule attempt already captured this draft; letting the
+        // assistant rewrite it mid-flight would publish text the user can no
+        // longer see in the request.
+        onDraftChange={(text) => {
+          if (!scheduling) setDraft(text);
+        }}
         contextLabel="story draft"
       />
     </AppFrame>
