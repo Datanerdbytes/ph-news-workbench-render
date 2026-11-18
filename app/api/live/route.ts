@@ -145,6 +145,21 @@ export async function POST(request: Request) {
   if (result.response) return result.response;
 
   const { access, connection } = result.context;
+
+  // Creating a live video needs publish_video; connections made before that
+  // scope was requested fail deep inside Graph with a generic "Permissions
+  // error" — surface the real remedy instead.
+  if (!connection.scopes.includes('publish_video')) {
+    return NextResponse.json(
+      {
+        error:
+          'Going live needs the publish_video permission. Reconnect the Page to grant it.',
+        code: 'scope_missing',
+      },
+      { status: 403 }
+    );
+  }
+
   const body = await request.json().catch(() => null);
   const title = readText(body?.title, 200);
   const description = readText(body?.description, 5000);
