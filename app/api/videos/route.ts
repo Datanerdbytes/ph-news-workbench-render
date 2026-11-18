@@ -7,7 +7,11 @@ import {
 } from '@/lib/publishing/crosspost';
 import { facebookErrorResponse } from '@/lib/publishing/errors';
 import { readPageIds, readText } from '@/lib/publishing/request';
-import { parseScheduledPublishTime } from '@/lib/publishing/schedule';
+import {
+  MIN_SCHEDULE_MS,
+  parseScheduledPublishTime,
+  SCHEDULE_TOO_SOON_ERROR,
+} from '@/lib/publishing/schedule';
 import { MAX_VIDEO_BYTES, publishPageVideo } from '@/lib/publishing/videos';
 import { notifyPublishAttemptFailure } from '@/lib/notifications';
 import { recordNativeSchedule } from '@/lib/schedule-mirror';
@@ -155,7 +159,17 @@ export async function POST(request: Request) {
 
     const schedule = parseScheduledPublishTime(parsed.fields.scheduledFor);
     if (schedule.error) {
-      return NextResponse.json({ error: schedule.error }, { status: 400 });
+      return NextResponse.json(
+        {
+          error: schedule.error,
+          // The retry prompt schedules from the browser's clock, which can
+          // trail this one; tell it the earliest slot this clock accepts.
+          ...(schedule.error === SCHEDULE_TOO_SOON_ERROR
+            ? { earliest: new Date(Date.now() + MIN_SCHEDULE_MS).toISOString() }
+            : {}),
+        },
+        { status: 400 }
+      );
     }
 
     const pageIds = readPageIds(parsed.fields.pageIds);

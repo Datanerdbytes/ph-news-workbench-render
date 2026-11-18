@@ -370,4 +370,49 @@ describe("VideosPage composer", () => {
     ]);
     expect(toast.success).toHaveBeenCalledWith("Video scheduled", expect.anything());
   });
+
+  it("seeds the retry from the server's earliest acceptable slot", async () => {
+    // The server clock runs minutes ahead: it refuses 08:15 and reports its
+    // own floor, 08:25. The next upload takes 4 minutes, so the retry must
+    // clear 08:25 + 4 min — later than the browser's own floor.
+    script = [
+      {
+        status: 400,
+        body: {
+          error: SCHEDULE_TOO_SOON_ERROR,
+          earliest: new Date("2026-11-14T08:25").toISOString(),
+        },
+        onSend: () => vi.advanceTimersByTime(4 * 60_000),
+      },
+    ];
+
+    render(<VideosPage />);
+    await flush();
+
+    pickVideo();
+    await flush();
+
+    fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+    fireEvent.change(screen.getByLabelText("Publish date and time"), {
+      target: { value: "2026-11-14T08:15" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
+
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    // Browser floor lands at 08:19; the server's floor plus the transfer at
+    // 08:29, so the seed is 08:30.
+    expect(
+      screen.getByRole("button", { name: /Schedule at 2026-11-14 08:30/ })
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Schedule at 2026-11-14 08:30/ })
+    );
+    await waitFor(() => expect(sentForms).toHaveLength(2));
+
+    expect(sentForms[1].scheduledFor).toBe(
+      new Date("2026-11-14T08:30").toISOString()
+    );
+  });
 });

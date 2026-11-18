@@ -64,22 +64,21 @@ function parsedMs(value: string): number {
 }
 
 /**
- * First local minute strictly after the refused slot. In a DST fall-back the
- * second occurrence formats to the first one's wall time, which parses an
- * hour early, so step until the parse lands after the slot; the repeated hour
- * is at most 60 minutes wide.
+ * First local minute strictly after the refused slot. A DST fall-back repeats
+ * its local range (two hours in some zones), and formatting the second
+ * occurrence parses to the first, so step until the parse lands after the
+ * slot; return null rather than a value that fails that check.
  */
-function nextMinuteValue(afterMs: number): { value: string; ms: number } {
+function nextMinuteValue(
+  afterMs: number
+): { value: string; ms: number } | null {
   const start = Math.floor(afterMs / 60_000) * 60_000 + 60_000;
-  for (let step = 0; step <= 60; step += 1) {
+  for (let step = 0; step <= 180; step += 1) {
     const value = toLocalInput(new Date(start + step * 60_000));
     const ms = parsedMs(value);
     if (ms > afterMs) return { value, ms };
   }
-  // An hour past the start is past the repeated hour, so its formatting
-  // parses to itself and always clears the slot.
-  const value = toLocalInput(new Date(start + 60 * 60_000));
-  return { value, ms: parsedMs(value) };
+  return null;
 }
 
 /**
@@ -95,7 +94,8 @@ function retryMinimum(
   const lead = minScheduleValue(now, extraMs);
   if (!afterMs) return lead;
   const next = nextMinuteValue(afterMs);
-  if (!lead) return next.value;
+  if (!lead) return next?.value ?? null;
+  if (!next) return parsedMs(lead) > afterMs ? lead : null;
   return parsedMs(lead) > next.ms ? lead : next.value;
 }
 

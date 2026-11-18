@@ -53,6 +53,8 @@ type VideosPublishResponse = {
   results?: PublishResult[];
   warning?: string;
   error?: string;
+  /** The server's earliest acceptable slot, on a too-soon rejection. */
+  earliest?: string;
 };
 
 export default function VideosPage() {
@@ -307,7 +309,7 @@ export default function VideosPage() {
       const send = (body: FormData) =>
         new Promise<
           | { response: VideosPublishResponse }
-          | { failure: { status: number; error: Error } }
+          | { failure: { status: number; error: Error; earliest?: string } }
         >((resolve) => {
           const xhr = new XMLHttpRequest();
           xhr.open('POST', '/api/videos');
@@ -332,6 +334,10 @@ export default function VideosPage() {
                   error: new Error(
                     response?.error ?? 'The video could not be published.'
                   ),
+                  earliest:
+                    typeof response?.earliest === 'string'
+                      ? response.earliest
+                      : undefined,
                 },
               });
             }
@@ -367,7 +373,7 @@ export default function VideosPage() {
           data = result.response;
           break;
         }
-        const { status, error } = result.failure;
+        const { status, error, earliest } = result.failure;
         rejected += 1;
         if (
           !scheduleOn ||
@@ -380,14 +386,23 @@ export default function VideosPage() {
         // The transfer clock is monotonic; wall-clock jumps must not fake a
         // longer (or shorter) upload than actually happened.
         const uploadMs = performance.now() - startedAt;
+        // The server's clock can run ahead of this one, so its own earliest
+        // acceptable slot wins when it is later — and because the next upload
+        // lands that much later, the measured transfer is added to it.
+        const serverEarliest = earliest
+          ? new Date(earliest).getTime()
+          : Number.NaN;
+        const afterMs = Math.max(
+          sentIso ? new Date(sentIso).getTime() : 0,
+          Number.isNaN(serverEarliest) ? 0 : serverEarliest + uploadMs
+        );
         const submit = await scheduleRetry.resolveSubmit(
           scheduledForRef.current,
           'video',
           {
             seedAfterMs: uploadMs,
-            // The refused slot is the floor the next pick must clear: the
-            // server's clock can sit ahead of this one.
-            afterMs: sentIso ? new Date(sentIso).getTime() : undefined,
+            // The refused slot is the floor the next pick must clear.
+            afterMs: afterMs || undefined,
             afterLabel: sentLabel,
             // The browser clock may still accept what the server refused.
             forcePrompt: true,
@@ -395,9 +410,6 @@ export default function VideosPage() {
           }
         );
         if (submit.kind === 'cancelled') return;
-        // Browser/server clock skew can re-confirm the value just rejected;
-        // surface the 400 rather than retrying it forever.
-        if (submit.iso === sentIso) throw error;
         scheduledForIso = submit.iso;
         if (submit.picked) {
           sentLabel = submit.picked;
