@@ -10,12 +10,35 @@ import {
   type Mock,
 } from 'vitest';
 
-vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
+const { spawnMock, fsMocks } = vi.hoisted(() => {
+  const spawnMock = vi.fn();
+  const open = vi.fn(async (filePath: string) => ({
+    fd: filePath.endsWith('-video') ? 31 : 32,
+    close: vi.fn(async () => {}),
+  }));
+  const unlink = vi.fn(async () => {});
+  return {
+    spawnMock,
+    fsMocks: {
+      open,
+      unlink,
+      constants: { O_WRONLY: 1, O_RDONLY: 0, O_NONBLOCK: 4 },
+    },
+  };
+});
 
-import { spawn } from 'node:child_process';
+vi.mock('node:child_process', () => ({ spawn: spawnMock }));
+vi.mock('node:fs/promises', () => ({
+  constants: fsMocks.constants,
+  open: fsMocks.open,
+  unlink: fsMocks.unlink,
+}));
+
 import {
   assembleRtmpsUrl,
+  buildFeederArgs,
   buildPumpArgs,
+  buildStagedPumpArgs,
   decideTranscode,
   getPumpManager,
   REDACTED_KEY,
@@ -24,8 +47,6 @@ import {
   STOP_GRACE_MS,
   type VideoStreams,
 } from './pump';
-
-const spawnMock = spawn as unknown as Mock;
 
 type FakeChild = EventEmitter & {
   stdout: EventEmitter;
@@ -53,6 +74,8 @@ function stderrLine(child: FakeChild, text: string): void {
 
 const LIVE_HLS = 'https://manifest.example/live/playlist.m3u8';
 const VOD_MP4 = 'https://cdn.example/vod.mp4';
+// DASH-only source: the staged pump pipes this through yt-dlp feeders.
+const FB_REPLAY = 'https://www.facebook.com/newsroom/videos/10153231379946729/';
 const STREAM_KEY = '1_secret-key-do-not-leak';
 const RTMPS_BASE = 'rtmps://live-api-s.facebook.com:443/rtmp/1234567890/';
 const DEST = `${RTMPS_BASE}${STREAM_KEY}`;
@@ -86,13 +109,27 @@ function buildProbeJson(probe: VideoStreams): string {
 
 /**
  * Wires the mocked spawn: ffprobe children answer immediately with the given
- * probe JSON, ffmpeg children stay silent until the test drives them.
+ * probe JSON, mkfifo children succeed immediately, ffmpeg children stay
+ * silent until the test drives them, and yt-dlp feeder children emit the
+ * spawn handshake (or an ENOENT error for the commands listed in
+ * `failingFeederCommands`) on the next tick.
  */
 function useSpawns(
-  options: { probe?: VideoStreams; probeFails?: boolean } = {}
-): { ffmpegKids: FakeChild[]; ffprobeKids: FakeChild[] } {
+  options: {
+    probe?: VideoStreams;
+    probeFails?: boolean;
+    failingFeederCommands?: string[];
+  } = {}
+): {
+  ffmpegKids: FakeChild[];
+  ffprobeKids: FakeChild[];
+  mkfifoKids: FakeChild[];
+  feederKids: FakeChild[];
+} {
   const ffmpegKids: FakeChild[] = [];
   const ffprobeKids: FakeChild[] = [];
+  const mkfifoKids: FakeChild[] = [];
+  const feederKids: FakeChild[] = [];
   spawnMock.mockImplementation((command: string) => {
     const kid = makeFakeChild();
     if (command === 'ffprobe') {
@@ -105,12 +142,38 @@ function useSpawns(
           closeChild(kid, 0);
         }
       });
-    } else {
+    } else if (command === 'mkfifo') {
+      mkfifoKids.push(kid);
+      queueMicrotask(() => closeChild(kid, 0));
+    } else if (command === 'ffmpeg') {
       ffmpegKids.push(kid);
+    } else {
+      feederKids.push(kid);
+      if (options.failingFeederCommands?.includes(command)) {
+        queueMicrotask(() => {
+          kid.emit(
+            'error',
+            Object.assign(new Error(`spawn ${command} ENOENT`), { code: 'ENOENT' })
+          );
+        });
+      } else {
+        queueMicrotask(() => kid.emit('spawn'));
+      }
     }
     return kid;
   });
-  return { ffmpegKids, ffprobeKids };
+  return { ffmpegKids, ffprobeKids, mkfifoKids, feederKids };
+}
+
+/** The fifo paths of the most recent mkfifo spawn calls, in creation order. */
+function latestFifoPaths(): { video: string; audio: string } {
+  const calls = spawnMock.mock.calls.filter(
+    ([command]) => command === 'mkfifo'
+  ) as [string, string[]][];
+  return {
+    video: calls[calls.length - 2][1][2],
+    audio: calls[calls.length - 1][1][2],
+  };
 }
 
 function ffmpegArgsList(): string[][] {
@@ -141,6 +204,8 @@ afterEach(() => {
 beforeEach(() => {
   manager.resetForTests();
   spawnMock.mockReset();
+  fsMocks.open.mockReset();
+  fsMocks.unlink.mockReset();
 });
 
 describe('decideTranscode', () => {
@@ -599,5 +664,350 @@ describe('PumpManager ffprobe path', () => {
     const args = firstFfmpegArgs();
     expect(args).toContain('libx264');
     expect(args).not.toContain('copy');
+  });
+});
+
+describe('buildStagedPumpArgs', () => {
+  it('builds -re with both fifo inputs, copies video, transcodes audio to aac and puts dest last', () => {
+    const args = buildStagedPumpArgs({
+      videoFifo: '/tmp/pump-video',
+      audioFifo: '/tmp/pump-audio',
+      dest: DEST,
+    });
+    expect(args.slice(0, 5)).toEqual([
+      '-re',
+      '-i',
+      '/tmp/pump-video',
+      '-i',
+      '/tmp/pump-audio',
+    ]);
+    expect(args[args.indexOf('-c:v') + 1]).toBe('copy');
+    expect(args[args.indexOf('-c:a') + 1]).toBe('aac');
+    expect(args).toContain('128k');
+    expect(args[args.indexOf('-f') + 1]).toBe('flv');
+    expect(args[args.length - 1]).toBe(DEST);
+    expect(args).not.toContain('libx264');
+    // Video is copied via -c:v; audio is never passed through as-is.
+    expect(args).toEqual(expect.arrayContaining(['-c:v', 'copy']));
+    expect(args.filter((arg) => arg === 'copy')).toHaveLength(1);
+  });
+});
+
+describe('buildFeederArgs', () => {
+  it('video feeder prefers H.264 at ≤1080p, writes media bytes to stdout and keeps the URL one argv element', () => {
+    const args = buildFeederArgs(FB_REPLAY, 'video');
+    expect(args[0]).toBe('-f');
+    expect(args[1]).toBe(
+      'bv*[height<=1080][vcodec^=avc1]/bv*[height<=1080]/bv*'
+    );
+    expect(args).toEqual(
+      expect.arrayContaining([
+        '--no-playlist',
+        '--js-runtimes',
+        'node',
+        '--no-part',
+        '--newline',
+      ])
+    );
+    expect(args[args.indexOf('-o') + 1]).toBe('-');
+    expect(args.at(-1)).toBe(FB_REPLAY);
+    expect(args.filter((arg) => arg === FB_REPLAY)).toHaveLength(1);
+  });
+
+  it('audio feeder selects the best audio-only format and mirrors the shared yt-dlp flags', () => {
+    const args = buildFeederArgs(FB_REPLAY, 'audio');
+    expect(args[0]).toBe('-f');
+    expect(args[1]).toBe('ba/b');
+    expect(args).toEqual(
+      expect.arrayContaining([
+        '--no-playlist',
+        '--js-runtimes',
+        'node',
+        '--no-part',
+        '--newline',
+        '-o',
+        '-',
+      ])
+    );
+    expect(args.at(-1)).toBe(FB_REPLAY);
+  });
+});
+
+describe('PumpManager staged mode', () => {
+  it('start(mode: staged) creates a 0600 fifo pair, spawns ffmpeg first, then two yt-dlp feeders whose stdout is the fifo fd — and never probes', async () => {
+    stubGateOn();
+    const { ffmpegKids, ffprobeKids, mkfifoKids, feederKids } = useSpawns();
+
+    const result = await manager.start({
+      id: 21,
+      source: FB_REPLAY,
+      dest: DEST,
+      mode: 'staged',
+    });
+
+    expect(result).toEqual({ ok: true });
+    // Staged skips ffprobe — the pipes are unprobeable.
+    expect(ffprobeKids).toHaveLength(0);
+    // mkfifo -m 0600 <path>, spawned directly (no shell), one per fifo.
+    expect(mkfifoKids).toHaveLength(2);
+    const mkfifoCalls = spawnMock.mock.calls.filter(
+      ([command]) => command === 'mkfifo'
+    ) as [string, string[]][];
+    expect(mkfifoCalls[0][1]).toEqual([
+      '-m',
+      '0600',
+      expect.stringContaining('-video'),
+    ]);
+    expect(mkfifoCalls[1][1]).toEqual([
+      '-m',
+      '0600',
+      expect.stringContaining('-audio'),
+    ]);
+
+    expect(ffmpegKids).toHaveLength(1);
+    // ffmpeg's args: paced copy of both fifos into the ingest, dest last.
+    const ffmpegArgs = firstFfmpegArgs();
+    expect(ffmpegArgs.slice(0, 5)).toEqual([
+      '-re',
+      '-i',
+      latestFifoPaths().video,
+      '-i',
+      latestFifoPaths().audio,
+    ]);
+    expect(ffmpegArgs[ffmpegArgs.length - 1]).toBe(DEST);
+
+    expect(feederKids).toHaveLength(2);
+    const feederCalls = spawnMock.mock.calls.filter(
+      ([command]) => command === 'yt-dlp'
+    ) as [string, string[], { stdio: unknown[] }][];
+    expect(feederCalls[0][0]).toBe('yt-dlp');
+    expect(feederCalls[0][1]).toEqual([
+      '-f',
+      'bv*[height<=1080][vcodec^=avc1]/bv*[height<=1080]/bv*',
+      '--no-playlist',
+      '--js-runtimes',
+      'node',
+      '--no-part',
+      '--newline',
+      '-o',
+      '-',
+      FB_REPLAY,
+    ]);
+    expect(feederCalls[1][1]).toEqual([
+      '-f',
+      'ba/b',
+      '--no-playlist',
+      '--js-runtimes',
+      'node',
+      '--no-part',
+      '--newline',
+      '-o',
+      '-',
+      FB_REPLAY,
+    ]);
+    // The feeder's stdout IS the fifo write-end fd (video 31, audio 32).
+    expect(feederCalls[0][2].stdio).toEqual(['ignore', 31, 'pipe']);
+    expect(feederCalls[1][2].stdio).toEqual(['ignore', 32, 'pipe']);
+
+    // ORDERING: ffmpeg spawns before the parent opens the write-ends, and
+    // the feeders spawn only after those opens — reordering deadlocks.
+    const spawnOrder = (callIndex: number) =>
+      spawnMock.mock.invocationCallOrder[callIndex];
+    const ffmpegCallIndex = spawnMock.mock.calls.findIndex(
+      ([command]) => command === 'ffmpeg'
+    );
+    const firstFeederIndex = spawnMock.mock.calls.findIndex(
+      ([command]) => command === 'yt-dlp'
+    );
+    expect(spawnOrder(ffmpegCallIndex)).toBeLessThan(
+      fsMocks.open.mock.invocationCallOrder[0]
+    );
+    expect(fsMocks.open.mock.invocationCallOrder[0]).toBeLessThan(
+      spawnOrder(firstFeederIndex)
+    );
+
+    // The parent closed its copies of the write-end fds after spawning.
+    expect(fsMocks.open).toHaveBeenCalledTimes(2);
+    expect(fsMocks.open).toHaveBeenCalledWith(latestFifoPaths().video, 1);
+    expect(fsMocks.open).toHaveBeenCalledWith(latestFifoPaths().audio, 1);
+
+    expect(manager.status(21).running).toBe(true);
+  });
+
+  it('falls back to the venv python -m yt_dlp when the yt-dlp binary cannot spawn', async () => {
+    stubGateOn();
+    vi.stubEnv('YTDLP_PYTHON', '/venv/python');
+    const { feederKids } = useSpawns({ failingFeederCommands: ['yt-dlp'] });
+
+    const result = await manager.start({
+      id: 21,
+      source: FB_REPLAY,
+      dest: DEST,
+      mode: 'staged',
+    });
+
+    expect(result).toEqual({ ok: true });
+    // One failed yt-dlp attempt + one python fallback per feeder.
+    const pythonCalls = spawnMock.mock.calls.filter(
+      ([command]) => command === '/venv/python'
+    ) as [string, string[], { stdio: unknown[] }][];
+    expect(pythonCalls).toHaveLength(2);
+    expect(pythonCalls[0][1].slice(0, 4)).toEqual(['-m', 'yt_dlp', '-f', 'bv*[height<=1080][vcodec^=avc1]/bv*[height<=1080]/bv*']);
+    expect(pythonCalls[0][2].stdio).toEqual(['ignore', 31, 'pipe']);
+    expect(pythonCalls[1][1].slice(0, 4)).toEqual(['-m', 'yt_dlp', '-f', 'ba/b']);
+    expect(pythonCalls[1][2].stdio).toEqual(['ignore', 32, 'pipe']);
+    expect(feederKids).toHaveLength(4);
+  });
+
+  it('a feeder dying non-zero kills the rest of the attempt, unlinks both fifos and retries with a fresh pair', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids, feederKids, mkfifoKids } = useSpawns();
+    await manager.start({
+      id: 22,
+      source: FB_REPLAY,
+      dest: DEST,
+      mode: 'staged',
+    });
+    expect(mkfifoKids).toHaveLength(2);
+    const firstFifos = latestFifoPaths();
+    expect(fsMocks.unlink).not.toHaveBeenCalled();
+
+    feederKids[0].emit('close', 1, null);
+
+    // The rest of the attempt is torn down immediately.
+    expect(ffmpegKids[0].kill).toHaveBeenCalledWith('SIGKILL');
+    expect(feederKids[1].kill).toHaveBeenCalledWith('SIGKILL');
+    expect(fsMocks.unlink).toHaveBeenCalledWith(firstFifos.video);
+    expect(fsMocks.unlink).toHaveBeenCalledWith(firstFifos.audio);
+
+    await vi.advanceTimersByTimeAsync(RETRY_BACKOFF_MS[0]);
+
+    // A full teardown + fresh spawn: new fifos, new ffmpeg, new feeders.
+    expect(mkfifoKids).toHaveLength(4);
+    const secondFifos = latestFifoPaths();
+    expect(secondFifos.video).not.toBe(firstFifos.video);
+    expect(secondFifos.audio).not.toBe(firstFifos.audio);
+    expect(ffmpegKids).toHaveLength(2);
+    expect(feederKids).toHaveLength(4);
+  });
+
+  it('a feeder bot-check on stderr fails the pump without retries and unlinks the fifos', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids, feederKids } = useSpawns();
+    await manager.start({
+      id: 23,
+      source: FB_REPLAY,
+      dest: DEST,
+      mode: 'staged',
+    });
+
+    feederKids[0].stderr.emit(
+      'data',
+      Buffer.from(
+        "ERROR: [facebook] 10153231379946729: Sign in to confirm you're not a bot.\n"
+      )
+    );
+
+    // Fatal: everything is killed, nothing retries.
+    expect(ffmpegKids[0].kill).toHaveBeenCalledWith('SIGKILL');
+    expect(feederKids[0].kill).toHaveBeenCalledWith('SIGKILL');
+    expect(feederKids[1].kill).toHaveBeenCalledWith('SIGKILL');
+    closeChild(ffmpegKids[0], null);
+    feederKids[0].emit('close', 1, null);
+    feederKids[1].emit('close', 1, null);
+    const fifos = latestFifoPaths();
+    expect(fsMocks.unlink).toHaveBeenCalledWith(fifos.video);
+    expect(fsMocks.unlink).toHaveBeenCalledWith(fifos.audio);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(ffmpegKids).toHaveLength(1);
+    expect(feederKids).toHaveLength(2);
+    const status = manager.status(23);
+    expect(status.running).toBe(false);
+    expect(status.error).toContain('video feeder');
+    expect(status.error).toContain('sign in');
+  });
+
+  it('stop signals the feeders (first) and ffmpeg with SIGINT, then SIGKILLs all after the grace period and unlinks the fifos', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids, feederKids } = useSpawns();
+    await manager.start({
+      id: 24,
+      source: FB_REPLAY,
+      dest: DEST,
+      mode: 'staged',
+    });
+
+    expect(manager.stop(24)).toEqual({ ok: true, wasRunning: true });
+    expect(feederKids[0].kill).toHaveBeenCalledWith('SIGINT');
+    expect(feederKids[1].kill).toHaveBeenCalledWith('SIGINT');
+    expect(ffmpegKids[0].kill).toHaveBeenCalledWith('SIGINT');
+    expect(feederKids[0].kill.mock.invocationCallOrder[0]).toBeLessThan(
+      ffmpegKids[0].kill.mock.invocationCallOrder[0]
+    );
+
+    await vi.advanceTimersByTimeAsync(STOP_GRACE_MS - 1);
+    expect(feederKids[0].kill).not.toHaveBeenCalledWith('SIGKILL');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(feederKids[0].kill).toHaveBeenCalledWith('SIGKILL');
+    expect(feederKids[1].kill).toHaveBeenCalledWith('SIGKILL');
+    expect(ffmpegKids[0].kill).toHaveBeenCalledWith('SIGKILL');
+
+    // ffmpeg unwinds after the SIGINT → the fifos are unlinked and the
+    // pump reports a clean user stop.
+    closeChild(ffmpegKids[0], null);
+    const fifos = latestFifoPaths();
+    expect(fsMocks.unlink).toHaveBeenCalledWith(fifos.video);
+    expect(fsMocks.unlink).toHaveBeenCalledWith(fifos.audio);
+    const status = manager.status(24);
+    expect(status.running).toBe(false);
+    expect(status.error).toBeNull();
+  });
+
+  it('a staged broadcast that ends cleanly (feeders exit 0, ffmpeg exit 0) unlinks the fifos and stops without an error', async () => {
+    stubGateOn();
+    const { ffmpegKids, feederKids } = useSpawns();
+    await manager.start({
+      id: 25,
+      source: FB_REPLAY,
+      dest: DEST,
+      mode: 'staged',
+    });
+
+    // A finished VOD: both feeders finish their side, ffmpeg EOFs and exits 0.
+    feederKids[0].emit('close', 0, null);
+    feederKids[1].emit('close', 0, null);
+    closeChild(ffmpegKids[0], 0);
+
+    const fifos = latestFifoPaths();
+    expect(fsMocks.unlink).toHaveBeenCalledWith(fifos.video);
+    expect(fsMocks.unlink).toHaveBeenCalledWith(fifos.audio);
+    expect(ffmpegKids).toHaveLength(1);
+    const status = manager.status(25);
+    expect(status.running).toBe(false);
+    expect(status.error).toBeNull();
+  });
+
+  it('an explicit mode: "direct" still probes the source and builds the old copy args', async () => {
+    stubGateOn();
+    const { ffprobeKids } = useSpawns({ probe: PROBE_COPY });
+
+    const result = await manager.start({
+      id: 26,
+      source: LIVE_HLS,
+      dest: DEST,
+      mode: 'direct',
+    });
+
+    expect(result).toEqual({ ok: true });
+    expect(ffprobeKids).toHaveLength(1);
+    const args = firstFfmpegArgs();
+    expect(args).toContain('-re');
+    expect(args[args.indexOf('-c') + 1]).toBe('copy');
+    expect(args).not.toContain('libx264');
+    expect(args[args.length - 1]).toBe(DEST);
   });
 });

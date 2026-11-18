@@ -120,7 +120,12 @@ Requirements and caveats:
 - **Only stream content you own or have licensed** — the Live Page shows the
   same hint next to the Source URL field.
 - A VOD source broadcasts once through: when the file ends, the pump stops.
-  Live sources (HLS) get reconnect flags and retry with backoff.
+  Live sources (HLS) get reconnect flags and retry with backoff. Replay VODs
+  that expose only DASH fragments (typical Facebook replays) have no playable
+  URL to preview — resolve marks them `staged`, the preview shows a neutral
+  notice instead of a player, and **Go live** broadcasts them once through
+  the pump piping (two yt-dlp feeders feeding ffmpeg), restarting any retry
+  from the beginning.
 - The pump runs inside the web service, so a deploy or restart kills it. A
   stream whose pump died that way reports **interrupted** on its card with a
   one-click restart; a dedicated background worker is the follow-up.
