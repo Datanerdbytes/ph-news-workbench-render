@@ -213,9 +213,14 @@ function ComposeWorkspace() {
   // The draft editor lock is separate from `scheduling`: cancelling a long
   // bake hands editing back immediately while the abandoned attempt unwinds.
   const [editorLocked, setEditorLocked] = useState(false);
-  // True once the schedule request is on the wire: past that point Cancel
+  // The attempt whose schedule request is on the wire: past that point Cancel
   // cannot abort it, so the button becomes a non-cancellable waiting state.
-  const [dispatching, setDispatching] = useState(false);
+  // Scoping it to the attempt stops an abandoned bake's finally from releasing
+  // a newer attempt's dispatch lock.
+  const [dispatchingAttempt, setDispatchingAttempt] = useState<number | null>(
+    null
+  );
+  const dispatching = dispatchingAttempt !== null;
   // The picker stays editable while the bake runs, so the submit-time value is
   // read from a ref instead of the closure that started schedulePost().
   const scheduledForRef = useRef(scheduledFor);
@@ -609,7 +614,7 @@ function ComposeWorkspace() {
       if (submit.picked) setScheduledFor(submit.picked);
       const when = new Date(submit.iso);
       // The request is on the wire now; Cancel can no longer abort it.
-      setDispatching(true);
+      setDispatchingAttempt(attempt);
       const res = await fetch('/api/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -651,7 +656,9 @@ function ComposeWorkspace() {
     } finally {
       // This request is done either way; only its own attempt may release the
       // composer, so a cancelled attempt cannot unlock a newer one.
-      setDispatching(false);
+      setDispatchingAttempt((current) =>
+        current === attempt ? null : current
+      );
       if (attempt === scheduleAttempt.current) {
         setEditorLocked(false);
         setScheduling(false);
@@ -1361,7 +1368,7 @@ function ComposeWorkspace() {
         // dispatch the request already carries the old text, so the reply is
         // dropped rather than showing a draft that was not published.
         onDraftChange={(text) => {
-          if (dispatchingRef.current) return;
+          if (dispatchingRef.current) return false;
           if (editorLockedRef.current) {
             scheduleAttempt.current += 1;
             scheduleRetry.cancel();
@@ -1369,6 +1376,7 @@ function ComposeWorkspace() {
             setScheduling(false);
           }
           setDraft(text);
+          return true;
         }}
         contextLabel="story draft"
       />

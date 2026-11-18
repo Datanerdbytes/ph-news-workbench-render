@@ -526,7 +526,9 @@ export default function ReelsPage() {
         // request already captured (the textarea is locked for the same
         // reason); a ref avoids the stale closure from the sending render.
         onDraftChange={(text) => {
-          if (!busyRef.current) setCaption(text);
+          if (busyRef.current) return false;
+          setCaption(text);
+          return true;
         }}
         contextLabel="reel caption (2,200 character limit)"
       />

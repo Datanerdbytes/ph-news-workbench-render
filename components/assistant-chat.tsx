@@ -27,7 +27,7 @@ export function AssistantChat({
 }: {
   draft?: string;
   storyId?: number;
-  onDraftChange?: (text: string) => void;
+  onDraftChange?: (text: string, baseDraft: string) => boolean | void;
   /** Tells the model what it is editing, e.g. "reel caption (2,200 character limit)". */
   contextLabel?: string;
   /** Blocks new requests while a submit owns the draft it would rewrite. */
@@ -43,6 +43,12 @@ export function AssistantChat({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  // The draft the edit request was based on; a reply must not overwrite a
+  // field that moved on (cleared after a submit, or edited meanwhile).
+  const draftRef = useRef(draft);
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLElement>(null);
   // The FAB stays mounted (hidden while the dialog is open) so focus can
@@ -94,6 +100,7 @@ export function AssistantChat({
   async function send(message: string) {
     const text = message.trim();
     if (!text || busy || disabled) return;
+    const baseDraft = draft;
 
     setMessages((history) => [...history, { role: 'user', content: text }]);
     setInput('');
@@ -120,12 +127,20 @@ export function AssistantChat({
           { role: 'assistant', content: data.text },
         ]);
       } else {
-        onDraftChange(data.text);
+        // A reply that outlived its draft must not refill a field the user
+        // cleared or rewrote; say so instead of reporting a phantom update.
+        const draftMoved = draftRef.current !== baseDraft;
+        const applied = draftMoved ? false : onDraftChange(data.text, baseDraft);
         setMessages((history) => [
           ...history,
           {
             role: 'assistant',
-            content: 'Draft updated. The revision is in the draft panel.',
+            content:
+              applied === false
+                ? draftMoved
+                  ? 'The field changed while the revision ran, so it was not applied. Ask again when the field is free.'
+                  : 'The revision finished while the field was busy with another submit, so it was not applied. Ask again when it is free.'
+                : 'Draft updated. The revision is in the draft panel.',
           },
         ]);
       }

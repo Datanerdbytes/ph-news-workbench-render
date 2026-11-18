@@ -88,7 +88,14 @@ export default function VideosPage() {
   }, [busy]);
   // The last slot the server refused. Cancelling the retry dialog must not
   // let the next attempt upload to the same refused time.
-  const refusedSlotRef = useRef<{ ms: number; label: string } | null>(null);
+  const refusedSlotRef = useRef<{
+    ms: number;
+    label: string;
+    /** Server-reported floor for the refused slot, if it sent one. */
+    earliestMs: number;
+    /** Monotonic reading when that floor was received. */
+    observedMonoMs: number;
+  } | null>(null);
   const [uploadPct, setUploadPct] = useState<number | null>(null);
   const [results, setResults] = useState<PublishResult[] | null>(null);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
@@ -259,9 +266,20 @@ export default function VideosPage() {
       // the composer with that time still selected, so block it here instead
       // of uploading the same video to earn the same 400.
       const refused = refusedSlotRef.current;
-      if (refused && new Date(schedule.iso).getTime() <= refused.ms) {
-        setScheduleError(retryAfterMessage(refused.label));
-        return;
+      if (refused) {
+        // A slot later than the refused one is not necessarily past the
+        // server's own floor, so keep that floor advancing monotonic.
+        const floorMs = Math.max(
+          refused.ms,
+          refused.earliestMs
+            ? refused.earliestMs +
+                (performance.now() - refused.observedMonoMs)
+            : 0
+        );
+        if (new Date(schedule.iso).getTime() <= floorMs) {
+          setScheduleError(retryAfterMessage(refused.label));
+          return;
+        }
       }
       scheduledForIso = schedule.iso;
       setScheduleError('');
@@ -412,14 +430,10 @@ export default function VideosPage() {
         }
         const { status, error, earliest } = result.failure;
         rejected += 1;
-        if (
-          !scheduleOn ||
-          status !== 400 ||
-          error.message !== SCHEDULE_TOO_SOON_ERROR ||
-          rejected > 2
-        ) {
-          throw error;
-        }
+        const tooSoon =
+          scheduleOn &&
+          status === 400 &&
+          error.message === SCHEDULE_TOO_SOON_ERROR;
         // The transfer clock is monotonic; wall-clock jumps must not fake a
         // longer (or shorter) upload than actually happened.
         const uploadMs = performance.now() - startedAt;
@@ -427,13 +441,19 @@ export default function VideosPage() {
         // hook can advance it with the monotonic clock while the dialog is
         // open — a browser clock correction must not shrink the lead.
         const serverEarliest = earliest ? new Date(earliest).getTime() : NaN;
-        // Remember the refusal across a cancelled prompt: the composer would
-        // otherwise still hold that slot and upload to it again.
-        if (sentIso) {
+        // Remember every matching refusal, even the one that spends the last
+        // automatic retry: the composer would otherwise still hold that slot
+        // and upload to it again from scratch.
+        if (tooSoon && sentIso) {
           refusedSlotRef.current = {
             ms: new Date(sentIso).getTime(),
             label: sentLabel,
+            earliestMs: Number.isNaN(serverEarliest) ? 0 : serverEarliest,
+            observedMonoMs: performance.now(),
           };
+        }
+        if (!tooSoon || rejected > 2) {
+          throw error;
         }
         // A replacement during the transfer makes this rejection stale: the
         // prompt and any picked time belong to the abandoned clip.
@@ -671,7 +691,9 @@ export default function VideosPage() {
         // retry already captured; a ref avoids the stale closure from the
         // render that sent the request.
         onDraftChange={(text) => {
-          if (!busyRef.current) setDescription(text);
+          if (busyRef.current) return false;
+          setDescription(text);
+          return true;
         }}
         contextLabel="video description (5,000 character limit)"
       />
