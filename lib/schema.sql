@@ -202,6 +202,7 @@ CREATE TABLE IF NOT EXISTS live_streams (
   secure_stream_url TEXT,
   permalink_url TEXT,
   source_url TEXT,
+  source_mode TEXT,
   pump_status TEXT NOT NULL DEFAULT 'idle',
   pump_started_at TIMESTAMPTZ,
   pump_error TEXT,

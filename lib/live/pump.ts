@@ -1,6 +1,16 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import {
+  constants as fsConstants,
+  open as fsOpen,
+  type FileHandle,
+  unlink as fsUnlink,
+} from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 import { localRuntimeEnabled } from '@/lib/reels/media';
+import { pythonExecutable } from '@/lib/live/resolve';
 
 /**
  * Codecs of the probed source, as reported by ffprobe. Mirrors the
@@ -88,6 +98,172 @@ export function buildPumpArgs({
   return args;
 }
 
+// ---------------------------------------------------------------------------
+// Staged mode — DASH-only sources (Facebook replay VODs) expose only
+// http_dash_segments fragment formats: no playable URL exists for ffmpeg to
+// open directly. Two yt-dlp feeder processes instead pipe video-only and
+// audio-only DASH through named FIFOs, and ffmpeg copies them into the
+// broadcast (proven by a local PoC against a real replay URL).
+// ---------------------------------------------------------------------------
+
+export type StagedPumpArgsOptions = {
+  videoFifo: string;
+  audioFifo: string;
+  dest: string;
+};
+
+/**
+ * Builds the ffmpeg command line for a staged attempt. The fifos are opened
+ * as plain inputs — ffmpeg blocks on their read-ends until the feeders open
+ * the write-ends (see `spawnStagedAttempt` for the ordering contract). `-re`
+ * paces both inputs at native rate, so the pipe buffer fills and backpressure
+ * throttles the feeders: the download cannot outrun the broadcast. Video is
+ * copied (Facebook DASH is avc1/H.264; vp9-only video is a documented v1
+ * limitation); audio is always transcoded to AAC, which handles opus/mp3 DASH
+ * sources. `dest` stays the last argv element for `redactStreamKey`.
+ */
+export function buildStagedPumpArgs({
+  videoFifo,
+  audioFifo,
+  dest,
+}: StagedPumpArgsOptions): string[] {
+  return [
+    '-re',
+    '-i',
+    videoFifo,
+    '-i',
+    audioFifo,
+    '-c:v',
+    'copy',
+    '-c:a',
+    'aac',
+    '-b:a',
+    '128k',
+    '-f',
+    'flv',
+    dest,
+  ];
+}
+
+export type FeederKind = 'video' | 'audio';
+
+/**
+ * yt-dlp args for one staged feeder: select the best video-only (H.264 at
+ * ≤1080p preferred, since Facebook ingest wants it) or audio-only format and
+ * write the media bytes to stdout (`-o -`). The URL is always the last argv
+ * element and stays a single element — never shell-interpolated.
+ */
+export function buildFeederArgs(url: string, kind: FeederKind): string[] {
+  const format =
+    kind === 'video'
+      ? 'bv*[height<=1080][vcodec^=avc1]/bv*[height<=1080]/bv*'
+      : 'ba/b';
+  return [
+    '-f',
+    format,
+    '--no-playlist',
+    // Mirrors download-worker.ts buildYtdlpArgs — yt-dlp needs a JS runtime
+    // for sites whose challenge code runs in JS (required for YouTube).
+    '--js-runtimes',
+    'node',
+    '--no-part',
+    '--newline',
+    '-o',
+    '-',
+    url,
+  ];
+}
+
+const YT_DLP_BIN = 'yt-dlp';
+
+/**
+ * Where to find yt-dlp for the feeders — the same lookup order as the
+ * resolver (YTDLP_PATH → yt-dlp on PATH → the dev venv interpreter).
+ */
+function feederCandidates(
+  url: string,
+  kind: FeederKind
+): { command: string; args: string[] }[] {
+  const args = buildFeederArgs(url, kind);
+  const candidates: { command: string; args: string[] }[] = [];
+  const envPath = process.env.YTDLP_PATH?.trim();
+  if (envPath) candidates.push({ command: envPath, args });
+  candidates.push({ command: YT_DLP_BIN, args });
+  candidates.push({
+    command: pythonExecutable(),
+    args: ['-m', 'yt_dlp', ...args],
+  });
+  return candidates;
+}
+
+/**
+ * stderr lines from a feeder that mean retrying can never succeed: the
+ * source demands a sign-in/bot check the server cannot complete, or the
+ * video is gone. Mirrors the resolver's failure classification
+ * (`classifyFailure` in lib/live/resolve.ts). Only yt-dlp ERROR lines are
+ * matched — a WARNING must not fail the broadcast.
+ */
+const FEEDER_FATAL_STDERR_SIGNATURES = [
+  'sign in',
+  'log in',
+  'not a bot',
+  'age-restrict',
+  'confirm your age',
+  'members-only',
+  'private video',
+  'video unavailable',
+  'no longer available',
+] as const;
+
+const MKFIFO_BIN = 'mkfifo';
+
+/** How long the write-end opens may wait for ffmpeg to show up. */
+const FIFO_OPEN_TIMEOUT_MS = 10_000;
+
+type FifoPair = { video: string; audio: string };
+
+/** Unique fifo pair under the OS temp dir — a fresh pair per attempt. */
+function stagedFifoPaths(): FifoPair {
+  const token = randomUUID();
+  return {
+    video: path.join(os.tmpdir(), `live-pump-${token}-video`),
+    audio: path.join(os.tmpdir(), `live-pump-${token}-audio`),
+  };
+}
+
+/**
+ * Creates one fifo with owner-only permissions (`-m 0600` keeps other users
+ * from reading the stream). `mkfifo` is spawned directly — the path is an
+ * argv element, never shell-interpolated.
+ */
+function makeFifo(fifoPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(MKFIFO_BIN, ['-m', '0600', fifoPath], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.once('error', (error: Error) => {
+      reject(new Error(`could not create the source pipe: ${error.message}`));
+    });
+    child.once('close', (code: number | null) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(
+        new Error(
+          `could not create the source pipe: ${
+            stderr.trim() || `mkfifo exited with code ${code}`
+          }`
+        )
+      );
+    });
+  });
+}
+
 /**
  * Reassembles the RTMPS ingest URL from the pieces the API stores:
  * `secure_stream_url` keeps the base without the key (see `splitStreamUrl` in
@@ -150,6 +326,13 @@ export type PumpStartRequest = {
   id: number | string;
   source: string;
   dest: string;
+  /**
+   * How the pump consumes `source`: 'direct' opens the playable URL with
+   * ffmpeg (ffprobe decides copy vs transcode); 'staged' pipes two yt-dlp
+   * feeder processes through fifos for DASH-only sources. Defaults to
+   * 'direct'.
+   */
+  mode?: 'direct' | 'staged';
 };
 
 export type PumpStartFailureReason =
@@ -173,18 +356,27 @@ type PumpParams = {
   source: string;
   dest: string;
   needsTranscode: boolean;
+  mode: 'direct' | 'staged';
 };
 
 type PumpProc = {
   id: string;
   params: PumpParams;
   child: ChildProcess | null;
+  /** The attempt's yt-dlp feeders (staged mode only; empty for direct). */
+  feeders: ChildProcess[];
+  /** This attempt's fifo pair, from creation until unlink (staged only). */
+  fifos: FifoPair | null;
+  /** Write-end opens still waiting for a reader — unblocked on teardown. */
+  pendingOpens: Promise<FileHandle>[];
   startedAt: Date;
   attempts: number;
   retries: number;
   starting: boolean;
   stopping: boolean;
   running: boolean;
+  /** First death (ffmpeg, feeder, setup failure) settles the attempt. */
+  attemptSettled: boolean;
   fatalError: string | null;
   lastError: string | null;
   tail: string;
@@ -217,6 +409,7 @@ export class PumpManager {
     id,
     source,
     dest,
+    mode = 'direct',
   }: PumpStartRequest): Promise<PumpStartResult> {
     const key = String(id);
     if (!localRuntimeEnabled()) {
@@ -239,18 +432,27 @@ export class PumpManager {
       };
     }
 
-    // Reserve the slot before the async probe so a second start racing the
-    // first cannot spawn a duplicate pump.
+    // Reserve the slot before the async probe/setup so a second start racing
+    // the first cannot spawn a duplicate pump.
     const proc: PumpProc = {
       id: key,
-      params: { source, dest, needsTranscode: true },
+      params: {
+        source,
+        dest,
+        needsTranscode: true,
+        mode: mode === 'staged' ? 'staged' : 'direct',
+      },
       child: null,
+      feeders: [],
+      fifos: null,
+      pendingOpens: [],
       startedAt: new Date(),
       attempts: 0,
       retries: 0,
       starting: true,
       stopping: false,
       running: false,
+      attemptSettled: false,
       fatalError: null,
       lastError: null,
       tail: '',
@@ -258,6 +460,32 @@ export class PumpManager {
       killTimer: null,
     };
     this.procs.set(key, proc);
+
+    if (proc.params.mode === 'staged') {
+      // Pipes are unprobeable — no ffprobe; the args are fixed (video copied,
+      // audio transcoded). A setup failure that no child death settled
+      // (missing mkfifo, yt-dlp unavailable) cannot self-heal, so the first
+      // attempt reports spawn_failed instead of churning through retries.
+      try {
+        await this.spawnStagedAttempt(proc);
+      } catch (error) {
+        if (proc.attemptSettled || proc.stopping) {
+          // ffmpeg died during setup — its close handler already settled the
+          // attempt into the normal retry state machine (or a stop won).
+          return { ok: true };
+        }
+        this.procs.delete(key);
+        return {
+          ok: false,
+          reason: 'spawn_failed',
+          error: redactStreamKey(
+            error instanceof Error ? error.message : String(error),
+            dest
+          ),
+        };
+      }
+      return { ok: true };
+    }
 
     // An unprobeable source defaults to transcode: Facebook rejects unknown
     // codecs, and a needless re-encode is cheaper than a dead broadcast.
@@ -284,20 +512,29 @@ export class PumpManager {
 
   stop(id: number | string): PumpStopResult {
     const proc = this.procs.get(String(id));
-    if (!proc || (!proc.running && proc.retryTimer === null)) {
-      return { ok: true, wasRunning: false };
-    }
+    if (!proc) return { ok: true, wasRunning: false };
+    // Mark stopping even while a start/setup is still in flight: the staged
+    // setup checks it between steps and aborts instead of spawning orphaned
+    // children (this also closes the direct path's probe-window race).
     proc.stopping = true;
     if (proc.retryTimer) {
       clearTimeout(proc.retryTimer);
       proc.retryTimer = null;
     }
+    if (!proc.running && !proc.starting && proc.retryTimer === null) {
+      return { ok: true, wasRunning: false };
+    }
     const child = proc.child;
-    if (child) {
-      child.kill('SIGINT');
+    const feeders = [...proc.feeders];
+    // Feeders first, then ffmpeg: yt-dlp handles SIGINT gracefully and the
+    // fifos lose their writers, letting ffmpeg unwind.
+    for (const feeder of feeders) feeder.kill('SIGINT');
+    if (child) child.kill('SIGINT');
+    if (child || feeders.length > 0) {
       proc.killTimer = setTimeout(() => {
         proc.killTimer = null;
-        if (proc.child === child) child.kill('SIGKILL');
+        for (const feeder of proc.feeders) feeder.kill('SIGKILL');
+        if (child && proc.child === child) child.kill('SIGKILL');
       }, STOP_GRACE_MS);
       proc.killTimer.unref?.();
     }
@@ -327,8 +564,11 @@ export class PumpManager {
     this.procs.clear();
   }
 
+  // ------------------------------------------------------------------ direct
+
   private spawnAttempt(proc: PumpProc): void {
     proc.attempts += 1;
+    proc.attemptSettled = false;
     if (proc.attempts === 1) {
       this.log(proc, 'started', { transcode: proc.params.needsTranscode });
     }
@@ -337,19 +577,28 @@ export class PumpManager {
     });
     proc.child = child;
     proc.running = true;
-    let settled = false;
+    this.attachFfmpegHandlers(proc, child);
+  }
 
-    const finish = (code: number | null) => {
-      if (settled) return;
-      settled = true;
+  /**
+   * Wires ffmpeg's stdout drain, the redacting stderr watchdog and the
+   * once-per-attempt close decision. Shared by direct and staged attempts —
+   * the staged cleanup (feeders, fifos) runs through `teardownStagedAttempt`,
+   * which is a no-op for direct pumps (no feeders, no fifos).
+   */
+  private attachFfmpegHandlers(proc: PumpProc, child: ChildProcess): void {
+    child.once('close', (code: number | null) => {
+      // First death of the attempt settles it; every later close is a no-op.
+      if (!this.markAttemptSettled(proc)) return;
       proc.child = null;
       proc.running = false;
       if (proc.killTimer) {
         clearTimeout(proc.killTimer);
         proc.killTimer = null;
       }
+      this.teardownStagedAttempt(proc);
       this.settleAttempt(proc, code);
-    };
+    });
 
     // Nothing reads ffmpeg's stdout; a data listener puts the pipe in
     // flowing mode so it can never backpressure the encoder.
@@ -357,13 +606,14 @@ export class PumpManager {
     child.stderr?.on('data', (chunk: Buffer) => {
       const text = redactStreamKey(chunk.toString(), proc.params.dest);
       proc.tail = (proc.tail + text).slice(-STDERR_TAIL_CHARS);
+      if (proc.attemptSettled || proc.stopping) return;
       const fatal = FATAL_STDERR_SIGNATURES.find((signature) =>
         text.toLowerCase().includes(signature.toLowerCase())
       );
-      if (fatal && !proc.stopping) {
+      if (fatal) {
         proc.fatalError = `ffmpeg reported a fatal error ("${fatal}") — giving up without retry.`;
         this.log(proc, 'fatal', { error: proc.fatalError });
-        child.kill('SIGKILL');
+        this.killAttemptProcs(proc);
       }
     });
     child.once('error', (error: Error) => {
@@ -376,7 +626,368 @@ export class PumpManager {
         proc.lastError = `could not start ffmpeg: ${text}`;
       }
     });
-    child.once('close', (code: number | null) => finish(code));
+  }
+
+  // ------------------------------------------------------------------ staged
+
+  /**
+   * One staged attempt: fresh fifo pair → ffmpeg → write-ends → feeders.
+   *
+   * ORDERING — do not reorder into a deadlock:
+   * 1. `mkfifo` creates the pair (nothing is open yet).
+   * 2. ffmpeg spawns FIRST and opens both fifo read-ends as it starts; a
+   *    read-end open blocks until a writer arrives, so ffmpeg simply waits.
+   * 3. Only then are the write-ends opened: they block until a reader
+   *    exists — which ffmpeg already provides — so they complete.
+   * 4. The feeders spawn last, each with its write-end fd as stdout.
+   * Spawning feeders before ffmpeg, or opening write-ends first, deadlocks
+   * the attempt.
+   */
+  private async spawnStagedAttempt(proc: PumpProc): Promise<void> {
+    proc.attempts += 1;
+    proc.attemptSettled = false;
+    if (proc.attempts === 1) {
+      this.log(proc, 'started', { mode: 'staged' });
+    }
+
+    // A staged retry restarts the download from zero: fresh fifos, fresh
+    // feeders — a replay VOD re-broadcasts from its beginning rather than
+    // resuming mid-stream (documented v1 limitation; acceptable for the
+    // short clips this pumps).
+    const fifos = stagedFifoPaths();
+    try {
+      await Promise.all([makeFifo(fifos.video), makeFifo(fifos.audio)]);
+    } catch (error) {
+      this.unlinkFifoPaths(fifos);
+      throw error;
+    }
+    if (proc.stopping) {
+      // stop() won the race before anything was spawned — nothing to kill.
+      this.unlinkFifoPaths(fifos);
+      proc.starting = false;
+      return;
+    }
+    proc.fifos = fifos;
+
+    let videoHandle: FileHandle | null = null;
+    let audioHandle: FileHandle | null = null;
+    try {
+      // (2) ffmpeg first — see the ordering note above.
+      const child = spawn(
+        FFMPEG_BIN,
+        buildStagedPumpArgs({
+          videoFifo: fifos.video,
+          audioFifo: fifos.audio,
+          dest: proc.params.dest,
+        }),
+        { stdio: ['ignore', 'pipe', 'pipe'] }
+      );
+      proc.child = child;
+      proc.running = true;
+      this.attachFfmpegHandlers(proc, child);
+
+      // (3) Write-ends. A blocking O_WRONLY open waits for a reader; ffmpeg
+      // is already waiting as the reader, so these complete as soon as it
+      // has opened its read-ends. Raced against ffmpeg failing to start and
+      // an overall timeout so a dead attempt never pins libuv threadpool
+      // threads on opens that can never complete (see `unblockPendingOpens`).
+      proc.pendingOpens = [
+        fsOpen(fifos.video, fsConstants.O_WRONLY),
+        fsOpen(fifos.audio, fsConstants.O_WRONLY),
+      ];
+      const openTimeout = new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => {
+          reject(
+            new Error('timed out waiting for ffmpeg to open the source pipes')
+          );
+        }, FIFO_OPEN_TIMEOUT_MS);
+        timer.unref?.();
+      });
+      [videoHandle, audioHandle] = (await Promise.race([
+        Promise.all(proc.pendingOpens),
+        this.setupFailureGuard(child),
+        openTimeout,
+      ])) as [FileHandle, FileHandle];
+      proc.pendingOpens = [];
+
+      if (proc.stopping) {
+        // stop() already signalled ffmpeg; its close settled this attempt.
+        this.teardownStagedAttempt(proc);
+        return;
+      }
+
+      // (4) Feeders last — stdout IS the fifo write-end fd. If the first
+      // candidate cannot spawn, the next one in the lookup order is tried.
+      await this.spawnFeeder(proc, 'video', videoHandle);
+      await this.spawnFeeder(proc, 'audio', audioHandle);
+      proc.starting = false;
+    } catch (error) {
+      if (!proc.attemptSettled && !proc.stopping) {
+        // Setup failed without any child death owning the attempt — tear the
+        // half-built attempt down here; the caller decides spawn_failed vs
+        // retry.
+        this.teardownStagedAttempt(proc);
+      }
+      throw error;
+    } finally {
+      // The parent's copies of the write-end fds are always closed: after a
+      // successful spawn the child holds its own dup; on failure a leaked
+      // write-end would keep ffmpeg from ever seeing EOF.
+      if (videoHandle) void videoHandle.close().catch(() => {});
+      if (audioHandle) void audioHandle.close().catch(() => {});
+    }
+  }
+
+  /** Rejects when ffmpeg cannot start or dies before the write-ends are open. */
+  private setupFailureGuard(child: ChildProcess): Promise<never> {
+    return new Promise((_, reject) => {
+      child.once('error', (error: Error) =>
+        reject(new Error(`could not start ffmpeg: ${error.message}`))
+      );
+      child.once('close', () =>
+        reject(new Error('ffmpeg exited before the source pipes were ready'))
+      );
+    });
+  }
+
+  /**
+   * Spawns one feeder with the fifo write-end fd as its stdout, trying the
+   * yt-dlp candidates in lookup order. The child is registered and watched
+   * as soon as it spawns so even an instant exit is seen.
+   */
+  private async spawnFeeder(
+    proc: PumpProc,
+    kind: FeederKind,
+    fifoHandle: FileHandle
+  ): Promise<ChildProcess> {
+    const failures: string[] = [];
+    for (const candidate of feederCandidates(proc.params.source, kind)) {
+      let child: ChildProcess;
+      try {
+        child = spawn(candidate.command, candidate.args, {
+          // stdio[1] is the fifo write-end fd: the feeder's stdout IS the
+          // pipe — yt-dlp writes the media bytes straight into it.
+          stdio: ['ignore', fifoHandle.fd, 'pipe'],
+          shell: false,
+        });
+      } catch (error) {
+        // Spawn throws only on invalid arguments; real lookup failures emit
+        // 'error' asynchronously (handled below).
+        failures.push(
+          `${candidate.command}: ${error instanceof Error ? error.message : String(error)}`
+        );
+        continue;
+      }
+      // Register the child before the handshake so even an instant exit or a
+      // stop() racing this window finds it in the attempt's process list.
+      proc.feeders.push(child);
+      this.watchFeeder(proc, child, kind);
+      const outcome = await new Promise<'spawned' | Error>((resolve) => {
+        child.once('error', (error: Error) => resolve(error));
+        child.once('spawn', () => resolve('spawned'));
+      });
+      if (outcome !== 'spawned') {
+        // This candidate never ran — drop it from the attempt's process list
+        // and let the next candidate in the lookup order take over.
+        proc.feeders = proc.feeders.filter((tracked) => tracked !== child);
+        failures.push(`${candidate.command}: ${outcome.message}`);
+        continue;
+      }
+      if (proc.attemptSettled || proc.stopping) {
+        // The child died instantly (its close settled the attempt) or the
+        // pump is being stopped — no point trying the next candidate.
+        throw new Error(`the ${kind} feeder could not start`);
+      }
+      return child;
+    }
+    throw new Error(
+      `could not start the ${kind} feeder (yt-dlp unavailable?): ${
+        failures.join('; ') || 'no candidates'
+      }`
+    );
+  }
+
+  /**
+   * Feeder lifecycle: stderr joins the redacted tail and the watchdog (a
+   * bot-check/sign-in error can never succeed on retry → fatal, no retry);
+   * a non-zero exit is treated like a crashed ffmpeg and triggers the
+   * existing retry path. An exit 0 is normal — the source finished (a VOD
+   * broadcasts once through) and ffmpeg EOFs on its own.
+   */
+  private watchFeeder(
+    proc: PumpProc,
+    child: ChildProcess,
+    kind: FeederKind
+  ): void {
+    child.stderr?.on('data', (chunk: Buffer) => {
+      const text = redactStreamKey(chunk.toString(), proc.params.dest);
+      proc.tail = (proc.tail + text).slice(-STDERR_TAIL_CHARS);
+      if (proc.attemptSettled || proc.stopping) return;
+      const fatal = this.feederFatalSignature(proc.tail);
+      if (fatal) {
+        proc.fatalError = `the ${kind} feeder reported a fatal error ("${fatal}") — giving up without retry.`;
+        this.log(proc, 'fatal', { error: proc.fatalError });
+        this.killAttemptProcs(proc);
+      }
+    });
+    child.once('error', (error: Error) => {
+      // Spawn failures are consumed by the candidate handshake in
+      // spawnFeeder; a mid-run error is only recorded — the process's own
+      // close follows.
+      if (!child.pid) return;
+      const text = redactStreamKey(error.message, proc.params.dest);
+      proc.tail = (proc.tail + text).slice(-STDERR_TAIL_CHARS);
+    });
+    child.once('close', (code: number | null) => {
+      // Never-spawned candidates (pid undefined) are the handshake's business.
+      if (!child.pid) return;
+      if (proc.attemptSettled || proc.stopping || proc.fatalError) return;
+      if (code === 0) return;
+      this.failAttempt(
+        proc,
+        `the ${kind} feeder exited with code ${code}`,
+        code ?? 1
+      );
+    });
+  }
+
+  /**
+   * Finds the first fatal feeder signature in an ERROR line of the redacted
+   * tail. Scanning the accumulated tail (not just the newest chunk) catches
+   * error lines that arrived split across pipe reads; a fatal signature
+   * settles the attempt the first time it appears, so rescanning the tail
+   * cannot double-fire.
+   */
+  private feederFatalSignature(tail: string): string | null {
+    for (const line of tail.slice(-2_000).toLowerCase().split('\n')) {
+      if (!line.trimStart().startsWith('error:')) continue;
+      const fatal = FEEDER_FATAL_STDERR_SIGNATURES.find((signature) =>
+        line.includes(signature)
+      );
+      if (fatal) return fatal;
+    }
+    return null;
+  }
+
+  /**
+   * A feeder died mid-stream: kill the rest of the attempt, then settle it
+   * through the same state machine as a crashed ffmpeg (retry with backoff,
+   * budget capped at RETRY_BACKOFF_MS.length).
+   */
+  private failAttempt(proc: PumpProc, message: string, code: number): void {
+    if (!this.markAttemptSettled(proc)) return;
+    this.log(proc, 'feeder_failed', { error: message, code });
+    proc.tail = (proc.tail + message).slice(-STDERR_TAIL_CHARS);
+    proc.running = false;
+    if (proc.killTimer) {
+      clearTimeout(proc.killTimer);
+      proc.killTimer = null;
+    }
+    // killAttemptProcs signals the still-live ffmpeg and nulls proc.child —
+    // nulling it here first would leak the process.
+    this.teardownStagedAttempt(proc);
+    this.settleAttempt(proc, code);
+  }
+
+  /**
+   * A staged retry's setup failed without any child death settling the
+   * attempt (e.g. mkfifo or yt-dlp vanished mid-retry): settle it like a
+   * crash so the retry budget still applies.
+   */
+  private failStagedSetup(proc: PumpProc, error: unknown): void {
+    if (!this.markAttemptSettled(proc)) return;
+    const text = redactStreamKey(
+      error instanceof Error ? error.message : String(error),
+      proc.params.dest
+    );
+    proc.tail = (proc.tail + text).slice(-STDERR_TAIL_CHARS);
+    proc.running = false;
+    this.teardownStagedAttempt(proc);
+    this.settleAttempt(proc, 1);
+  }
+
+  /** First caller wins the once-per-attempt terminal decision. */
+  private markAttemptSettled(proc: PumpProc): boolean {
+    if (proc.attemptSettled) return false;
+    proc.attemptSettled = true;
+    return true;
+  }
+
+  // ---------------------------------------------------------------- cleanup
+
+  /** SIGKILLs every child of the attempt — feeders first, then ffmpeg. */
+  private killAttemptProcs(proc: PumpProc): void {
+    for (const feeder of proc.feeders) feeder.kill('SIGKILL');
+    proc.feeders = [];
+    if (proc.child) {
+      proc.child.kill('SIGKILL');
+      proc.child = null;
+    }
+  }
+
+  /**
+   * Tears down one attempt's pipes and leftover children — idempotent,
+   * best-effort, and shared by every staged exit path (setup failure, close,
+   * fatal, stop). For direct pumps (no feeders, no fifos) it is a no-op.
+   */
+  private teardownStagedAttempt(proc: PumpProc): void {
+    proc.starting = false;
+    const pending = proc.pendingOpens;
+    proc.pendingOpens = [];
+    if (pending.length && proc.fifos) {
+      void this.unblockPendingOpens(proc.fifos, pending);
+    }
+    this.killAttemptProcs(proc);
+    this.unlinkFifos(proc);
+  }
+
+  /**
+   * A blocking O_WRONLY fifo open pins a libuv threadpool thread until a
+   * reader appears. If an attempt dies before ffmpeg opened its read-ends,
+   * the still-pending parent opens would never complete — open non-blocking
+   * read-ends here (O_NONBLOCK read-opens never wait) to pair with them,
+   * waking both sides, then close everything.
+   */
+  private async unblockPendingOpens(
+    fifos: FifoPair,
+    pending: Promise<FileHandle>[]
+  ): Promise<void> {
+    await Promise.allSettled([
+      fsOpen(fifos.video, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK)
+        .then((handle) => handle.close())
+        .catch(() => {
+          // best-effort — ignore
+        }),
+      fsOpen(fifos.audio, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK)
+        .then((handle) => handle.close())
+        .catch(() => {
+          // best-effort — ignore
+        }),
+      ...pending.map((opening) =>
+        opening
+          .then((handle) => handle.close())
+          .catch(() => {
+            // best-effort — ignore
+          })
+      ),
+    ]);
+  }
+
+  /** Unlinks both fifo paths (best-effort, errors ignored) and forgets them. */
+  private unlinkFifos(proc: PumpProc): void {
+    const fifos = proc.fifos;
+    proc.fifos = null;
+    if (fifos) this.unlinkFifoPaths(fifos);
+  }
+
+  private unlinkFifoPaths(fifos: FifoPair): void {
+    // Best-effort — the fifos may already be gone; nothing here is fatal.
+    void fsUnlink(fifos.video).catch(() => {
+      // ignore
+    });
+    void fsUnlink(fifos.audio).catch(() => {
+      // ignore
+    });
   }
 
   private settleAttempt(proc: PumpProc, code: number | null): void {
@@ -411,6 +1022,15 @@ export class PumpManager {
     proc.retries += 1;
     proc.retryTimer = setTimeout(() => {
       proc.retryTimer = null;
+      if (proc.params.mode === 'staged') {
+        // Staged retry: the previous attempt was fully torn down at settle
+        // time; this creates fresh fifos and restarts the download from zero.
+        this.spawnStagedAttempt(proc).catch((error) => {
+          if (proc.stopping || proc.attemptSettled) return;
+          this.failStagedSetup(proc, error);
+        });
+        return;
+      }
       this.spawnAttempt(proc);
     }, delay);
     proc.retryTimer.unref?.();

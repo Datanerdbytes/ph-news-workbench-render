@@ -3,11 +3,21 @@ import type { ChildProcess } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 
-/** What POST /api/live/resolve hands back to the Live Page preview. */
+/**
+ * What POST /api/live/resolve hands back to the Live Page preview.
+ *
+ * `mode: 'direct'` — `playableUrl` is a stream a browser or ffmpeg can open
+ * as-is. `mode: 'staged'` — yt-dlp found no playable URL at all (DASH-only
+ * sources such as Facebook replay VODs expose only http_dash_segments
+ * fragment lists), but the pump can still broadcast it by piping
+ * video-only/audio-only feeds through yt-dlp (see staged mode in
+ * lib/live/pump.ts): `playableUrl` is null and there is no preview.
+ */
 export type ResolvedVideo = {
   title: string;
   isLive: boolean;
-  playableUrl: string;
+  playableUrl: string | null;
+  mode: 'direct' | 'staged';
   extractor: string;
 };
 
@@ -56,9 +66,10 @@ type YtdlpRun = { code: number | null; stdout: string; stderr: string };
 
 /**
  * Dev machines run yt-dlp inside the YT_DLP venv — the same companion setup
- * download-worker.ts uses. YTDLP_PYTHON overrides the interpreter.
+ * download-worker.ts uses. YTDLP_PYTHON overrides the interpreter. Shared
+ * with the staged pump's feeder lookup (lib/live/pump.ts).
  */
-function pythonExecutable(): string {
+export function pythonExecutable(): string {
   if (process.env.YTDLP_PYTHON) return process.env.YTDLP_PYTHON;
   const suffix = process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python';
   return path.join(os.homedir(), 'python-project', 'Projects', 'YT_DLP', 'my_venv', suffix);
@@ -70,7 +81,10 @@ function pythonExecutable(): string {
  * always the last argv element and stays a single element.
  */
 function ytDlpCandidates(url: string): { command: string; args: string[] }[] {
-  const args = ['-J', '--no-playlist', url];
+  // `--js-runtimes node` mirrors download-worker.ts buildYtdlpArgs — recent
+  // yt-dlp needs a JS runtime for sites whose challenge code runs in JS
+  // (required for YouTube).
+  const args = ['-J', '--no-playlist', '--js-runtimes', 'node', url];
   const candidates: { command: string; args: string[] }[] = [];
   const envPath = process.env.YTDLP_PATH?.trim();
   if (envPath) candidates.push({ command: envPath, args });
@@ -220,7 +234,9 @@ function classifyFailure(stderr: string): ResolveError {
 /**
  * Resolves a public video link to the stream address behind it by running
  * `yt-dlp -J --no-playlist <url>`. Live streams resolve to their HLS
- * manifest, VODs to a progressive mp4 (falling back to a manifest).
+ * manifest, VODs to a progressive mp4 (falling back to a manifest). A source
+ * with no playable URL at all classifies as `staged` — still a success, the
+ * pump pipes it through yt-dlp feeders.
  */
 export async function resolveVideoUrl(url: string): Promise<ResolvedVideo> {
   const target = typeof url === 'string' ? url.trim() : '';
@@ -268,26 +284,32 @@ export async function resolveVideoUrl(url: string): Promise<ResolvedVideo> {
     throw new ResolveError('failed', 'The video link could not be resolved.');
   }
 
+  const title =
+    typeof info.title === 'string' && info.title.trim()
+      ? info.title
+      : 'Untitled video';
+  const extractor =
+    typeof info.extractor_key === 'string' && info.extractor_key
+      ? info.extractor_key
+      : typeof info.extractor === 'string' && info.extractor
+        ? info.extractor
+        : 'unknown';
+
   const playableUrl = pickPlayableUrl(info);
   if (!playableUrl) {
-    throw new ResolveError(
-      'failed',
-      'yt-dlp could not find a playable stream for this link.'
-    );
+    // No progressive/HLS format, no manifest_url, no top-level url — the
+    // DASH-only shape Facebook replay VODs return. Not an error: the pump
+    // can pipe these through two yt-dlp feeder processes (staged mode), so
+    // we hand back a successful classification instead of failing. The
+    // preview is unavailable for such sources; going live still works.
+    return { title, isLive: info.is_live === true, playableUrl: null, mode: 'staged', extractor };
   }
 
   return {
-    title:
-      typeof info.title === 'string' && info.title.trim()
-        ? info.title
-        : 'Untitled video',
+    title,
     isLive: info.is_live === true,
     playableUrl,
-    extractor:
-      typeof info.extractor_key === 'string' && info.extractor_key
-        ? info.extractor_key
-        : typeof info.extractor === 'string' && info.extractor
-          ? info.extractor
-          : 'unknown',
+    mode: 'direct',
+    extractor,
   };
 }

@@ -5,6 +5,7 @@ import { getPumpManager } from '@/lib/live/pump';
 import {
   buildIngestUrl,
   parsePumpAction,
+  parseSourceMode,
   PumpStateError,
 } from '@/lib/live/pump-state';
 import { requirePublishingConnection } from '@/lib/publishing/connection';
@@ -14,6 +15,7 @@ export const dynamic = 'force-dynamic';
 type PumpRow = {
   id: number;
   source_url: string | null;
+  source_mode: string | null;
   secure_stream_url: string | null;
   stream_key: string | null;
   pump_started_at: string | Date | null;
@@ -21,7 +23,8 @@ type PumpRow = {
 
 async function findStream(workspaceId: string, id: string) {
   const rows = (await sql`
-    SELECT id, source_url, secure_stream_url, stream_key, pump_started_at
+    SELECT id, source_url, source_mode, secure_stream_url, stream_key,
+           pump_started_at
     FROM live_streams
     WHERE workspace_id = ${workspaceId}
       AND (facebook_video_id = ${id} OR id::text = ${id})
@@ -73,6 +76,10 @@ async function startPump(workspaceId: string, stream: PumpRow) {
   const outcome = await manager.start({
     id: stream.id,
     source: stream.source_url,
+    // How the pump consumes the source: 'staged' rows (DASH-only sources,
+    // no playable URL) are piped through yt-dlp feeders, everything else —
+    // including legacy rows predating the column — takes the ffprobe path.
+    mode: parseSourceMode(stream.source_mode) ?? 'direct',
     // Never logged or returned — the manager redacts it everywhere it lands.
     dest: ingestUrl,
   });

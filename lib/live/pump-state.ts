@@ -127,3 +127,21 @@ export function parsePumpAction(body: unknown): 'start' | 'stop' | null {
   if (action === 'start' || action === 'stop') return action;
   return null;
 }
+
+/**
+ * Normalizes the source mode of a live stream — how the pump consumes it:
+ *
+ * - `'direct'` — the pump opens the stored playable URL with ffmpeg
+ *   (ffprobe decides copy vs transcode).
+ * - `'staged'` — no playable URL exists (DASH-only sources such as Facebook
+ *   replay VODs); the pump pipes two yt-dlp feeder processes through FIFOs.
+ * - `null` — absent or unrecognized value: legacy rows predate the column,
+ *   and `POST /api/live` stores null when the client sends no mode. The pump
+ *   route falls back to `'direct'` for null.
+ *
+ * Only the exact strings are accepted; the create route rejects anything
+ * else before persisting.
+ */
+export function parseSourceMode(value: unknown): 'direct' | 'staged' | null {
+  return value === 'direct' || value === 'staged' ? value : null;
+}

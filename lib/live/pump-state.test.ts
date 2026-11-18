@@ -4,6 +4,7 @@ import {
   buildIngestUrl,
   mapPumpStatus,
   parsePumpAction,
+  parseSourceMode,
   pumpProcessRecord,
   PumpStateError,
 } from './pump-state';
@@ -159,5 +160,35 @@ describe('parsePumpAction', () => {
 
   it("'start' (string body) → null", () => {
     expect(parsePumpAction('start')).toBeNull();
+  });
+});
+
+describe('parseSourceMode', () => {
+  it("'direct' → 'direct'", () => {
+    expect(parseSourceMode('direct')).toBe('direct');
+  });
+
+  it("'staged' → 'staged'", () => {
+    expect(parseSourceMode('staged')).toBe('staged');
+  });
+
+  it('null (legacy row, mode never stored) → null', () => {
+    expect(parseSourceMode(null)).toBeNull();
+  });
+
+  it('undefined (column missing from the row) → null', () => {
+    expect(parseSourceMode(undefined)).toBeNull();
+  });
+
+  it("'DIRECT' (wrong case) → null", () => {
+    expect(parseSourceMode('DIRECT')).toBeNull();
+  });
+
+  it("'pipeline' (unrecognized mode) → null", () => {
+    expect(parseSourceMode('pipeline')).toBeNull();
+  });
+
+  it('42 (not a string) → null', () => {
+    expect(parseSourceMode(42)).toBeNull();
   });
 });

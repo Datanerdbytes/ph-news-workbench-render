@@ -180,6 +180,7 @@ const requiredColumns = [
   ["facebook_connections", "workspace_id"],
   ["workspaces", "ai_model"],
   ["live_streams", "source_url"],
+  ["live_streams", "source_mode"],
   ["live_streams", "pump_status"],
   ["live_streams", "pump_started_at"],
   ["live_streams", "pump_error"],

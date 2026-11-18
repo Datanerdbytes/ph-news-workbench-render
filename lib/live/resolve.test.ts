@@ -68,6 +68,36 @@ const VOD_FIXTURE = JSON.stringify({
   ],
 });
 
+// Facebook replay VODs return ONLY http_dash_segments fragment formats — no
+// progressive file, no HLS manifest, no manifest_url, no top-level url.
+// Nothing can be played directly, but the pump can pipe both feeds, so the
+// resolver must classify this as `staged`, not as a failure.
+const DASH_ONLY_FIXTURE = JSON.stringify({
+  id: 'fb-replay',
+  title: 'Press briefing — replay',
+  is_live: false,
+  extractor: 'facebook',
+  extractor_key: 'Facebook',
+  formats: [
+    {
+      format_id: 'dash-video-3928',
+      url: 'https://scontent.example/405556_video_dashinit.mp4',
+      protocol: 'http_dash_segments',
+      vcodec: 'avc1.640029',
+      acodec: 'none',
+      ext: 'mp4',
+    },
+    {
+      format_id: 'dash-audio-141',
+      url: 'https://scontent.example/205299_audio_dashinit.mp4',
+      protocol: 'http_dash_segments',
+      vcodec: 'none',
+      acodec: 'mp4a.40.5',
+      ext: 'm4a',
+    },
+  ],
+});
+
 type FakeChild = EventEmitter & {
   stdout: EventEmitter;
   stderr: EventEmitter;
@@ -137,7 +167,9 @@ describe('resolveVideoUrl', () => {
     ];
     expect(options.shell).toBe(false);
     expect(Array.isArray(args)).toBe(true);
-    expect(args).toEqual(expect.arrayContaining(['-J', '--no-playlist']));
+    expect(args).toEqual(
+      expect.arrayContaining(['-J', '--no-playlist', '--js-runtimes', 'node'])
+    );
     expect(args.at(-1)).toBe(VOD_URL);
     expect(args.filter((arg) => arg === VOD_URL)).toHaveLength(1);
     expect(command).not.toContain(VOD_URL);
@@ -153,6 +185,7 @@ describe('resolveVideoUrl', () => {
       title: 'City Council — Live',
       isLive: true,
       playableUrl: 'https://manifest.example/live.m3u8',
+      mode: 'direct',
       extractor: 'Youtube',
     });
   });
@@ -169,7 +202,23 @@ describe('resolveVideoUrl', () => {
       title: 'Me at the zoo',
       isLive: false,
       playableUrl: 'https://cdn.example/videoplayback.mp4',
+      mode: 'direct',
       extractor: 'youtube',
+    });
+  });
+
+  it('classifies a DASH-segments-only payload (Facebook replay shape) as staged with playableUrl null and no throw', async () => {
+    const child = makeChild();
+    spawnMock.mockReturnValue(child);
+    const pending = resolveVideoUrl(VOD_URL);
+    succeedWith(child, DASH_ONLY_FIXTURE);
+
+    await expect(pending).resolves.toEqual({
+      title: 'Press briefing — replay',
+      isLive: false,
+      playableUrl: null,
+      mode: 'staged',
+      extractor: 'Facebook',
     });
   });
 
@@ -240,15 +289,19 @@ describe('resolveVideoUrl', () => {
     }
   });
 
-  it('parses a yt-dlp payload with no usable stream URL as ResolveError failed', async () => {
+  it('parses a yt-dlp payload with no usable stream URL as a staged success, not a failure', async () => {
     const child = makeChild();
     spawnMock.mockReturnValue(child);
     const pending = resolveVideoUrl(VOD_URL);
     succeedWith(child, JSON.stringify({ id: 'x', title: 'Empty', is_live: false }));
 
-    const error = (await rejectionOf(pending)) as ResolveError;
-    expect(error).toBeInstanceOf(ResolveError);
-    expect(error.code).toBe('failed');
+    await expect(pending).resolves.toEqual({
+      title: 'Empty',
+      isLive: false,
+      playableUrl: null,
+      mode: 'staged',
+      extractor: 'unknown',
+    });
   });
 
   describe('binary lookup', () => {
@@ -291,7 +344,14 @@ describe('resolveVideoUrl', () => {
       expect(spawnMock).toHaveBeenCalledTimes(2);
       const [command, args] = spawnMock.mock.calls[1] as [string, string[]];
       expect(command).toBe('/venv/python');
-      expect(args.slice(0, 4)).toEqual(['-m', 'yt_dlp', '-J', '--no-playlist']);
+      expect(args.slice(0, 6)).toEqual([
+        '-m',
+        'yt_dlp',
+        '-J',
+        '--no-playlist',
+        '--js-runtimes',
+        'node',
+      ]);
       expect(args.at(-1)).toBe(VOD_URL);
     });
   });
