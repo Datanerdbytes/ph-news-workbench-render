@@ -216,6 +216,9 @@ function ComposeWorkspace() {
   useEffect(() => {
     scheduledForRef.current = scheduledFor;
   }, [scheduledFor]);
+  // Closing the picker bumps this so a bake in progress stops before it
+  // prompts for a new time or posts against an abandoned schedule.
+  const scheduleAttempt = useRef(0);
   const scheduleRetry = useScheduleRetry();
   const scheduleNow = useScheduleClock();
   const scheduleProblem = resolveScheduledFor(scheduledFor, scheduleNow).error;
@@ -531,8 +534,23 @@ function ComposeWorkspace() {
     }
     setScheduleError('');
     setScheduling(true);
+    const attempt = ++scheduleAttempt.current;
     try {
       const finalVideoUrl = videoUrl ? await animatedVideoUrl() : null;
+      // The animated bake re-stages a fresh blob; with the schedule abandoned,
+      // no request will consume it — remove it instead of leaving it orphaned
+      // in the store.
+      const discardBake = () => {
+        if (finalVideoUrl && finalVideoUrl !== videoUrl) {
+          deleteStagedBlob(finalVideoUrl);
+        }
+      };
+      // Cancelled while the bake ran: no prompt, no post, and the abandoned
+      // bake blob is cleaned up.
+      if (attempt !== scheduleAttempt.current) {
+        discardBake();
+        return;
+      }
       // The bake can run for the clip's full length; re-check against the
       // submit-time clock so the slot is still valid when the request lands.
       // On a miss, ask for a new time here — the staged/baked video is reused,
@@ -542,12 +560,11 @@ function ComposeWorkspace() {
         'post'
       );
       if (submit.kind === 'cancelled') {
-        // The animated bake re-stages a fresh blob; with the schedule
-        // abandoned, no request will consume it — remove it instead of
-        // leaving it orphaned in the store.
-        if (finalVideoUrl && finalVideoUrl !== videoUrl) {
-          deleteStagedBlob(finalVideoUrl);
-        }
+        discardBake();
+        return;
+      }
+      if (attempt !== scheduleAttempt.current) {
+        discardBake();
         return;
       }
       if (submit.picked) setScheduledFor(submit.picked);
@@ -1074,7 +1091,12 @@ function ComposeWorkspace() {
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => setScheduleOpen((open) => !open)}
+                          onClick={() => {
+                            // Closing the picker abandons any bake still
+                            // running for it.
+                            if (scheduleOpen) scheduleAttempt.current += 1;
+                            setScheduleOpen((open) => !open);
+                          }}
                           disabled={
                             !draft ||
                             !facebook.connected ||
@@ -1182,7 +1204,12 @@ function ComposeWorkspace() {
                           <Button
                             size="sm"
                             variant="ghost"
-                            onClick={() => setScheduleOpen(false)}
+                            onClick={() => {
+                              // Abandons a bake still in progress instead of
+                              // leaving it to prompt or post after Cancel.
+                              scheduleAttempt.current += 1;
+                              setScheduleOpen(false);
+                            }}
                           >
                             Cancel
                           </Button>

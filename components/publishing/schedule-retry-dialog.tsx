@@ -47,20 +47,21 @@ function parsedMs(value: string): number {
 /**
  * Earliest pickable value in the picker's local format that clears every
  * bound: the 10-minute floor plus the expected wait, the slot the server
- * refused, and the 75-day ceiling — padded a further minute so the choice
- * survives the dialog's clock ticks. Local formatting drops the offset, so a
+ * refused, and the 75-day ceiling. Local formatting drops the offset, so a
  * DST fall-back's second occurrence parses up to two hours early; scan
- * forward a minute at a time until the parsed value clears the target. A
- * wait with no slot yields null rather than a candidate that fails a check.
+ * forward a minute at a time until the parsed value clears the target. The
+ * optional pad pushes the target past the dialog's next clock tick. A window
+ * too narrow for a bound yields null rather than a candidate that fails it.
  */
 function retryMinimum(
   now: number,
   extraMs: number,
-  afterMs: number
+  afterMs: number,
+  padMs = 0
 ): string | null {
   const target = Math.max(
-    now + MIN_SCHEDULE_MS + extraMs + 60_000,
-    afterMs ? afterMs + 60_000 : 0
+    now + MIN_SCHEDULE_MS + extraMs + padMs,
+    afterMs ? afterMs + 1 : 0
   );
   const max = now + MAX_SCHEDULE_MS;
   for (let step = 0; step <= 180; step += 1) {
@@ -71,13 +72,20 @@ function retryMinimum(
   return null;
 }
 
-/** The slot the prompt opens with — '' only when no slot can clear every bound. */
+/**
+ * The slot the prompt opens with: padded a minute so it survives the dialog's
+ * clock ticks, or the true earliest when the window is too narrow for that.
+ */
 function seedScheduleValue(
   now: number,
   extraMs: number,
   afterMs: number
 ): string {
-  return retryMinimum(now, extraMs, afterMs) ?? '';
+  return (
+    retryMinimum(now, extraMs, afterMs, 60_000) ??
+    retryMinimum(now, extraMs, afterMs) ??
+    ''
+  );
 }
 
 /** The server refused that slot; re-offering it just earns another 400. */
@@ -275,7 +283,15 @@ function ScheduleRetryDialog({
   const now = useScheduleClock();
   const inputRef = useRef<HTMLInputElement>(null);
   const bounds = scheduleBounds(now);
+  // The picker's min is the true earliest — confirmation judges against the
+  // live clock anyway, so padding it would hide a currently valid minute.
   const min = retryMinimum(now.getTime(), extraMs, afterMs) ?? bounds.min;
+  const maxMs = now.getTime() + MAX_SCHEDULE_MS;
+  // Local strings drop the offset: a ceiling inside a fall-back's second
+  // occurrence parses to the earlier hour and would mark valid times out of
+  // range, so the native cap is dropped when it cannot round-trip.
+  const max =
+    Math.abs(parsedMs(bounds.max) - maxMs) < 60_000 ? bounds.max : undefined;
   const resolution = resolveScheduledFor(value, now);
   const chosenMs =
     resolution.iso === null ? null : new Date(resolution.iso).getTime();
@@ -314,7 +330,7 @@ function ScheduleRetryDialog({
           aria-invalid={error !== null}
           aria-describedby={error !== null ? 'reschedule-error' : undefined}
           min={min}
-          max={bounds.max}
+          max={max}
           value={value}
           onChange={(event) => onChange(event.target.value)}
           className={`${inputClass} mt-1.5`}

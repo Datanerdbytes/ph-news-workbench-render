@@ -205,6 +205,10 @@ export default function ReelsPage() {
     setBusy(true);
     setResults(null);
     setRenderPct(null);
+    // The picker stays live during the bake and upload; a replacement must
+    // abandon this attempt instead of posting the old clip and then clearing
+    // the new one from the editor.
+    const generation = pickGeneration.current;
     try {
       let uploadFile = file;
       // Bake the attached animations into the footage first: record the video
@@ -244,6 +248,7 @@ export default function ReelsPage() {
         }
       }
       setRenderPct(null);
+      if (generation !== pickGeneration.current) return;
       // The bake records the clip in real time, so the slot can lapse before
       // the GB-scale staging upload even starts. Check here so a stale slot
       // costs nothing; the check after staging still guards the upload window.
@@ -275,6 +280,12 @@ export default function ReelsPage() {
         }
       );
       setUploadPct(null);
+      // A replacement during the upload keeps its own draft: drop this
+      // attempt's staged blob instead of prompting for a time and posting it.
+      if (generation !== pickGeneration.current) {
+        deleteStagedBlob(staged.url);
+        return;
+      }
       // The upload can take minutes, so the slot checked above can still fall
       // inside Facebook's 10-minute window by the time the reel is staged.
       // Re-check against the submit-time clock; on a miss, ask for a new time
@@ -317,9 +328,12 @@ export default function ReelsPage() {
         scheduleOn ? 'Reel scheduled' : 'Reel published',
         { description: data.warning }
       );
-      setFile(null);
-      setCaption('');
-      setScheduleOn(false);
+      // Only clear the composer if it still holds the reel that was posted.
+      if (generation === pickGeneration.current) {
+        setFile(null);
+        setCaption('');
+        setScheduleOn(false);
+      }
     } catch (error) {
       toast.error('Reel upload failed', {
         description:

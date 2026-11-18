@@ -275,6 +275,45 @@ describe("VideosPage composer", () => {
     expect(bakeMock).toHaveBeenCalledTimes(1);
   });
 
+  it("drops a publish whose clip was replaced while the bake ran", async () => {
+    // A replacement picked mid-bake makes the submitted draft stale: the
+    // composer must not prompt, upload, or clear the new clip's fields.
+    let finishBake!: (file: File) => void;
+    bakeMock.mockImplementation(
+      () =>
+        new Promise<File>((resolve) => {
+          finishBake = resolve;
+        })
+    );
+
+    render(<VideosPage />);
+    await flush();
+
+    pickVideo();
+    await flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "Attach animation" }));
+    fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+    fireEvent.change(screen.getByLabelText("Publish date and time"), {
+      target: { value: "2026-11-14T08:15" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
+    await flush();
+    expect(bakeMock).toHaveBeenCalledTimes(1);
+
+    pickVideo();
+    await flush();
+
+    await act(async () => {
+      finishBake(new File(["baked"], "baked.mp4", { type: "video/mp4" }));
+    });
+    await flush();
+
+    expect(sentForms).toHaveLength(0);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
   it("reopens the prompt when the server rejects the time after a slow upload", async () => {
     // The transfer itself takes 6 minutes; the server checks the schedule
     // only once the body has arrived, so the 08:15 slot is 9 minutes out.

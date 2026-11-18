@@ -61,6 +61,9 @@ export default function VideosPage() {
   const pages = useManagedPages();
   const [file, setFile] = useState<File | null>(null);
   const previewVideoRef = useRef<HTMLVideoElement>(null);
+  // Bumped by every file pick/clear so an in-flight publish can tell its clip
+  // from whatever the composer holds now.
+  const fileGeneration = useRef(0);
   const [thumbnail, setThumbnail] = useState<File | null>(null);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -125,6 +128,9 @@ export default function VideosPage() {
   }
 
   function applyVideoFile(next: File | null) {
+    // Every pick or clear invalidates an in-flight publish: it must not retry
+    // under a replaced clip, nor clear fields the user has since re-filled.
+    fileGeneration.current += 1;
     if (fileUrl) URL.revokeObjectURL(fileUrl);
     setFile(next);
     setFileUrl(next ? URL.createObjectURL(next) : null);
@@ -243,6 +249,7 @@ export default function VideosPage() {
     setBusy(true);
     setResults(null);
     setUploadPct(0);
+    const generation = fileGeneration.current;
     try {
       // Bake the attached animations into the footage first — the browser
       // plays the video once, records the composited canvas and the result is
@@ -276,6 +283,10 @@ export default function VideosPage() {
           setBakePct(null);
         }
       }
+
+      // A replacement picked during the bake makes this upload stale: the
+      // fields now describe a different clip, so stop before prompting.
+      if (generation !== fileGeneration.current) return;
 
       // The bake can run for the clip's full length; re-check against the
       // submit-time clock so the slot is still valid when the request lands.
@@ -364,6 +375,8 @@ export default function VideosPage() {
       // relabel the rejection message for a request already sent.
       let sentLabel = scheduledForRef.current;
       while (!data) {
+        // Never resend a clip the user has already replaced.
+        if (generation !== fileGeneration.current) return;
         if (scheduledForIso) form.set('scheduledFor', scheduledForIso);
         setUploadPct(0);
         const sentIso = scheduledForIso;
@@ -420,6 +433,7 @@ export default function VideosPage() {
       toast.success(scheduleOn ? 'Video scheduled' : 'Video published', {
         description: data.warning,
       });
+      if (generation !== fileGeneration.current) return;
       applyVideoFile(null);
       setThumbnail(null);
       setTitle('');
