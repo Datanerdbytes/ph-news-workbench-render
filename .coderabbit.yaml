@@ -12,10 +12,11 @@ reviews:
   # "chill" keeps the review focused on meaningful issues instead of nitpicks.
   profile: chill
   # Informational only: CodeRabbit never issues approvals or
-  # request-changes reviews, so its review can never gate a merge. Reviews
-  # and comments still run on every push alongside the required CI checks;
-  # what blocks a merge is those checks alone. (The old gate — CodeRabbit's
-  # approval satisfying the 1-approval branch rule — was removed on purpose.)
+  # request-changes reviews. Reviews run from the local pre-push hook
+  # (`.husky/pre-push`) through the CodeRabbit CLI, which reads this file;
+  # what blocks a merge is the required CI checks alone. (The old gate —
+  # CodeRabbit's approval satisfying the 1-approval branch rule — was removed
+  # on purpose.)
   auto_approvals:
     enabled: false
   # A review that errors out fails the CodeRabbit check instead of passing it,
