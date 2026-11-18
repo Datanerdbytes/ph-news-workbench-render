@@ -12,6 +12,7 @@ async function migrate() {
   await sql`
     ALTER TABLE live_streams
       ADD COLUMN IF NOT EXISTS source_url TEXT,
+      ADD COLUMN IF NOT EXISTS source_mode TEXT,
       ADD COLUMN IF NOT EXISTS pump_status TEXT NOT NULL DEFAULT 'idle',
       ADD COLUMN IF NOT EXISTS pump_started_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS pump_error TEXT
