@@ -76,6 +76,10 @@ export function AssistantChat({
     if (!open) return;
 
     function onKeyDown(event: KeyboardEvent) {
+      // Another modal (the schedule retry) can take focus while this panel is
+      // open; it owns Escape and Tab until it closes, or its Cancel would be
+      // unreachable.
+      if (!panelRef.current?.contains(document.activeElement)) return;
       if (event.key === 'Escape') {
         setOpen(false);
         return;

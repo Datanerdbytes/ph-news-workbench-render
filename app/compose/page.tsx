@@ -339,6 +339,10 @@ function ComposeWorkspace() {
     // attempt so its prompt cannot schedule the removed video.
     scheduleAttempt.current += 1;
     scheduleRetry.cancel();
+    // An abandoned attempt no longer owns the controls; its own finally will
+    // skip the reset because the attempt id moved on.
+    setScheduling(false);
+    setEditorLocked(false);
     if (videoPreviewUrl) URL.revokeObjectURL(videoPreviewUrl);
     setVideoFile(next);
     setVideoPreviewUrl(next ? URL.createObjectURL(next) : null);
@@ -645,9 +649,13 @@ function ComposeWorkspace() {
           error instanceof Error ? error.message : 'Please try again.',
       });
     } finally {
+      // This request is done either way; only its own attempt may release the
+      // composer, so a cancelled attempt cannot unlock a newer one.
       setDispatching(false);
-      setEditorLocked(false);
-      setScheduling(false);
+      if (attempt === scheduleAttempt.current) {
+        setEditorLocked(false);
+        setScheduling(false);
+      }
     }
   }
 
@@ -1270,9 +1278,11 @@ function ComposeWorkspace() {
                               scheduleAttempt.current += 1;
                               scheduleRetry.cancel();
                               setScheduleOpen(false);
-                              // Hand the editor back now; the abandoned bake
-                              // can keep unwinding in the background.
+                              // Hand the controls back now; the abandoned bake
+                              // unwinds in the background and its finally will
+                              // not touch this attempt's state.
                               setEditorLocked(false);
+                              setScheduling(false);
                             }}
                             disabled={dispatching}
                           >
@@ -1356,6 +1366,7 @@ function ComposeWorkspace() {
             scheduleAttempt.current += 1;
             scheduleRetry.cancel();
             setEditorLocked(false);
+            setScheduling(false);
           }
           setDraft(text);
         }}
