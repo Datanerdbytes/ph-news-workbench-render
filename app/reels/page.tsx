@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Video } from 'lucide-react';
 import { toast } from 'sonner';
 import { stageUpload } from '@/lib/stage-client';
+import { deleteStagedBlob } from '@/lib/blob-cleanup';
 import { AnimationPicker } from '@/components/reels/animation-picker';
 import { FinalReelPreview } from '@/components/publishing/final-reel-preview';
 import { AssistantChat } from '@/components/assistant-chat';
@@ -22,6 +23,7 @@ import {
   useManagedPages,
   type PublishResult,
 } from '@/components/publishing/publish-page';
+import { useScheduleRetry } from '@/components/publishing/schedule-retry-dialog';
 import { resolveScheduledFor } from '@/lib/publishing/schedule';
 import { bakeReelAnimation } from '@/lib/reels/bake';
 import {
@@ -47,6 +49,13 @@ export default function ReelsPage() {
   const [scheduleOn, setScheduleOn] = useState(false);
   const [scheduledFor, setScheduledFor] = useState(defaultScheduleValue);
   const [scheduleError, setScheduleError] = useState('');
+  // The picker stays editable while the bake runs, so the submit-time value is
+  // read from a ref instead of the closure that started post().
+  const scheduledForRef = useRef(scheduledFor);
+  useEffect(() => {
+    scheduledForRef.current = scheduledFor;
+  }, [scheduledFor]);
+  const scheduleRetry = useScheduleRetry();
   const [busy, setBusy] = useState(false);
   const [results, setResults] = useState<PublishResult[] | null>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
@@ -235,6 +244,25 @@ export default function ReelsPage() {
         }
       }
       setRenderPct(null);
+      // The bake records the clip in real time, so the slot can lapse before
+      // the GB-scale staging upload even starts. Check here so a stale slot
+      // costs nothing; the check after staging still guards the upload window.
+      if (scheduleOn) {
+        const submit = await scheduleRetry.resolveSubmit(
+          scheduledForRef.current,
+          'reel'
+        );
+        if (submit.kind === 'cancelled') return;
+        scheduledForIso = submit.iso;
+        if (submit.picked) {
+          // Mirror into the ref too: the post-staging check below runs before
+          // the state effect can sync it and must not re-prompt for the slot
+          // the user just confirmed.
+          scheduledForRef.current = submit.picked;
+          setScheduledFor(submit.picked);
+          setScheduleError('');
+        }
+      }
       // Stage the video straight to Blob from the browser — sidesteps the
       // serverless request-body limit so full-size reels post from production.
       // The server downloads it back and feeds the Facebook upload.
@@ -246,6 +274,28 @@ export default function ReelsPage() {
           onUploadProgress: (progress) => setUploadPct(progress.percentage),
         }
       );
+      setUploadPct(null);
+      // The upload can take minutes, so the slot checked above can still fall
+      // inside Facebook's 10-minute window by the time the reel is staged.
+      // Re-check against the submit-time clock; on a miss, ask for a new time
+      // right here so the staged reel is reused instead of baked and uploaded
+      // again. Cancelling means no request will consume the staged blob, so
+      // remove it rather than orphaning it in the store.
+      if (scheduleOn) {
+        const submit = await scheduleRetry.resolveSubmit(
+          scheduledForRef.current,
+          'reel'
+        );
+        if (submit.kind === 'cancelled') {
+          deleteStagedBlob(staged.url);
+          return;
+        }
+        scheduledForIso = submit.iso;
+        if (submit.picked) {
+          setScheduledFor(submit.picked);
+          setScheduleError('');
+        }
+      }
       const res = await fetch('/api/reels', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -421,6 +471,7 @@ export default function ReelsPage() {
           />
         </div>
       </div>
+      {scheduleRetry.dialog}
       <AssistantChat
         draft={caption}
         onDraftChange={setCaption}

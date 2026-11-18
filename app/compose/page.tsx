@@ -39,6 +39,7 @@ import {
   useScheduleClock,
 } from '@/components/publishing/publish-page';
 import { resolveScheduledFor } from '@/lib/publishing/schedule';
+import { useScheduleRetry } from '@/components/publishing/schedule-retry-dialog';
 import { StatusPill, statusMeta } from '@/components/status-pill';
 import { Button } from '@/components/ui/button';
 import { ErrorState } from '@/components/ui/error-state';
@@ -51,6 +52,7 @@ import {
   wordCount,
 } from '@/lib/format';
 import { stageUpload } from '@/lib/stage-client';
+import { deleteStagedBlob } from '@/lib/blob-cleanup';
 import { fetchQueueItem, fetchQueuePage, type QueueItem } from '@/lib/story-queue';
 import {
   MediaPreviewCard,
@@ -208,6 +210,13 @@ function ComposeWorkspace() {
   const [scheduleError, setScheduleError] = useState('');
   const [scheduledFor, setScheduledFor] = useState(defaultScheduleValue);
   const [scheduling, setScheduling] = useState(false);
+  // The picker stays editable while the bake runs, so the submit-time value is
+  // read from a ref instead of the closure that started schedulePost().
+  const scheduledForRef = useRef(scheduledFor);
+  useEffect(() => {
+    scheduledForRef.current = scheduledFor;
+  }, [scheduledFor]);
+  const scheduleRetry = useScheduleRetry();
   const scheduleNow = useScheduleClock();
   const scheduleProblem = resolveScheduledFor(scheduledFor, scheduleNow).error;
 
@@ -523,15 +532,26 @@ function ComposeWorkspace() {
     setScheduleError('');
     setScheduling(true);
     try {
-      const when = new Date(schedule.iso);
       const finalVideoUrl = videoUrl ? await animatedVideoUrl() : null;
-      // The bake can run for the clip's full length; re-check the schedule so
-      // the request lands above the server's 10-minute minimum.
-      const recheck = resolveScheduledFor(scheduledFor);
-      if (recheck.iso === null) {
-        setScheduleError(recheck.error);
+      // The bake can run for the clip's full length; re-check against the
+      // submit-time clock so the slot is still valid when the request lands.
+      // On a miss, ask for a new time here — the staged/baked video is reused,
+      // so nothing is rendered or uploaded twice.
+      const submit = await scheduleRetry.resolveSubmit(
+        scheduledForRef.current,
+        'post'
+      );
+      if (submit.kind === 'cancelled') {
+        // The animated bake re-stages a fresh blob; with the schedule
+        // abandoned, no request will consume it — remove it instead of
+        // leaving it orphaned in the store.
+        if (finalVideoUrl && finalVideoUrl !== videoUrl) {
+          deleteStagedBlob(finalVideoUrl);
+        }
         return;
       }
+      if (submit.picked) setScheduledFor(submit.picked);
+      const when = new Date(submit.iso);
       const res = await fetch('/api/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -540,7 +560,7 @@ function ComposeWorkspace() {
           draftId: selected.draft_id ?? undefined,
           text: draft,
           ...(finalVideoUrl ? { videoUrl: finalVideoUrl } : { imageUrls: images }),
-          scheduledFor: schedule.iso,
+          scheduledFor: submit.iso,
           pageId: pages.selected[0],
         }),
       });
@@ -1228,6 +1248,7 @@ function ComposeWorkspace() {
         </div>
       </div>
 
+      {scheduleRetry.dialog}
       <AssistantChat
         draft={draft}
         storyId={selected?.id}

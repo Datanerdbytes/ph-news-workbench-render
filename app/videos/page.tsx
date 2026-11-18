@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Film, Play, TriangleAlert, Upload, Video } from 'lucide-react';
 import { toast } from 'sonner';
 import { AssistantChat } from '@/components/assistant-chat';
@@ -20,7 +20,14 @@ import {
   useManagedPages,
   type PublishResult,
 } from '@/components/publishing/publish-page';
-import { resolveScheduledFor } from '@/lib/publishing/schedule';
+import {
+  SCHEDULE_TOO_SOON_ERROR,
+  resolveScheduledFor,
+} from '@/lib/publishing/schedule';
+import {
+  slowUploadMessage,
+  useScheduleRetry,
+} from '@/components/publishing/schedule-retry-dialog';
 import {
   MediaPreviewCard,
   MediaPreviewMedia,
@@ -46,6 +53,8 @@ type VideosPublishResponse = {
   results?: PublishResult[];
   warning?: string;
   error?: string;
+  /** The server's earliest acceptable slot, on a too-soon rejection. */
+  earliest?: string;
 };
 
 export default function VideosPage() {
@@ -59,6 +68,13 @@ export default function VideosPage() {
   const [scheduleOn, setScheduleOn] = useState(false);
   const [scheduledFor, setScheduledFor] = useState(defaultScheduleValue);
   const [scheduleError, setScheduleError] = useState('');
+  // The picker stays editable while the bake runs, so the submit-time value is
+  // read from a ref instead of the closure that started publish().
+  const scheduledForRef = useRef(scheduledFor);
+  useEffect(() => {
+    scheduledForRef.current = scheduledFor;
+  }, [scheduledFor]);
+  const scheduleRetry = useScheduleRetry();
   const [busy, setBusy] = useState(false);
   const [uploadPct, setUploadPct] = useState<number | null>(null);
   const [results, setResults] = useState<PublishResult[] | null>(null);
@@ -261,13 +277,21 @@ export default function VideosPage() {
         }
       }
 
-      // The bake can run for the clip's full length; re-check the schedule so
-      // the request lands above the server's 10-minute minimum.
-      if (scheduledForIso) {
-        const recheck = resolveScheduledFor(scheduledFor);
-        if (recheck.iso === null) {
-          setScheduleError(recheck.error);
-          return;
+      // The bake can run for the clip's full length; re-check against the
+      // submit-time clock so the slot is still valid when the request lands.
+      // On a miss, ask for a new time here — the baked file is reused, so
+      // nothing is rendered or uploaded twice.
+      if (scheduleOn) {
+        const submit = await scheduleRetry.resolveSubmit(
+          scheduledForRef.current,
+          'video'
+        );
+        if (submit.kind === 'cancelled') return;
+        scheduledForIso = submit.iso;
+        if (submit.picked) {
+          scheduledForRef.current = submit.picked;
+          setScheduledFor(submit.picked);
+          setScheduleError('');
         }
       }
 
@@ -277,14 +301,16 @@ export default function VideosPage() {
       form.append('description', description);
       if (thumbnail) form.append('thumbnail', thumbnail);
       if (targeting.trim()) form.append('feedTargeting', targeting.trim());
-      if (scheduledForIso) form.append('scheduledFor', scheduledForIso);
       form.append('pageIds', JSON.stringify(pages.selected));
 
       // Real progress for the browser→workbench leg (GB-scale transfers sit
       // on this path for minutes); the chunked server→Facebook leg that
       // follows is the "Publishing…" phase.
-      const data = await new Promise<VideosPublishResponse>(
-        (resolve, reject) => {
+      const send = (body: FormData) =>
+        new Promise<
+          | { response: VideosPublishResponse }
+          | { failure: { status: number; error: Error; earliest?: string } }
+        >((resolve) => {
           const xhr = new XMLHttpRequest();
           xhr.open('POST', '/api/videos');
           xhr.upload.onprogress = (event) => {
@@ -293,25 +319,105 @@ export default function VideosPage() {
             }
           };
           xhr.onload = () => {
-            let body: VideosPublishResponse | null = null;
+            let response: VideosPublishResponse | null = null;
             try {
-              body = JSON.parse(xhr.responseText) as VideosPublishResponse;
+              response = JSON.parse(xhr.responseText) as VideosPublishResponse;
             } catch {
-              body = null;
+              response = null;
             }
             if (xhr.status >= 200 && xhr.status < 300) {
-              resolve(body ?? {});
+              resolve({ response: response ?? {} });
             } else {
-              reject(
-                new Error(body?.error ?? 'The video could not be published.')
-              );
+              resolve({
+                failure: {
+                  status: xhr.status,
+                  error: new Error(
+                    response?.error ?? 'The video could not be published.'
+                  ),
+                  earliest:
+                    typeof response?.earliest === 'string'
+                      ? response.earliest
+                      : undefined,
+                },
+              });
             }
           };
           xhr.onerror = () =>
-            reject(new Error('The video could not be published.'));
-          xhr.send(form);
+            resolve({
+              failure: {
+                status: 0,
+                error: new Error('The video could not be published.'),
+              },
+            });
+          xhr.send(body);
+        });
+
+      // Unlike Reels/Compose this request carries the media itself, and the
+      // server validates the slot only after the body arrives. A transfer
+      // slower than the prompt's headroom would 400 the fresh time, so a
+      // schedule rejection reopens the prompt with the measured upload time
+      // added to the seed and resends — the bake and file in memory are
+      // reused, only the transfer repeats.
+      let data: VideosPublishResponse | null = null;
+      let rejected = 0;
+      // The picker value behind the slot in flight: a later edit must not
+      // relabel the rejection message for a request already sent.
+      let sentLabel = scheduledForRef.current;
+      while (!data) {
+        if (scheduledForIso) form.set('scheduledFor', scheduledForIso);
+        setUploadPct(0);
+        const sentIso = scheduledForIso;
+        const startedAt = performance.now();
+        const result = await send(form);
+        if ('response' in result) {
+          data = result.response;
+          break;
         }
-      );
+        const { status, error, earliest } = result.failure;
+        rejected += 1;
+        if (
+          !scheduleOn ||
+          status !== 400 ||
+          error.message !== SCHEDULE_TOO_SOON_ERROR ||
+          rejected > 2
+        ) {
+          throw error;
+        }
+        // The transfer clock is monotonic; wall-clock jumps must not fake a
+        // longer (or shorter) upload than actually happened.
+        const uploadMs = performance.now() - startedAt;
+        // The server's clock can run ahead of this one, so its own earliest
+        // acceptable slot wins when it is later — and because the next upload
+        // lands that much later, the measured transfer is added to it.
+        const serverEarliest = earliest
+          ? new Date(earliest).getTime()
+          : Number.NaN;
+        const afterMs = Math.max(
+          sentIso ? new Date(sentIso).getTime() : 0,
+          Number.isNaN(serverEarliest) ? 0 : serverEarliest + uploadMs
+        );
+        const submit = await scheduleRetry.resolveSubmit(
+          scheduledForRef.current,
+          'video',
+          {
+            seedAfterMs: uploadMs,
+            // The refused slot is the floor the next pick must clear.
+            afterMs: afterMs || undefined,
+            afterLabel: sentLabel,
+            // The browser clock may still accept what the server refused.
+            forcePrompt: true,
+            message: slowUploadMessage(sentLabel),
+          }
+        );
+        if (submit.kind === 'cancelled') return;
+        scheduledForIso = submit.iso;
+        if (submit.picked) {
+          sentLabel = submit.picked;
+          scheduledForRef.current = submit.picked;
+          setScheduledFor(submit.picked);
+          setScheduleError('');
+        }
+      }
       setResults(data.results ?? []);
       toast.success(scheduleOn ? 'Video scheduled' : 'Video published', {
         description: data.warning,
@@ -503,6 +609,7 @@ export default function VideosPage() {
         </div>
         <aside className="self-start xl:sticky xl:top-[70px]">{videoPreview}</aside>
       </div>
+      {scheduleRetry.dialog}
       <AssistantChat
         draft={description}
         onDraftChange={setDescription}
