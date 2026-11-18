@@ -25,6 +25,7 @@ import {
   resolveScheduledFor,
 } from '@/lib/publishing/schedule';
 import {
+  retryAfterMessage,
   slowUploadMessage,
   useScheduleRetry,
 } from '@/components/publishing/schedule-retry-dialog';
@@ -79,6 +80,15 @@ export default function VideosPage() {
   }, [scheduledFor]);
   const scheduleRetry = useScheduleRetry();
   const [busy, setBusy] = useState(false);
+  // Read by the assistant's reply handler, which can outlive the render that
+  // sent the request.
+  const busyRef = useRef(false);
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
+  // The last slot the server refused. Cancelling the retry dialog must not
+  // let the next attempt upload to the same refused time.
+  const refusedSlotRef = useRef<{ ms: number; label: string } | null>(null);
   const [uploadPct, setUploadPct] = useState<number | null>(null);
   const [results, setResults] = useState<PublishResult[] | null>(null);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
@@ -245,6 +255,14 @@ export default function VideosPage() {
         setScheduleError(schedule.error);
         return;
       }
+      // A refused slot stays refused: cancelling the retry dialog returns to
+      // the composer with that time still selected, so block it here instead
+      // of uploading the same video to earn the same 400.
+      const refused = refusedSlotRef.current;
+      if (refused && new Date(schedule.iso).getTime() <= refused.ms) {
+        setScheduleError(retryAfterMessage(refused.label));
+        return;
+      }
       scheduledForIso = schedule.iso;
       setScheduleError('');
     }
@@ -409,6 +427,14 @@ export default function VideosPage() {
         // hook can advance it with the monotonic clock while the dialog is
         // open — a browser clock correction must not shrink the lead.
         const serverEarliest = earliest ? new Date(earliest).getTime() : NaN;
+        // Remember the refusal across a cancelled prompt: the composer would
+        // otherwise still hold that slot and upload to it again.
+        if (sentIso) {
+          refusedSlotRef.current = {
+            ms: new Date(sentIso).getTime(),
+            label: sentLabel,
+          };
+        }
         // A replacement during the transfer makes this rejection stale: the
         // prompt and any picked time belong to the abandoned clip.
         if (generation !== fileGeneration.current) return;
@@ -438,6 +464,7 @@ export default function VideosPage() {
           setScheduleError('');
         }
       }
+      refusedSlotRef.current = null;
       setResults(data.results ?? []);
       toast.success(scheduleOn ? 'Video scheduled' : 'Video published', {
         description: data.warning,
@@ -639,7 +666,13 @@ export default function VideosPage() {
       {scheduleRetry.dialog}
       <AssistantChat
         draft={description}
-        onDraftChange={setDescription}
+        disabled={busy}
+        // A reply that lands mid-attempt must not rewrite the description the
+        // retry already captured; a ref avoids the stale closure from the
+        // render that sent the request.
+        onDraftChange={(text) => {
+          if (!busyRef.current) setDescription(text);
+        }}
         contextLabel="video description (5,000 character limit)"
       />
     </PublishPage>

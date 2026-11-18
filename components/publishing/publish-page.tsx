@@ -593,6 +593,7 @@ export function ScheduleField({
             aria-label="Publish date and time"
             aria-invalid={Boolean(message)}
             aria-describedby={message ? 'schedule-error' : undefined}
+            disabled={disabled}
             min={bounds.min}
             max={bounds.max}
             value={value}
@@ -612,7 +613,8 @@ export function ScheduleField({
             <button
               type="button"
               onClick={() => onChange(defaultScheduleValue())}
-              className="mt-1 text-[11px] font-medium text-brand underline underline-offset-2"
+              disabled={disabled}
+              className="mt-1 text-[11px] font-medium text-brand underline underline-offset-2 disabled:cursor-not-allowed disabled:opacity-40"
             >
               Reset to tomorrow 9:00
             </button>
