@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Play, RotateCcw, Square } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { isHlsUrl, proxyUrl } from '@/lib/live/preview-proxy';
 import { cn } from 'cn';
 
 /** The 200-shape of POST /api/live/resolve. `staged` means the pump can pipe
@@ -25,12 +26,16 @@ const DIRECT_FILE_PATTERN = /\.(mp4|webm)(?:[?#]|$)/i;
 
 /**
  * Inline preview of a resolved source. The page owns all fetching — this
- * component only plays `playableUrl`: direct files and native HLS (Safari)
- * get `src` set directly, everything else goes through hls.js, which is
- * imported lazily exactly when a browser needs it. A `staged` source has no
- * playable URL at all (the pump pipes it through yt-dlp), so it renders a
- * calm "preview unavailable" card instead of a player — that is a normal
- * state, not an error.
+ * component only plays `playableUrl`: direct files play cross-origin via
+ * `<video src>` (no CORS needed for media elements), while HLS manifests
+ * load same-origin through the preview proxy — both for native HLS (Safari)
+ * and for hls.js, which is imported lazily exactly when a browser needs it.
+ * The proxy matters because upstream HLS (googlevideo manifests and
+ * segments) sends no `Access-Control-Allow-Origin`, so without it hls.js
+ * fetches are blocked in Chrome/Firefox. A `staged` source has no playable
+ * URL at all (the pump pipes it through yt-dlp), so it renders a calm
+ * "preview unavailable" card instead of a player — that is a normal state,
+ * not an error.
  */
 export function SourcePreview({
   playableUrl,
@@ -45,8 +50,12 @@ export function SourcePreview({
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !playableUrl) return;
-    // Local const so the closure below keeps the narrowed non-null type.
-    const source: string = playableUrl;
+    // HLS must load same-origin (no CORS headers upstream), so manifests go
+    // through the preview proxy; direct files keep their original URL. The
+    // local const keeps the narrowed non-null type in the closures below.
+    const source: string = isHlsUrl(playableUrl)
+      ? proxyUrl(playableUrl)
+      : playableUrl;
     const media: HTMLVideoElement = video;
 
     setPlayerError(null);

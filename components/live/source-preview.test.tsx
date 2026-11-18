@@ -8,6 +8,7 @@ import {
   waitFor,
 } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { proxyUrl } from '@/lib/live/preview-proxy';
 import { PumpControls, SourcePreview } from './source-preview';
 
 // hls.js is only imported by SourcePreview when the browser has no native
@@ -63,6 +64,11 @@ beforeEach(() => {
 const MANIFEST_URL = 'https://cdn.example/live.m3u8';
 const FILE_URL = 'https://cdn.example/clip.mp4?token=1';
 
+/** Where the browser should actually load an HLS manifest: the proxy. */
+function proxiedManifestUrl(target: string) {
+  return new URL(proxyUrl(target), window.location.href).href;
+}
+
 function renderPreview(props: Partial<Parameters<typeof SourcePreview>[0]> = {}) {
   return render(
     <SourcePreview
@@ -92,12 +98,13 @@ function renderPump(
 }
 
 describe('SourcePreview', () => {
-  it('sets the video src directly in a native-HLS browser and never loads hls.js', () => {
+  it('sets the proxied src in a native-HLS browser and never loads hls.js', () => {
     stubCanPlayType('probably');
     renderPreview({ isLive: true });
 
     const video = document.querySelector('video') as HTMLVideoElement;
-    expect(video.src).toBe(MANIFEST_URL);
+    // Even Safari loads the manifest same-origin through the proxy.
+    expect(video.src).toBe(proxiedManifestUrl(MANIFEST_URL));
     expect(hlsMock.Hls).not.toHaveBeenCalled();
   });
 
@@ -115,7 +122,12 @@ describe('SourcePreview', () => {
     const [instance] = hlsMock.instances;
 
     expect(hlsMock.Hls).toHaveBeenCalledTimes(1);
-    expect(instance.loadSource).toHaveBeenCalledWith(MANIFEST_URL);
+    // hls.js loads the manifest same-origin through the preview proxy.
+    const [loadedUrl] = instance.loadSource.mock.calls[0] as [string];
+    const loaded = new URL(loadedUrl, window.location.href);
+    expect(loaded.pathname).toBe('/api/live/preview');
+    // Decoded, the proxied parameter is the original manifest URL.
+    expect(loaded.searchParams.get('url')).toBe(MANIFEST_URL);
     expect(instance.attachMedia).toHaveBeenCalledWith(
       expect.any(HTMLVideoElement)
     );
