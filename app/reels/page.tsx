@@ -41,6 +41,13 @@ import type { SlotLoops, SlotSelection } from '@/components/reels/animation-pick
 
 const MAX_BYTES = 1024 * 1024 * 1024;
 
+/** Connection-guard responses that return before the request body is read. */
+const PRE_BODY_REJECTION_CODES = new Set([
+  'not_connected',
+  'scope_missing',
+  'connection_failed',
+]);
+
 export default function ReelsPage() {
   const pages = useManagedPages();
   const [file, setFile] = useState<File | null>(null);
@@ -56,7 +63,19 @@ export default function ReelsPage() {
     scheduledForRef.current = scheduledFor;
   }, [scheduledFor]);
   const scheduleRetry = useScheduleRetry();
+  // Stable across renders, so handlePick can cancel an obsolete prompt without
+  // re-triggering the Downloads handover effect that depends on it.
+  const cancelRetry = scheduleRetry.cancel;
   const [busy, setBusy] = useState(false);
+  // Read by the assistant's reply handler, which can outlive the render that
+  // sent the request.
+  const busyRef = useRef(false);
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
+  // Bumped when the reel is replaced or the composer resets after publishing,
+  // so an assistant reply for the old clip cannot refill the new caption.
+  const [composerRevision, setComposerRevision] = useState(0);
   const [results, setResults] = useState<PublishResult[] | null>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
   // Each pick/clear bumps this; an in-flight normalization whose generation
@@ -112,6 +131,11 @@ export default function ReelsPage() {
       }
     }
     const generation = ++pickGeneration.current;
+    // A reply in flight belongs to the previous clip's composer.
+    setComposerRevision((revision) => revision + 1);
+    // A retry prompt opened for the previous reel is obsolete now: settle it
+    // as cancelled so that attempt releases its staged upload and stops.
+    cancelRetry();
     setFile(picked);
     if (!picked) return;
     setNormalizing(true);
@@ -148,6 +172,8 @@ export default function ReelsPage() {
     // Invalidates any in-flight normalization so the cleared file can't
     // come back when the async work settles.
     pickGeneration.current += 1;
+    setComposerRevision((revision) => revision + 1);
+    cancelRetry();
     setFile(null);
     setNormalizing(false);
     setNormalizePct(null);
@@ -173,7 +199,7 @@ export default function ReelsPage() {
     return () => {
       cancelled = true;
     };
-  }, [handlePick]);
+  }, [cancelRetry]);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -205,6 +231,10 @@ export default function ReelsPage() {
     setBusy(true);
     setResults(null);
     setRenderPct(null);
+    // The picker stays live during the bake and upload; a replacement must
+    // abandon this attempt instead of posting the old clip and then clearing
+    // the new one from the editor.
+    const generation = pickGeneration.current;
     try {
       let uploadFile = file;
       // Bake the attached animations into the footage first: record the video
@@ -224,6 +254,13 @@ export default function ReelsPage() {
           });
           return null;
         });
+        // A replacement during the recording makes this bake stale: do not
+        // spend the finalization on a clip nobody will stage. The check after
+        // finalization still covers replacements that land while it runs.
+        if (generation !== pickGeneration.current) {
+          setRenderPct(null);
+          return;
+        }
         if (baked) {
           // MediaRecorder emits fragmented MP4 (Chrome et al.) or WebM
           // (fallback). Facebook needs a progressive H.264 MP4, and the old
@@ -244,6 +281,7 @@ export default function ReelsPage() {
         }
       }
       setRenderPct(null);
+      if (generation !== pickGeneration.current) return;
       // The bake records the clip in real time, so the slot can lapse before
       // the GB-scale staging upload even starts. Check here so a stale slot
       // costs nothing; the check after staging still guards the upload window.
@@ -253,6 +291,9 @@ export default function ReelsPage() {
           'reel'
         );
         if (submit.kind === 'cancelled') return;
+        // A Downloads import can replace the reel while the prompt is open;
+        // its picked time must not land in the new reel's composer.
+        if (generation !== pickGeneration.current) return;
         scheduledForIso = submit.iso;
         if (submit.picked) {
           // Mirror into the ref too: the post-staging check below runs before
@@ -275,6 +316,12 @@ export default function ReelsPage() {
         }
       );
       setUploadPct(null);
+      // A replacement during the upload keeps its own draft: drop this
+      // attempt's staged blob instead of prompting for a time and posting it.
+      if (generation !== pickGeneration.current) {
+        deleteStagedBlob(staged.url);
+        return;
+      }
       // The upload can take minutes, so the slot checked above can still fall
       // inside Facebook's 10-minute window by the time the reel is staged.
       // Re-check against the submit-time clock; on a miss, ask for a new time
@@ -287,6 +334,12 @@ export default function ReelsPage() {
           'reel'
         );
         if (submit.kind === 'cancelled') {
+          deleteStagedBlob(staged.url);
+          return;
+        }
+        // The prompt can outlive a replacement: the staged reel is abandoned,
+        // so release it and never post it under the new caption or slot.
+        if (generation !== pickGeneration.current) {
           deleteStagedBlob(staged.url);
           return;
         }
@@ -311,15 +364,34 @@ export default function ReelsPage() {
         }),
       });
       const data = await res.json().catch(() => null);
-      if (!res.ok) throw new Error(data?.error ?? 'The reel could not be posted.');
+      if (!res.ok) {
+        // A pre-body rejection never consumed the staged copy. That includes
+        // 400s (the route's own validation), 401 (no session), and the
+        // connection guard's not_connected/scope_missing/connection_failed
+        // responses, which all return before the body is read. Any other
+        // status may have started publishing — or is an ambiguous network
+        // failure — so that blob is left to the scheduler.
+        if (
+          res.status === 400 ||
+          res.status === 401 ||
+          PRE_BODY_REJECTION_CODES.has(data?.code)
+        ) {
+          deleteStagedBlob(staged.url);
+        }
+        throw new Error(data?.error ?? 'The reel could not be posted.');
+      }
       setResults(data.results ?? []);
       toast.success(
         scheduleOn ? 'Reel scheduled' : 'Reel published',
         { description: data.warning }
       );
-      setFile(null);
-      setCaption('');
-      setScheduleOn(false);
+      // Only clear the composer if it still holds the reel that was posted.
+      if (generation === pickGeneration.current) {
+        setFile(null);
+        setCaption('');
+        setScheduleOn(false);
+        setComposerRevision((revision) => revision + 1);
+      }
     } catch (error) {
       toast.error('Reel upload failed', {
         description:
@@ -389,6 +461,7 @@ export default function ReelsPage() {
             id="reel-caption"
             value={caption}
             onChange={(event) => setCaption(event.target.value)}
+            disabled={busy}
             rows={4}
             maxLength={2200}
             placeholder="Write a caption for the reel…"
@@ -401,6 +474,7 @@ export default function ReelsPage() {
           selected={pages.selected}
           onSelect={pages.selectOne}
           loading={pages.loading}
+          disabled={busy}
         />
 
         <ScheduleField
@@ -412,6 +486,7 @@ export default function ReelsPage() {
             setScheduleError('');
           }}
           error={scheduleError}
+          disabled={busy}
         />
 
         <div className="flex flex-wrap items-center gap-2">
@@ -474,7 +549,16 @@ export default function ReelsPage() {
       {scheduleRetry.dialog}
       <AssistantChat
         draft={caption}
-        onDraftChange={setCaption}
+        disabled={busy}
+        revision={composerRevision}
+        // A reply that lands mid-attempt must not replace the caption the
+        // request already captured (the textarea is locked for the same
+        // reason); a ref avoids the stale closure from the rendering send.
+        onDraftChange={(text) => {
+          if (busyRef.current) return false;
+          setCaption(text);
+          return true;
+        }}
         contextLabel="reel caption (2,200 character limit)"
       />
     </PublishPage>

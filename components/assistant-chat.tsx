@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Loader2,
   SendHorizontal,
@@ -23,12 +23,21 @@ export function AssistantChat({
   storyId,
   onDraftChange,
   contextLabel,
+  disabled = false,
+  revision = 0,
 }: {
   draft?: string;
   storyId?: number;
-  onDraftChange?: (text: string) => void;
+  onDraftChange?: (text: string, baseDraft: string) => boolean | void;
   /** Tells the model what it is editing, e.g. "reel caption (2,200 character limit)". */
   contextLabel?: string;
+  /** Blocks new requests while a submit owns the draft it would rewrite. */
+  disabled?: boolean;
+  /**
+   * Bumped whenever the composer is replaced or reset. A reply that outlives
+   * its composer must not fill the next post's field with old copy.
+   */
+  revision?: number;
 }) {
   // Composer pages (onDraftChange present) always work in draft mode: the
   // reply populates the field — including when it starts empty ("write me a
@@ -40,8 +49,23 @@ export function AssistantChat({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  // The draft the edit request was based on; a reply must not overwrite a
+  // field that moved on (cleared after a submit, or edited meanwhile).
+  const draftRef = useRef(draft);
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+  const revisionRef = useRef(revision);
+  // Synced in a layout effect: a composer replacement queued in the same tick
+  // as a reply's continuation must be visible to the check that decides
+  // whether the reply still belongs to this composer, and a passive effect
+  // can run after that continuation reads the ref.
+  useLayoutEffect(() => {
+    revisionRef.current = revision;
+  }, [revision]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
   // The FAB stays mounted (hidden while the dialog is open) so focus can
   // return to it on close instead of dropping to <body>.
   const fabRef = useRef<HTMLButtonElement>(null);
@@ -56,6 +80,20 @@ export function AssistantChat({
     if (!open || !scrollRef.current) return;
     scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, busy, open]);
+
+  // Chromium clears focus when the focused suggestion button unmounts (the
+  // first message hides the suggestions), leaving the panel's Escape handler
+  // with focus on <body> and ignoring the key. Recover only when focus was
+  // lost entirely and no modal is open: the schedule retry's dialog owns the
+  // interaction while it is up, even in the instant its focus management has
+  // not landed yet.
+  useEffect(() => {
+    if (!open) return;
+    if (document.querySelector('[aria-modal="true"]')) return;
+    if (!document.activeElement || document.activeElement === document.body) {
+      closeRef.current?.focus();
+    }
+  }, [messages, open]);
 
   // Move focus into the dialog on open; restore it to the FAB on close.
   useEffect(() => {
@@ -73,6 +111,10 @@ export function AssistantChat({
     if (!open) return;
 
     function onKeyDown(event: KeyboardEvent) {
+      // Another modal (the schedule retry) can take focus while this panel is
+      // open; it owns Escape and Tab until it closes, or its Cancel would be
+      // unreachable.
+      if (!panelRef.current?.contains(document.activeElement)) return;
       if (event.key === 'Escape') {
         setOpen(false);
         return;
@@ -86,7 +128,9 @@ export function AssistantChat({
 
   async function send(message: string) {
     const text = message.trim();
-    if (!text || busy) return;
+    if (!text || busy || disabled) return;
+    const baseDraft = draft;
+    const baseRevision = revision;
 
     setMessages((history) => [...history, { role: 'user', content: text }]);
     setInput('');
@@ -113,12 +157,27 @@ export function AssistantChat({
           { role: 'assistant', content: data.text },
         ]);
       } else {
-        onDraftChange(data.text);
+        // A reply that outlived its composer must not refill a field the user
+        // cleared or rewrote, or the next post's field after a reset; say so
+        // instead of reporting a phantom update.
+        const composerReset = revisionRef.current !== baseRevision;
+        const draftMoved = draftRef.current !== baseDraft;
+        const applied =
+          composerReset || draftMoved
+            ? false
+            : onDraftChange(data.text, baseDraft);
         setMessages((history) => [
           ...history,
           {
             role: 'assistant',
-            content: 'Draft updated. The revision is in the draft panel.',
+            content:
+              applied === false
+                ? composerReset
+                  ? 'The composer was reset while the revision ran, so it was not applied. Ask again for the new post.'
+                  : draftMoved
+                    ? 'The field changed while the revision ran, so it was not applied. Ask again when the field is free.'
+                    : 'The revision finished while the field was busy with another submit, so it was not applied. Ask again when it is free.'
+                : 'Draft updated. The revision is in the draft panel.',
           },
         ]);
       }
@@ -192,6 +251,7 @@ export function AssistantChat({
               </div>
               <button
                 type="button"
+                ref={closeRef}
                 onClick={() => setOpen(false)}
                 aria-label="Close assistant"
                 className="tap-target grid size-8 shrink-0 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
@@ -226,7 +286,7 @@ export function AssistantChat({
                         key={suggestion}
                         type="button"
                         onClick={() => send(suggestion)}
-                        disabled={busy}
+                        disabled={busy || disabled}
                         className="rounded-full border border-border bg-background px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-brand/30 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
                       >
                         {suggestion}
@@ -295,13 +355,13 @@ export function AssistantChat({
                       : 'Ask the assistant to write or revise'
                   }
                   className="h-9 bg-background"
-                  disabled={busy}
+                  disabled={busy || disabled}
                 />
                 <Button
                   type="submit"
                   size="sm"
                   className="h-9 px-3"
-                  disabled={!input.trim() || busy}
+                  disabled={!input.trim() || busy || disabled}
                   aria-label={chatMode ? 'Send message' : 'Send revision request'}
                 >
                   {busy ? (

@@ -147,6 +147,10 @@ let script: ScriptedResponse[] = [];
 // slot the browser still accepts can be refused however often it is offered.
 let serverMin: Date | null = null;
 
+// A simulated server offset: requests older than the server's own clock plus
+// its 10-minute floor get a too-soon 400 carrying that earliest slot.
+let serverOffsetMs: number | null = null;
+
 // The composer posts the file through XMLHttpRequest (for real upload
 // progress); this stub records the form and answers with a published row.
 class FakeXmlHttpRequest {
@@ -175,9 +179,30 @@ class FakeXmlHttpRequest {
     if (step?.status) this.status = step.status;
     if (step?.body !== undefined) this.responseText = JSON.stringify(step.body);
     const sentSlot = form.scheduledFor ? new Date(String(form.scheduledFor)) : null;
-    if (serverMin && sentSlot && sentSlot.getTime() < serverMin.getTime()) {
+    // The real route rejects a form with neither title nor description before
+    // it ever looks at the schedule, so the fake does too.
+    const missingText = !form.title && !form.description;
+    if (missingText) {
+      this.status = 400;
+      this.responseText = JSON.stringify({
+        error: 'Add a title or description for the video.',
+      });
+    }
+    if (!missingText && serverMin && sentSlot && sentSlot.getTime() < serverMin.getTime()) {
       this.status = 400;
       this.responseText = JSON.stringify({ error: SCHEDULE_TOO_SOON_ERROR });
+    }
+    if (!missingText && serverOffsetMs !== null && sentSlot) {
+      const earliest = new Date(
+        Date.now() + serverOffsetMs + 10 * 60_000
+      );
+      if (sentSlot.getTime() < earliest.getTime()) {
+        this.status = 400;
+        this.responseText = JSON.stringify({
+          error: SCHEDULE_TOO_SOON_ERROR,
+          earliest: earliest.toISOString(),
+        });
+      }
     }
     this.upload.onprogress?.({ lengthComputable: true, loaded: 1, total: 1 });
     queueMicrotask(() => this.onload?.());
@@ -193,6 +218,10 @@ function pickVideo() {
   Object.defineProperty(file, "size", { value: 1024 });
   const input = document.querySelector<HTMLInputElement>("#video-file")!;
   fireEvent.change(input, { target: { files: [file] } });
+  // The route requires some text alongside the clip.
+  fireEvent.change(screen.getByLabelText("Title"), {
+    target: { value: "Clip title" },
+  });
 }
 
 beforeEach(() => {
@@ -206,6 +235,7 @@ beforeEach(() => {
   sentForms = [];
   script = [];
   serverMin = null;
+  serverOffsetMs = null;
   vi.stubGlobal("XMLHttpRequest", FakeXmlHttpRequest);
 });
 
@@ -256,6 +286,45 @@ describe("VideosPage composer", () => {
     expect((sentForms[0].video as File).name).toBe("baked.mp4");
     // The baked file is reused — the bake never runs twice.
     expect(bakeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a publish whose clip was replaced while the bake ran", async () => {
+    // A replacement picked mid-bake makes the submitted draft stale: the
+    // composer must not prompt, upload, or clear the new clip's fields.
+    let finishBake!: (file: File) => void;
+    bakeMock.mockImplementation(
+      () =>
+        new Promise<File>((resolve) => {
+          finishBake = resolve;
+        })
+    );
+
+    render(<VideosPage />);
+    await flush();
+
+    pickVideo();
+    await flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "Attach animation" }));
+    fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+    fireEvent.change(screen.getByLabelText("Publish date and time"), {
+      target: { value: "2026-11-14T08:15" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
+    await flush();
+    expect(bakeMock).toHaveBeenCalledTimes(1);
+
+    pickVideo();
+    await flush();
+
+    await act(async () => {
+      finishBake(new File(["baked"], "baked.mp4", { type: "video/mp4" }));
+    });
+    await flush();
+
+    expect(sentForms).toHaveLength(0);
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("reopens the prompt when the server rejects the time after a slow upload", async () => {
@@ -371,20 +440,14 @@ describe("VideosPage composer", () => {
     expect(toast.success).toHaveBeenCalledWith("Video scheduled", expect.anything());
   });
 
-  it("seeds the retry from the server's earliest acceptable slot", async () => {
-    // The server clock runs minutes ahead: it refuses 08:15 and reports its
-    // own floor, 08:25. The next upload takes 4 minutes, so the retry must
-    // clear 08:25 + 4 min — later than the browser's own floor.
-    script = [
-      {
-        status: 400,
-        body: {
-          error: SCHEDULE_TOO_SOON_ERROR,
-          earliest: new Date("2026-11-14T08:25").toISOString(),
-        },
-        onSend: () => vi.advanceTimersByTime(4 * 60_000),
-      },
-    ];
+  it("seeds the retry from the server's clock and confirms straight away", async () => {
+    // The server clock runs 10 minutes ahead. The 08:15 attempt lands at
+    // browser 08:04 after its 4-minute transfer, so the server's own floor is
+    // 08:24; with the next transfer and the response-transit pad on top, the
+    // retry must clear 08:28:05, and the seed's minute padding lands on 08:30.
+    serverOffsetMs = 10 * 60_000;
+    const transfer = () => vi.advanceTimersByTime(4 * 60_000);
+    script = [{ onSend: transfer }, { onSend: transfer }];
 
     render(<VideosPage />);
     await flush();
@@ -400,8 +463,8 @@ describe("VideosPage composer", () => {
     fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
 
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
-    // Browser floor lands at 08:19; the server's floor plus the transfer at
-    // 08:29, so the seed is 08:30.
+    // The server's floor (20 minutes out) beats the browser's 14, so the
+    // seed clears 08:04 + 24 minutes.
     expect(
       screen.getByRole("button", { name: /Schedule at 2026-11-14 08:30/ })
     ).toBeInTheDocument();
@@ -414,5 +477,104 @@ describe("VideosPage composer", () => {
     expect(sentForms[1].scheduledFor).toBe(
       new Date("2026-11-14T08:30").toISOString()
     );
+    expect(toast.success).toHaveBeenCalledWith("Video scheduled", expect.anything());
   });
+
+  it("re-seeds when the prompt sits open past the server's floor", async () => {
+    // Same clock, but the user thinks for three minutes: confirming the
+    // 08:30 suggestion would land under the floor the next upload has to
+    // clear, so the prompt re-seeds instead of sending a doomed time.
+    serverOffsetMs = 10 * 60_000;
+    const transfer = () => vi.advanceTimersByTime(4 * 60_000);
+    script = [{ onSend: transfer }, { onSend: transfer }];
+
+    render(<VideosPage />);
+    await flush();
+
+    pickVideo();
+    await flush();
+
+    fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+    fireEvent.change(screen.getByLabelText("Publish date and time"), {
+      target: { value: "2026-11-14T08:15" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+
+    await act(async () => {
+      vi.advanceTimersByTime(3 * 60_000);
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /Schedule at 2026-11-14 08:30/ })
+    );
+
+    // At 08:07 the stale 08:30 is only 23 minutes out; the re-seeded slot
+    // clears the full 24 minutes plus the transit pad.
+    expect(
+      await screen.findByRole("button", { name: /Schedule at 2026-11-14 08:33/ })
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Schedule at 2026-11-14 08:33/ })
+    );
+    await waitFor(() => expect(sentForms).toHaveLength(2));
+
+    expect(sentForms[1].scheduledFor).toBe(
+      new Date("2026-11-14T08:33").toISOString()
+    );
+  });
+
+  // Troll falls back two hours on 2026-10-25 (03:00 at +02 becomes 01:00 at
+  // +00), so the local hour 01:00–02:59 happens twice. CI runs this file
+  // under TZ=Antarctica/Troll for exactly that shift; elsewhere the wall
+  // clock does not repeat and the assertions would not hold, so the test
+  // skips outside it.
+  const tzIsTroll =
+    Intl.DateTimeFormat().resolvedOptions().timeZone === "Antarctica/Troll";
+  (tzIsTroll ? it : it.skip)(
+    "sends a repeated-hour slot that still clears the server's floor in UTC",
+    async () => {
+      // The clock starts before the fallback: 00:20 UTC is 02:20 local on the
+      // first pass of the repeated hour. The picked 02:50 is unambiguous to
+      // the parser (first occurrence, 00:50 UTC), but the 50-minute transfer
+      // spans the fallback — the server's floor has moved two hours past the
+      // wall clock by the time the body arrives.
+      serverOffsetMs = 10 * 60_000;
+      script = [{ onSend: () => vi.advanceTimersByTime(50 * 60_000) }, {}];
+      vi.setSystemTime(new Date("2026-10-25T00:20:00Z"));
+
+      render(<VideosPage />);
+      await flush();
+
+      pickVideo();
+      await flush();
+
+      fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+      fireEvent.change(screen.getByLabelText("Publish date and time"), {
+        target: { value: "2026-10-25T02:50" },
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
+      await waitFor(() => expect(sentForms).toHaveLength(1));
+      // The repeated hour's first occurrence: 02:50 at +02 is 00:50 UTC.
+      expect(sentForms[0].scheduledFor).toBe("2026-10-25T00:50:00.000Z");
+
+      // The server checks the slot on arrival (01:10 UTC), where its floor is
+      // already 01:30 UTC — the prompt re-seeds, and whatever it suggests must
+      // clear that floor as a UTC instant, not as a wall-clock label.
+      fireEvent.click(
+        await screen.findByRole("button", { name: /Schedule at/ })
+      );
+      await waitFor(() => expect(sentForms).toHaveLength(2));
+
+      expect(
+        new Date(String(sentForms[1].scheduledFor)).getTime()
+      ).toBeGreaterThanOrEqual(new Date("2026-10-25T01:30:00Z").getTime());
+      expect(toast.success).toHaveBeenCalledWith(
+        "Video scheduled",
+        expect.anything()
+      );
+    }
+  );
 });

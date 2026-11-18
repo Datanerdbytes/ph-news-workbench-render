@@ -15,8 +15,8 @@ PRO — the Dockerfile, storage drivers, and docs here work unchanged on either.
 
 ```
 pull request  ──►  CI (lint · types · tests · image build + scan · Playwright)
-                     +  CodeRabbit review  ──►  approval  ──►  merge
-                                                                     │
+                     +  CodeRabbit review (advisory)  ──►  approval  ──►  merge
+                                                                          │
   main push  ──►  CI again  ──►  Render deploy  ──►  health check  ──►  live
 ```
 

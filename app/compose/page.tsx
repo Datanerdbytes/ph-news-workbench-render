@@ -1,6 +1,13 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
@@ -76,6 +83,11 @@ const MAX_MESSAGE_LENGTH = 5000;
 const MAX_IMAGES = 10;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 1024 * 1024 * 1024;
+// A bake records the clip in real time and the API cannot cancel one, so a
+// cancelled schedule leaves its render draining in the background. Two cover
+// that render plus the composer's active one; a third attempt falls back to
+// the original clip until one drains instead of stacking recorders.
+const MAX_CONCURRENT_BAKES = 2;
 const ALLOWED_IMAGE_TYPES = new Set([
   'image/jpeg',
   'image/png',
@@ -204,18 +216,70 @@ function ComposeWorkspace() {
   const [draftLoadFailed, setDraftLoadFailed] = useState(false);
   const [drafting, setDrafting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // Bumped when the composer switches stories or drops the draft, so an
+  // assistant reply for the old draft cannot refill the new one.
+  const [composerRevision, setComposerRevision] = useState(0);
   const [deleting, setDeleting] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [scheduleError, setScheduleError] = useState('');
   const [scheduledFor, setScheduledFor] = useState(defaultScheduleValue);
   const [scheduling, setScheduling] = useState(false);
+  // The draft editor lock is separate from `scheduling`: cancelling a long
+  // bake hands editing back immediately while the abandoned attempt unwinds.
+  const [editorLocked, setEditorLocked] = useState(false);
+  // The attempt whose schedule request is on the wire: past that point Cancel
+  // cannot abort it, so the button becomes a non-cancellable waiting state.
+  // Scoping it to the attempt stops an abandoned bake's finally from releasing
+  // a newer attempt's dispatch lock.
+  const [dispatchingAttempt, setDispatchingAttempt] = useState<number | null>(
+    null
+  );
+  const dispatching = dispatchingAttempt !== null;
   // The picker stays editable while the bake runs, so the submit-time value is
   // read from a ref instead of the closure that started schedulePost().
   const scheduledForRef = useRef(scheduledFor);
   useEffect(() => {
     scheduledForRef.current = scheduledFor;
   }, [scheduledFor]);
+  // Closing the picker bumps this so a bake in progress stops before it
+  // prompts for a new time or posts against an abandoned schedule.
+  const scheduleAttempt = useRef(0);
+  // Increments for every bake; an abandoned bake must not move the progress
+  // of the one that replaced it. Cancelling bumps it too, which detaches the
+  // running bake: its progress and finally stop touching the composer, and
+  // the controls come back while the render drains.
+  const bakeSequence = useRef(0);
+  const rendersInFlight = useRef(0);
+  // Read by the assistant's reply handler, which can fire long after the
+  // render that started the request. Layout effects publish the lock during
+  // the commit itself — before the browser can hand another task the reply
+  // continuation that reads it — and the dispatch claim also writes its ref
+  // directly at the moment the request goes out.
+  const editorLockedRef = useRef(false);
+  useLayoutEffect(() => {
+    editorLockedRef.current = editorLocked;
+  }, [editorLocked]);
+  const dispatchingRef = useRef(false);
+  useLayoutEffect(() => {
+    dispatchingRef.current = dispatching;
+  }, [dispatching]);
+  // The publish flow holds the same editor lock as scheduling, but a reply
+  // meeting it must be dropped, not applied — the POST already carries the
+  // captured draft and there is no schedule attempt to hand back to.
+  const publishingRef = useRef(false);
+  useLayoutEffect(() => {
+    publishingRef.current = publishing;
+  }, [publishing]);
+  // Leaving the page abandons a bake in flight: the attempt check makes it
+  // stop before staging a blob for a post nobody can submit. The upload that
+  // already started is cleaned up by the caller's generation check.
+  useEffect(
+    () => () => {
+      scheduleAttempt.current += 1;
+    },
+    []
+  );
   const scheduleRetry = useScheduleRetry();
   const scheduleNow = useScheduleClock();
   const scheduleProblem = resolveScheduledFor(scheduledFor, scheduleNow).error;
@@ -307,6 +371,19 @@ function ComposeWorkspace() {
   // removal — a scheduled post may still reference it; the scheduler cleans
   // it up after publishing.
   function applyVideoFile(next: File | null) {
+    // The clip a pending schedule was baking no longer exists: abandon that
+    // attempt so its prompt cannot schedule the removed video. Once the
+    // request is on the wire Cancel cannot abort it, so leave the lock alone —
+    // otherwise a removal would open the composer for a second dispatch while
+    // the first POST is still pending.
+    if (!dispatching) {
+      scheduleAttempt.current += 1;
+      scheduleRetry.cancel();
+      // An abandoned attempt no longer owns the controls; its own finally will
+      // skip the reset because the attempt id moved on.
+      setScheduling(false);
+      setEditorLocked(false);
+    }
     if (videoPreviewUrl) URL.revokeObjectURL(videoPreviewUrl);
     setVideoFile(next);
     setVideoPreviewUrl(next ? URL.createObjectURL(next) : null);
@@ -330,18 +407,41 @@ function ComposeWorkspace() {
    * playback), finalizes the recording to MP4, then re-stages the result;
    * any failure falls back to posting the original clip.
    */
-  async function animatedVideoUrl(): Promise<string | null> {
+  async function animatedVideoUrl(isCurrent?: () => boolean): Promise<string | null> {
     if (!videoUrl) return videoUrl;
     if (!animations.length || !videoPreviewUrl) return videoUrl;
+    // A detached render from a cancelled attempt may still be recording.
+    // Refuse a third rather than stacking recorders the compositor cannot
+    // serve: the throw surfaces in the caller's catch and fails the attempt
+    // with a clear message instead of queueing behind an unbounded pile.
+    if (rendersInFlight.current >= MAX_CONCURRENT_BAKES) {
+      throw new Error(
+        'The previous animation render is still finishing — try again in a moment.'
+      );
+    }
+    // A cancelled attempt can leave its bake running while a newer one starts;
+    // only the newest bake may move progress, warn, or clear the flags.
+    const bakeId = ++bakeSequence.current;
+    const ownsBake = () => bakeId === bakeSequence.current;
     setBaking(true);
     setBakePct(0);
     try {
-      const finalized = await bakeAndFinalizeVideo({
-        videoUrl: videoPreviewUrl,
-        attachments: animations,
-        values: animValues,
-        onProgress: setBakePct,
-      });
+      let finalized: File;
+      rendersInFlight.current += 1;
+      try {
+        finalized = await bakeAndFinalizeVideo({
+          videoUrl: videoPreviewUrl,
+          attachments: animations,
+          values: animValues,
+          onProgress: (pct) => {
+            if (ownsBake()) setBakePct(pct);
+          },
+        });
+      } finally {
+        rendersInFlight.current -= 1;
+      }
+      // A cancelled schedule must not pay for staging a blob nobody will post.
+      if (isCurrent && !isCurrent()) return null;
       const staged = await stageUpload(
         `compose/${Date.now()}-${finalized.name.replace(/[^\w.-]+/g, '_')}`,
         finalized,
@@ -349,16 +449,22 @@ function ComposeWorkspace() {
       );
       return staged.url;
     } catch (error) {
-      toast.warning('Posting without the animation', {
-        description:
-          error instanceof Error
-            ? error.message
-            : 'The animation could not be rendered in this browser.',
-      });
+      if (ownsBake()) {
+        toast.warning('Posting without the animation', {
+          description:
+            error instanceof Error
+              ? error.message
+              : 'The animation could not be rendered in this browser.',
+        });
+      }
       return videoUrl;
     } finally {
-      setBaking(false);
-      setBakePct(null);
+      // An abandoned bake still clears its own flags when no newer bake owns
+      // them; when one does, its state belongs to the newer bake.
+      if (ownsBake()) {
+        setBaking(false);
+        setBakePct(null);
+      }
     }
   }
 
@@ -393,15 +499,17 @@ function ComposeWorkspace() {
     setDraft('');
     setStats(null);
     setImages([]);
+    setComposerRevision((revision) => revision + 1);
     applyVideoFile(null);
     setConfirmDelete(false);
     setScheduleOpen(false);
+    setEditorLocked(false);
     setDraftLoadFailed(false);
     if (selected?.draft_id) void loadSavedDraft(selected);
   }, [selectedId, selected, loadSavedDraft]);
 
   async function generateDraft() {
-    if (!selected) return;
+    if (!selected || drafting || publishing || scheduling || deleting) return;
     setDrafting(true);
     setConfirmDelete(false);
     try {
@@ -522,6 +630,11 @@ function ComposeWorkspace() {
 
   async function schedulePost() {
     if (!selected || !draft.trim()) return;
+    // Regeneration will replace the draft this request would capture, so wait
+    // for it to land instead of scheduling text the editor is about to drop.
+    // A delete or a publish already in flight will clear or post this draft;
+    // an image still processing would miss the attachments array entirely.
+    if (drafting || deleting || publishing || imagesBusy) return;
     // A video must finish staging before the post can be scheduled.
     if (videoFile && !videoUrl) return;
     const schedule = resolveScheduledFor(scheduledFor);
@@ -531,8 +644,26 @@ function ComposeWorkspace() {
     }
     setScheduleError('');
     setScheduling(true);
+    setEditorLocked(true);
+    const attempt = ++scheduleAttempt.current;
     try {
-      const finalVideoUrl = videoUrl ? await animatedVideoUrl() : null;
+      const finalVideoUrl = videoUrl
+        ? await animatedVideoUrl(() => attempt === scheduleAttempt.current)
+        : null;
+      // The animated bake re-stages a fresh blob; with the schedule abandoned,
+      // no request will consume it — remove it instead of leaving it orphaned
+      // in the store.
+      const discardBake = () => {
+        if (finalVideoUrl && finalVideoUrl !== videoUrl) {
+          deleteStagedBlob(finalVideoUrl);
+        }
+      };
+      // Cancelled while the bake ran: no prompt, no post, and the abandoned
+      // bake blob is cleaned up.
+      if (attempt !== scheduleAttempt.current) {
+        discardBake();
+        return;
+      }
       // The bake can run for the clip's full length; re-check against the
       // submit-time clock so the slot is still valid when the request lands.
       // On a miss, ask for a new time here — the staged/baked video is reused,
@@ -542,16 +673,20 @@ function ComposeWorkspace() {
         'post'
       );
       if (submit.kind === 'cancelled') {
-        // The animated bake re-stages a fresh blob; with the schedule
-        // abandoned, no request will consume it — remove it instead of
-        // leaving it orphaned in the store.
-        if (finalVideoUrl && finalVideoUrl !== videoUrl) {
-          deleteStagedBlob(finalVideoUrl);
-        }
+        discardBake();
+        return;
+      }
+      if (attempt !== scheduleAttempt.current) {
+        discardBake();
         return;
       }
       if (submit.picked) setScheduledFor(submit.picked);
       const when = new Date(submit.iso);
+      // The request is on the wire now; Cancel can no longer abort it. The
+      // ref moves synchronously so a reply landing before the re-render that
+      // publishes the state already sees the dispatch lock held.
+      setDispatchingAttempt(attempt);
+      dispatchingRef.current = true;
       const res = await fetch('/api/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -565,7 +700,19 @@ function ComposeWorkspace() {
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Could not schedule the post.');
+      if (!res.ok) {
+        // 400/401/404 are pre-insert rejections: the schedule row does not
+        // exist, so nothing will consume the freshly baked blob. An error or
+        // an ambiguous network failure may still be inserting — keep it.
+        if (
+          res.status === 400 ||
+          res.status === 401 ||
+          res.status === 404
+        ) {
+          discardBake();
+        }
+        throw new Error(data.error ?? 'Could not schedule the post.');
+      }
       toast.success('Post scheduled', {
         description: when.toLocaleString('en-PH', {
           month: 'short',
@@ -574,7 +721,9 @@ function ComposeWorkspace() {
           minute: '2-digit',
         }),
       });
-      setScheduleOpen(false);
+      // A picker reopened while this request was pending belongs to a newer
+      // attempt — its close must not shut that one.
+      if (attempt === scheduleAttempt.current) setScheduleOpen(false);
       // Refresh the queue so the row's status stops showing its pre-schedule state.
       await load();
     } catch (error) {
@@ -583,11 +732,26 @@ function ComposeWorkspace() {
           error instanceof Error ? error.message : 'Please try again.',
       });
     } finally {
-      setScheduling(false);
+      // This request is done either way; only its own attempt may release the
+      // composer, so a cancelled attempt cannot unlock a newer one. The ref
+      // tracks the same updater so the release is synchronous too.
+      setDispatchingAttempt((current) => {
+        const next = current === attempt ? null : current;
+        dispatchingRef.current = next !== null;
+        return next;
+      });
+      if (attempt === scheduleAttempt.current) {
+        setEditorLocked(false);
+        setScheduling(false);
+      }
     }
   }
 
   async function deleteDraftFor(item: QueueItem) {
+    // A dispatch, a delete, or a pending draft generation owns the composer
+    // until it settles; overlapping them would let the other clear the
+    // first's locks — or delete the story the generation is writing for.
+    if (scheduling || deleting || publishing || drafting) return;
     setDeleting(true);
     try {
       const res = await fetch(`/api/drafts?newsItemId=${item.id}`, {
@@ -599,6 +763,7 @@ function ComposeWorkspace() {
       }
       if (selected?.id === item.id) {
         setDraft('');
+        setComposerRevision((revision) => revision + 1);
         setStats(null);
         setImages([]);
         applyVideoFile(null);
@@ -620,6 +785,8 @@ function ComposeWorkspace() {
 
   async function publish() {
     if (!selected || !draft.trim()) return;
+    // The draft captured below would be replaced under the request.
+    if (drafting || deleting) return;
     // A video must finish staging before the post can go out.
     if (videoFile && !videoUrl) return;
 
@@ -631,7 +798,12 @@ function ComposeWorkspace() {
       return;
     }
 
+    // The schedule flow locks the editor for the same reason: the request
+    // below carries the draft captured now, so a pending assistant rewrite
+    // must not change the editor while the POST is out.
     setPublishing(true);
+    publishingRef.current = true;
+    setEditorLocked(true);
     try {
       const finalVideoUrl = videoUrl ? await animatedVideoUrl() : null;
       const res = await fetch('/api/publish', {
@@ -670,6 +842,10 @@ function ComposeWorkspace() {
       });
     } finally {
       setPublishing(false);
+      publishingRef.current = false;
+      // Publish holds the lock itself, so releasing it unconditionally here
+      // cannot drop a schedule attempt's lock.
+      setEditorLocked(false);
     }
   }
 
@@ -837,6 +1013,8 @@ function ComposeWorkspace() {
                     <textarea
                       value={draft}
                       onChange={(event) => setDraft(event.target.value)}
+                      readOnly={editorLocked}
+                      aria-busy={editorLocked}
                       placeholder="Generate a draft from the source story, or start writing here…"
                       aria-label="Facebook post draft"
                       className="min-h-[260px] w-full resize-y bg-transparent text-[15px] leading-7 text-foreground outline-none placeholder:text-muted-foreground"
@@ -855,8 +1033,9 @@ function ComposeWorkspace() {
                         <button
                           type="button"
                           onClick={() => applyVideoFile(null)}
+                          disabled={editorLocked}
                           aria-label="Remove video"
-                          className="tap-target grid size-6 place-items-center rounded-full border border-border bg-card text-faint shadow-sm transition-colors hover:border-destructive/40 hover:text-destructive"
+                          className="tap-target grid size-6 place-items-center rounded-full border border-border bg-card text-faint shadow-sm transition-colors hover:border-destructive/40 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           <X className="size-3" aria-hidden />
                         </button>
@@ -907,8 +1086,9 @@ function ComposeWorkspace() {
                             <button
                               type="button"
                               onClick={() => removeImage(index)}
+                              disabled={editorLocked}
                               aria-label={`Remove attachment ${index + 1}`}
-                              className="tap-target absolute -right-1.5 -top-1.5 grid size-6 place-items-center rounded-full border border-border bg-card text-faint shadow-sm transition-colors hover:border-destructive/40 hover:text-destructive"
+                              className="tap-target absolute -right-1.5 -top-1.5 grid size-6 place-items-center rounded-full border border-border bg-card text-faint shadow-sm transition-colors hover:border-destructive/40 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
                             >
                               <X className="size-3" aria-hidden />
                             </button>
@@ -917,7 +1097,9 @@ function ComposeWorkspace() {
                         <button
                           type="button"
                           onClick={() => imageInputRef.current?.click()}
-                          disabled={imagesBusy || images.length >= MAX_IMAGES}
+                          disabled={
+                            imagesBusy || editorLocked || images.length >= MAX_IMAGES
+                          }
                           aria-label="Add images to the post"
                           title={`Attach up to ${MAX_IMAGES} images`}
                           className="grid size-16 place-items-center rounded-md border border-dashed border-border text-faint transition-colors hover:border-brand/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
@@ -955,6 +1137,7 @@ function ComposeWorkspace() {
                           label="Attach a video — optional"
                           hint="MP4/MOV · 1 GB max"
                           file={videoFile}
+                          disabled={editorLocked}
                           onPick={applyVideoFile}
                           onClear={() => applyVideoFile(null)}
                           icon={<Upload className="size-3.5" />}
@@ -976,7 +1159,7 @@ function ComposeWorkspace() {
                         slots={animSlots}
                         loops={animLoops}
                         values={animValues}
-                        disabled={videoStaging || baking}
+                        disabled={videoStaging || baking || editorLocked}
                         onSelect={selectAnimation}
                         onLoopChange={(slot, loop) =>
                           setAnimLoops((current) => ({
@@ -996,6 +1179,7 @@ function ComposeWorkspace() {
                         selected={pages.selected}
                         onSelect={pages.selectOne}
                         loading={pages.loading}
+                        disabled={editorLocked}
                       />
                     </div>
                     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] tabular-nums text-muted-foreground">
@@ -1019,7 +1203,13 @@ function ComposeWorkspace() {
                             variant="outline"
                             size="sm"
                             onClick={generateDraft}
-                            disabled={drafting || !selected}
+                            disabled={
+                              drafting ||
+                              scheduling ||
+                              publishing ||
+                              deleting ||
+                              !selected
+                            }
                           >
                             <RefreshCw
                               className={cn(
@@ -1035,7 +1225,13 @@ function ComposeWorkspace() {
                             variant="brand"
                             size="sm"
                             onClick={generateDraft}
-                            disabled={drafting || !selected}
+                            disabled={
+                              drafting ||
+                              scheduling ||
+                              publishing ||
+                              deleting ||
+                              !selected
+                            }
                           >
                             <Sparkles className="size-3.5" aria-hidden />
                             {drafting ? 'Drafting…' : 'Draft post'}
@@ -1059,6 +1255,9 @@ function ComposeWorkspace() {
                             !facebook.connected ||
                             !pages.selected.length ||
                             publishing ||
+                            scheduling ||
+                            drafting ||
+                            deleting ||
                             baking ||
                             imagesBusy ||
                             videoStaging ||
@@ -1074,11 +1273,20 @@ function ComposeWorkspace() {
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => setScheduleOpen((open) => !open)}
+                          onClick={() => {
+                            // Closing the picker abandons any bake still
+                            // running for it.
+                            if (scheduleOpen) {
+                              scheduleAttempt.current += 1;
+                              scheduleRetry.cancel();
+                            }
+                            setScheduleOpen((open) => !open);
+                          }}
                           disabled={
                             !draft ||
                             !facebook.connected ||
                             !pages.selected.length ||
+                            scheduling ||
                             baking ||
                             imagesBusy ||
                             videoStaging ||
@@ -1097,7 +1305,9 @@ function ComposeWorkspace() {
                                 variant="destructive"
                                 size="sm"
                                 onClick={() => selected && deleteDraftFor(selected)}
-                                disabled={deleting}
+                                disabled={
+                                  deleting || scheduling || publishing || drafting
+                                }
                               >
                                 <Trash2 className="size-3.5" aria-hidden />
                                 {deleting ? 'Deleting…' : 'Confirm delete'}
@@ -1105,8 +1315,10 @@ function ComposeWorkspace() {
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                onClick={() => setConfirmDelete(false)}
-                                disabled={deleting}
+                              onClick={() => setConfirmDelete(false)}
+                              disabled={
+                                deleting || scheduling || publishing || drafting
+                              }
                               >
                                 Cancel
                               </Button>
@@ -1116,6 +1328,7 @@ function ComposeWorkspace() {
                               variant="ghost"
                               size="sm"
                               onClick={() => setConfirmDelete(true)}
+                              disabled={scheduling || publishing || drafting}
                             >
                               <Trash2 className="size-3.5" aria-hidden />
                               Delete draft
@@ -1175,16 +1388,42 @@ function ComposeWorkspace() {
                             size="sm"
                             variant="brand"
                             onClick={schedulePost}
-                            disabled={scheduling}
+                            disabled={
+                              scheduling ||
+                              drafting ||
+                              deleting ||
+                              publishing ||
+                              imagesBusy
+                            }
                           >
                             {scheduling ? 'Scheduling…' : 'Confirm schedule'}
                           </Button>
                           <Button
                             size="sm"
                             variant="ghost"
-                            onClick={() => setScheduleOpen(false)}
+                            onClick={() => {
+                              // Abandons a bake still in progress instead of
+                              // leaving it to prompt or post after Cancel.
+                              scheduleAttempt.current += 1;
+                              scheduleRetry.cancel();
+                              // The render API cannot be cancelled, so detach
+                              // the running bake instead: bumping the sequence
+                              // silences its progress and finally, and the
+                              // flags come back now rather than when the
+                              // recording happens to end.
+                              bakeSequence.current += 1;
+                              setBaking(false);
+                              setBakePct(null);
+                              setScheduleOpen(false);
+                              // Hand the controls back now; the abandoned bake
+                              // unwinds in the background and its finally will
+                              // not touch this attempt's state.
+                              setEditorLocked(false);
+                              setScheduling(false);
+                            }}
+                            disabled={dispatching}
                           >
-                            Cancel
+                            {dispatching ? 'Sending…' : 'Cancel'}
                           </Button>
                         </div>
                       )}
@@ -1252,7 +1491,25 @@ function ComposeWorkspace() {
       <AssistantChat
         draft={draft}
         storyId={selected?.id}
-        onDraftChange={setDraft}
+        disabled={scheduling || publishing}
+        revision={composerRevision}
+        // A reply can land after the attempt started; read the live lock from
+        // the ref, not the render that sent the request. Before dispatch the
+        // attempt is abandoned so the new text is what gets scheduled; after
+        // dispatch the request already carries the old text, so the reply is
+        // dropped rather than showing a draft that was not published.
+        onDraftChange={(text) => {
+          if (dispatchingRef.current) return false;
+          if (publishingRef.current) return false;
+          if (editorLockedRef.current) {
+            scheduleAttempt.current += 1;
+            scheduleRetry.cancel();
+            setEditorLocked(false);
+            setScheduling(false);
+          }
+          setDraft(text);
+          return true;
+        }}
         contextLabel="story draft"
       />
     </AppFrame>

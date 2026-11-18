@@ -25,6 +25,8 @@ import {
   resolveScheduledFor,
 } from '@/lib/publishing/schedule';
 import {
+  SERVER_FLOOR_TRANSIT_MS,
+  retryAfterMessage,
   slowUploadMessage,
   useScheduleRetry,
 } from '@/components/publishing/schedule-retry-dialog';
@@ -61,6 +63,9 @@ export default function VideosPage() {
   const pages = useManagedPages();
   const [file, setFile] = useState<File | null>(null);
   const previewVideoRef = useRef<HTMLVideoElement>(null);
+  // Bumped by every file pick/clear so an in-flight publish can tell its clip
+  // from whatever the composer holds now.
+  const fileGeneration = useRef(0);
   const [thumbnail, setThumbnail] = useState<File | null>(null);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -76,6 +81,30 @@ export default function VideosPage() {
   }, [scheduledFor]);
   const scheduleRetry = useScheduleRetry();
   const [busy, setBusy] = useState(false);
+  // Read by the assistant's reply handler, which can outlive the render that
+  // sent the request.
+  const busyRef = useRef(false);
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
+  // Bumped whenever the composer is replaced or reset, so an assistant reply
+  // that outlives its post cannot refill the next one.
+  const [composerRevision, setComposerRevision] = useState(0);
+  // The last slot the server refused. Cancelling the retry dialog must not
+  // let the next attempt upload to the same refused time.
+  const refusedSlotRef = useRef<{
+    ms: number;
+    label: string;
+    /** Server-reported floor for the refused slot, if it sent one. */
+    earliestMs: number;
+    /** Monotonic reading when that floor was received. */
+    observedMonoMs: number;
+  } | null>(null);
+  // How long the last transfer of this clip took. The retry prompt adds it as
+  // the next upload's lead; it belongs to the clip, so a replacement drops it.
+  const uploadEstimateRef = useRef<{ generation: number; ms: number } | null>(
+    null
+  );
   const [uploadPct, setUploadPct] = useState<number | null>(null);
   const [results, setResults] = useState<PublishResult[] | null>(null);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
@@ -125,6 +154,17 @@ export default function VideosPage() {
   }
 
   function applyVideoFile(next: File | null) {
+    // Every pick or clear invalidates an in-flight publish: it must not retry
+    // under a replaced clip, nor clear fields the user has since re-filled.
+    fileGeneration.current += 1;
+    // The measured upload time described the old transfer, not this clip's.
+    uploadEstimateRef.current = null;
+    // A new clip (or the reset after publishing) starts a new composer, so a
+    // revision reply still in flight belongs to the old one.
+    setComposerRevision((revision) => revision + 1);
+    // Settles a retry prompt opened for the replaced clip as cancelled, so
+    // the abandoned attempt stops instead of waiting on an answer.
+    scheduleRetry.cancel();
     if (fileUrl) URL.revokeObjectURL(fileUrl);
     setFile(next);
     setFileUrl(next ? URL.createObjectURL(next) : null);
@@ -230,10 +270,35 @@ export default function VideosPage() {
       }
     }
     let scheduledForIso: string | null = null;
+    // The refused slot and the server's reported floor advance with the
+    // monotonic clock. The pre-bake check and the post-bake recheck share one
+    // projection so a long bake cannot leave a slot below the server's floor.
+    // The stored floor is raw; each consumer applies the transit pad exactly
+    // once at its own boundary — here for the pre-bake check, and inside the
+    // retry hook for whatever the recheck passes it.
+    const projectedServerFloor = () => {
+      const refused = refusedSlotRef.current;
+      if (!refused?.earliestMs) return 0;
+      return refused.earliestMs + (performance.now() - refused.observedMonoMs);
+    };
+    const serverFloorNow = () => {
+      const refused = refusedSlotRef.current;
+      if (!refused) return 0;
+      return Math.max(refused.ms, projectedServerFloor() + SERVER_FLOOR_TRANSIT_MS);
+    };
     if (scheduleOn) {
       const schedule = resolveScheduledFor(scheduledFor);
       if (schedule.iso === null) {
         setScheduleError(schedule.error);
+        return;
+      }
+      // A refused slot stays refused: cancelling the retry dialog returns to
+      // the composer with that time still selected, so block it here instead
+      // of uploading the same video to earn the same 400.
+      const refused = refusedSlotRef.current;
+      const floorMs = serverFloorNow();
+      if (refused && new Date(schedule.iso).getTime() <= floorMs) {
+        setScheduleError(retryAfterMessage(refused.label));
         return;
       }
       scheduledForIso = schedule.iso;
@@ -243,6 +308,7 @@ export default function VideosPage() {
     setBusy(true);
     setResults(null);
     setUploadPct(0);
+    const generation = fileGeneration.current;
     try {
       // Bake the attached animations into the footage first — the browser
       // plays the video once, records the composited canvas and the result is
@@ -266,16 +332,25 @@ export default function VideosPage() {
           }
           uploadFile = baked;
         } catch (error) {
-          toast.warning('Posting without the animation', {
-            description:
-              error instanceof Error
-                ? error.message
-                : 'The animation could not be rendered in this browser.',
-          });
+          // A replacement during the bake owns the composer now; the abandoned
+          // render's failure is not this clip's business. When the generation
+          // still matches, warn and fall back to the original clip as before.
+          if (generation === fileGeneration.current) {
+            toast.warning('Posting without the animation', {
+              description:
+                error instanceof Error
+                  ? error.message
+                  : 'The animation could not be rendered in this browser.',
+            });
+          }
         } finally {
           setBakePct(null);
         }
       }
+
+      // A replacement picked during the bake makes this upload stale: the
+      // fields now describe a different clip, so stop before prompting.
+      if (generation !== fileGeneration.current) return;
 
       // The bake can run for the clip's full length; re-check against the
       // submit-time clock so the slot is still valid when the request lands.
@@ -284,9 +359,27 @@ export default function VideosPage() {
       if (scheduleOn) {
         const submit = await scheduleRetry.resolveSubmit(
           scheduledForRef.current,
-          'video'
+          'video',
+          {
+            // The bake may have outlasted the slot's clearance of the server
+            // floor, so the recheck must see the same advancing floor the
+            // pre-bake check used — unpadded, because the hook applies the
+            // transit pad itself. A previous transfer of this clip estimates
+            // the next upload's lead; without it the suggestion can sit
+            // inside the transfer it must survive.
+            seedAfterMs:
+              uploadEstimateRef.current?.generation === generation
+                ? uploadEstimateRef.current.ms
+                : undefined,
+            serverEarliestMs: projectedServerFloor() || undefined,
+            afterMs: refusedSlotRef.current?.ms,
+            afterLabel: refusedSlotRef.current?.label,
+          }
         );
         if (submit.kind === 'cancelled') return;
+        // The dialog can sit open while the clip is replaced; the picked time
+        // belongs to the abandoned attempt, so don't write it into the new one.
+        if (generation !== fileGeneration.current) return;
         scheduledForIso = submit.iso;
         if (submit.picked) {
           scheduledForRef.current = submit.picked;
@@ -364,6 +457,8 @@ export default function VideosPage() {
       // relabel the rejection message for a request already sent.
       let sentLabel = scheduledForRef.current;
       while (!data) {
+        // Never resend a clip the user has already replaced.
+        if (generation !== fileGeneration.current) return;
         if (scheduledForIso) form.set('scheduledFor', scheduledForIso);
         setUploadPct(0);
         const sentIso = scheduledForIso;
@@ -375,34 +470,49 @@ export default function VideosPage() {
         }
         const { status, error, earliest } = result.failure;
         rejected += 1;
-        if (
-          !scheduleOn ||
-          status !== 400 ||
-          error.message !== SCHEDULE_TOO_SOON_ERROR ||
-          rejected > 2
-        ) {
-          throw error;
-        }
+        const tooSoon =
+          scheduleOn &&
+          status === 400 &&
+          error.message === SCHEDULE_TOO_SOON_ERROR;
         // The transfer clock is monotonic; wall-clock jumps must not fake a
         // longer (or shorter) upload than actually happened.
         const uploadMs = performance.now() - startedAt;
-        // The server's clock can run ahead of this one, so its own earliest
-        // acceptable slot wins when it is later — and because the next upload
-        // lands that much later, the measured transfer is added to it.
-        const serverEarliest = earliest
-          ? new Date(earliest).getTime()
-          : Number.NaN;
-        const afterMs = Math.max(
-          sentIso ? new Date(sentIso).getTime() : 0,
-          Number.isNaN(serverEarliest) ? 0 : serverEarliest + uploadMs
-        );
+        // The next transfer of this clip will take about as long as this one.
+        uploadEstimateRef.current = { generation, ms: uploadMs };
+        // The server's own floor, kept as an absolute instant so the retry
+        // hook can advance it with the monotonic clock while the dialog is
+        // open — a browser clock correction must not shrink the lead.
+        const serverEarliest = earliest ? new Date(earliest).getTime() : NaN;
+        // Remember every matching refusal, even the one that spends the last
+        // automatic retry: the composer would otherwise still hold that slot
+        // and upload to it again from scratch.
+        if (tooSoon && sentIso) {
+          refusedSlotRef.current = {
+            ms: new Date(sentIso).getTime(),
+            label: sentLabel,
+            // The received floor is stored raw: the transit pad is applied
+            // once, by whichever consumer projects it — the pre-bake check
+            // here, and the retry hook at its own boundary.
+            earliestMs: Number.isNaN(serverEarliest) ? 0 : serverEarliest,
+            observedMonoMs: performance.now(),
+          };
+        }
+        if (!tooSoon || rejected > 2) {
+          throw error;
+        }
+        // A replacement during the transfer makes this rejection stale: the
+        // prompt and any picked time belong to the abandoned clip.
+        if (generation !== fileGeneration.current) return;
         const submit = await scheduleRetry.resolveSubmit(
           scheduledForRef.current,
           'video',
           {
             seedAfterMs: uploadMs,
-            // The refused slot is the floor the next pick must clear.
-            afterMs: afterMs || undefined,
+            serverEarliestMs: Number.isNaN(serverEarliest)
+              ? undefined
+              : serverEarliest,
+            // The refused slot itself must not be offered again.
+            afterMs: sentIso ? new Date(sentIso).getTime() : undefined,
             afterLabel: sentLabel,
             // The browser clock may still accept what the server refused.
             forcePrompt: true,
@@ -410,6 +520,7 @@ export default function VideosPage() {
           }
         );
         if (submit.kind === 'cancelled') return;
+        if (generation !== fileGeneration.current) return;
         scheduledForIso = submit.iso;
         if (submit.picked) {
           sentLabel = submit.picked;
@@ -418,10 +529,12 @@ export default function VideosPage() {
           setScheduleError('');
         }
       }
+      refusedSlotRef.current = null;
       setResults(data.results ?? []);
       toast.success(scheduleOn ? 'Video scheduled' : 'Video published', {
         description: data.warning,
       });
+      if (generation !== fileGeneration.current) return;
       applyVideoFile(null);
       setThumbnail(null);
       setTitle('');
@@ -492,6 +605,7 @@ export default function VideosPage() {
                 id="video-title"
                 value={title}
                 onChange={(event) => setTitle(event.target.value)}
+                disabled={busy}
                 maxLength={200}
                 placeholder="Headline for the video"
                 className={inputClass}
@@ -505,6 +619,7 @@ export default function VideosPage() {
                 id="video-thumbnail"
                 type="file"
                 accept="image/jpeg,image/png,image/webp"
+                disabled={busy}
                 onChange={(event) => {
                   const picked = event.target.files?.[0] ?? null;
                   event.target.value = '';
@@ -535,6 +650,7 @@ export default function VideosPage() {
               id="video-description"
               value={description}
               onChange={(event) => setDescription(event.target.value)}
+              disabled={busy}
               rows={4}
               maxLength={5000}
               placeholder="Describe the video…"
@@ -550,6 +666,7 @@ export default function VideosPage() {
               id="video-targeting"
               value={targeting}
               onChange={(event) => setTargeting(event.target.value)}
+              disabled={busy}
               rows={3}
               spellCheck={false}
               placeholder={'{"geo_locations":{"countries":["PH"]}}'}
@@ -562,6 +679,7 @@ export default function VideosPage() {
             selected={pages.selected}
             onSelect={pages.selectOne}
             loading={pages.loading}
+            disabled={busy}
           />
 
           <ScheduleField
@@ -573,6 +691,7 @@ export default function VideosPage() {
               setScheduleError('');
             }}
             error={scheduleError}
+            disabled={busy}
           />
 
           <div className="flex flex-wrap items-center gap-2">
@@ -612,7 +731,16 @@ export default function VideosPage() {
       {scheduleRetry.dialog}
       <AssistantChat
         draft={description}
-        onDraftChange={setDescription}
+        disabled={busy}
+        revision={composerRevision}
+        // A reply that lands mid-attempt must not rewrite the description the
+        // retry already captured; a ref avoids the stale closure from the
+        // render that sent the request.
+        onDraftChange={(text) => {
+          if (busyRef.current) return false;
+          setDescription(text);
+          return true;
+        }}
         contextLabel="video description (5,000 character limit)"
       />
     </PublishPage>

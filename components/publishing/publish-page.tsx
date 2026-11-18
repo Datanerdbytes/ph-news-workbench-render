@@ -339,6 +339,7 @@ export function FilePicker({
   onClear,
   icon,
   validate,
+  disabled = false,
 }: {
   id: string;
   accept: string;
@@ -350,6 +351,8 @@ export function FilePicker({
   icon: React.ReactNode;
   /** Pick-time validation: return a human reason to reject, or null to accept. */
   validate?: (file: File) => string | null;
+  /** Locks the picker while a submit is in flight so its file cannot change. */
+  disabled?: boolean;
 }) {
   const [pickError, setPickError] = useState<string | null>(null);
   return (
@@ -360,7 +363,12 @@ export function FilePicker({
       <div className="mt-1.5 flex items-center gap-2 rounded-lg border border-dashed border-border bg-background/60 px-2 py-1.5">
         <label
           htmlFor={id}
-          className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+          className={cn(
+            'flex min-w-0 flex-1 items-center gap-1.5 text-left text-xs font-medium text-muted-foreground transition-colors',
+            disabled
+              ? 'cursor-not-allowed opacity-50'
+              : 'cursor-pointer hover:text-foreground'
+          )}
         >
           <span aria-hidden>{icon}</span>
           <span className="truncate">{file ? file.name : label}</span>
@@ -369,6 +377,7 @@ export function FilePicker({
           id={id}
           type="file"
           accept={accept}
+          disabled={disabled}
           className="sr-only"
           aria-invalid={Boolean(pickError)}
           aria-describedby={pickError ? `${id}-error` : undefined}
@@ -393,7 +402,8 @@ export function FilePicker({
               setPickError(null);
               onClear();
             }}
-            className="tap-target rounded px-2 py-1 text-[11px] font-semibold text-muted-foreground transition-colors hover:text-foreground"
+            disabled={disabled}
+            className="tap-target rounded px-2 py-1 text-[11px] font-semibold text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
           >
             Clear
           </button>
@@ -417,11 +427,14 @@ export function PageSelector({
   selected,
   onSelect,
   loading,
+  disabled = false,
 }: {
   pages: ManagedPage[];
   selected: string[];
   onSelect: (id: string) => void;
   loading: boolean;
+  /** Locks the destination while a submit built from it is in flight. */
+  disabled?: boolean;
 }) {
   const selectedId = selected[0] ?? null;
   const activePage = pages.find((page) => page.id === selectedId);
@@ -441,7 +454,7 @@ export function PageSelector({
   // focus), not from the controlled selection, so repeated presses keep
   // walking even before the parent state round-trips.
   function onKeyDown(event: React.KeyboardEvent) {
-    if (!pages.length) return;
+    if (!pages.length || disabled) return;
     const target =
       event.target instanceof HTMLButtonElement ? event.target : null;
     const focused = target ? radioRefs.current.indexOf(target) : -1;
@@ -496,8 +509,10 @@ export function PageSelector({
                   aria-checked={active}
                   tabIndex={page.id === tabIndexId ? 0 : -1}
                   onClick={() => onSelect(page.id)}
+                  disabled={disabled}
                   className={cn(
                     'flex cursor-pointer items-center gap-1.5 rounded-full border py-1.5 pl-2 pr-3 text-xs font-semibold transition-colors',
+                    'disabled:cursor-not-allowed disabled:opacity-50',
                     active
                       ? 'border-ink bg-ink text-paper'
                       : 'border-border bg-background/60 text-muted-foreground hover:text-foreground'
@@ -535,6 +550,7 @@ export function ScheduleField({
   value,
   onChange,
   error,
+  disabled = false,
   label = 'Schedule with Facebook',
   hint = '10 minutes to 75 days from now. Facebook publishes it from its own queue.',
 }: {
@@ -543,6 +559,8 @@ export function ScheduleField({
   value: string;
   onChange: (value: string) => void;
   error?: string;
+  /** Locked while a submit is in flight so its slot cannot be abandoned mid-upload. */
+  disabled?: boolean;
   /** Toggle copy — FB composers keep the default. */
   label?: string;
   /** Explainer under the picker — FB composers keep the default. */
@@ -562,6 +580,7 @@ export function ScheduleField({
         <input
           type="checkbox"
           checked={enabled}
+          disabled={disabled}
           onChange={(event) => onEnabled(event.target.checked)}
           className="size-4 accent-[var(--brand)]"
         />
@@ -574,6 +593,7 @@ export function ScheduleField({
             aria-label="Publish date and time"
             aria-invalid={Boolean(message)}
             aria-describedby={message ? 'schedule-error' : undefined}
+            disabled={disabled}
             min={bounds.min}
             max={bounds.max}
             value={value}
@@ -593,7 +613,8 @@ export function ScheduleField({
             <button
               type="button"
               onClick={() => onChange(defaultScheduleValue())}
-              className="mt-1 text-[11px] font-medium text-brand underline underline-offset-2"
+              disabled={disabled}
+              className="mt-1 text-[11px] font-medium text-brand underline underline-offset-2 disabled:cursor-not-allowed disabled:opacity-40"
             >
               Reset to tomorrow 9:00
             </button>
