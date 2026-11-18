@@ -19,7 +19,7 @@ CI (ci.yml)  +  CodeRabbit review  ──►  human approval  ──►  merge
 | Stage | Workflow | Job | What it does |
 | --- | --- | --- | --- |
 | Pull request | `ci.yml` | `static`, `test`, `docker`, `e2e` | Lint, types, unit tests, image build + Trivy scan, Playwright against the image |
-| Pull request | CodeRabbit | — | AI review; the approval it posts is what satisfies the branch rule |
+| Pull request | CodeRabbit | — | AI review, informational only — it never approves or blocks; the required CI checks and a human approval gate the merge |
 | Merge to `main` | `deploy.yml` | `resolve` | Picks the one commit the whole pipeline works on |
 | Merge to `main` | `deploy.yml` | `ci` | The same CI, run as a reusable workflow |
 | Merge to `main` | `deploy.yml` | `deploy` | Triggers the Render deploy, waits for it to go live, checks the health endpoint |
