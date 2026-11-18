@@ -35,12 +35,12 @@ export function uploadLeadMessage(seedAfterMs: number): string {
   return `The last upload took about ${upload} min — pick at least ${ahead} min ahead.`;
 }
 
-/** A server limit advances with elapsed time even if the device clock jumps. */
+/** Wall time includes sleep; clock jumps affect this estimate until refreshed. */
 type ServerFloor = { minimumMs: number; receivedAt: number };
 
 function serverMinimum(floor?: ServerFloor): number {
   return floor
-    ? floor.minimumMs + Math.max(0, performance.now() - floor.receivedAt)
+    ? floor.minimumMs + Math.max(0, Date.now() - floor.receivedAt)
     : 0;
 }
 
@@ -162,8 +162,8 @@ export function useScheduleRetry() {
     []
   );
 
-  // Refresh after sleep or while the dialog is open, without relying on the
-  // device wall clock. Confirmation performs a separate authoritative check.
+  // Refresh after sleep or while the dialog is open to correct wall-clock
+  // estimates. Confirmation performs a separate authoritative check.
   const refreshServerFloor = prompt?.refreshServerFloor;
   useEffect(() => {
     if (!refreshServerFloor) return;

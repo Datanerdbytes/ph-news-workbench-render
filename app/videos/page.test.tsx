@@ -216,8 +216,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   // The composer validates the schedule against the real clock, so pin it:
   // the mocked default ("2026-11-15T09:00") has to land inside the window.
-  // performance is faked too: the slow-upload retry measures the transfer with
-  // the monotonic clock, and advancing the fake timers moves both.
+  // Fake both clocks so sleep can advance Date while performance stays frozen.
   vi.useFakeTimers({ toFake: ["Date", "performance"] });
   vi.setSystemTime(new Date("2026-11-14T08:00:00"));
   sentForms = [];
@@ -282,14 +281,16 @@ describe("VideosPage composer", () => {
     expect(bakeMock).toHaveBeenCalledTimes(1);
   });
 
-  it("reopens the prompt when the server rejects the time after a slow upload", async () => {
+  it.each([false, true])("reopens after a slow upload (sleep: %s)", async (sleep) => {
     // The transfer itself takes 6 minutes; the server checks the schedule
     // only once the body has arrived, so the 08:15 slot is 9 minutes out.
     script = [
       {
         status: 400,
         body: { error: SCHEDULE_TOO_SOON_ERROR },
-        onSend: () => vi.advanceTimersByTime(6 * 60_000),
+        onSend: () => sleep
+          ? vi.setSystemTime(Date.now() + 6 * 60_000)
+          : vi.advanceTimersByTime(6 * 60_000),
       },
     ];
 
@@ -625,6 +626,33 @@ describe("VideosPage composer", () => {
     expect(screen.getByRole("button", { name: /Schedule at/ })).toBeDisabled();
     expect(screen.getByRole("alert")).toHaveTextContent("Pick 2026-11-14 08:34 or later");
     expect(sentForms).toHaveLength(1);
+  });
+
+  it("includes sleep during the server-time response in the retry floor", async () => {
+    script = [{ status: 400, body: {
+      error: SCHEDULE_TOO_SOON_ERROR,
+      earliest: new Date("2026-11-14T08:25").toISOString(),
+    } }];
+    render(<VideosPage />);
+    await flush();
+    pickVideo();
+    await flush();
+    fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+    fireEvent.change(screen.getByLabelText("Publish date and time"), { target: { value: "2026-11-14T08:15" } });
+    fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    const beforeSleep = performance.now();
+    vi.mocked(fetch).mockResolvedValueOnce({ ok: true, json: async () => {
+      vi.setSystemTime(Date.now() + 5 * 60_000);
+      return { earliest: new Date("2026-11-14T08:25").toISOString() };
+    } } as Response);
+    fireEvent.click(screen.getByRole("button", { name: /Schedule at/ }));
+    expect(await screen.findByRole("button", { name: /Schedule at 2026-11-14 08:31/ })).toBeEnabled();
+    expect(performance.now()).toBe(beforeSleep);
+    expect(sentForms).toHaveLength(1);
+    // The received timestamp uses the same wall clock as dialog aging.
+    await act(async () => { vi.setSystemTime(Date.now() + 2 * 60_000); clock.tick(); });
+    expect(screen.getByRole("alert")).toHaveTextContent("Pick 2026-11-14 08:32 or later");
   });
 
   it.each(["headers", "body"])("reopens the dialog when server time %s stalls", async (phase) => {

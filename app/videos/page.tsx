@@ -367,7 +367,7 @@ export default function VideosPage() {
         if (scheduledForIso) form.set('scheduledFor', scheduledForIso);
         setUploadPct(0);
         const sentIso = scheduledForIso;
-        const startedAt = performance.now();
+        const startedAt = Date.now();
         const result = await send(form);
         if ('response' in result) {
           data = result.response;
@@ -383,9 +383,9 @@ export default function VideosPage() {
         ) {
           throw error;
         }
-        // The transfer clock is monotonic; wall-clock jumps must not fake a
-        // longer (or shorter) upload than actually happened.
-        const uploadMs = performance.now() - startedAt;
+        // Wall time includes device sleep. Clock adjustments can affect this
+        // estimate; clamp backward jumps and refresh the server before retrying.
+        const uploadMs = Math.max(0, Date.now() - startedAt);
         // The server's clock can run ahead of this one, so its own earliest
         // acceptable slot wins when it is later — and because the next upload
         // lands that much later, the measured transfer is added to it.
@@ -395,7 +395,7 @@ export default function VideosPage() {
         const afterMs = sentIso ? new Date(sentIso).getTime() : 0;
         const serverFloor = Number.isNaN(serverEarliest)
           ? undefined
-          : { minimumMs: serverEarliest + uploadMs, receivedAt: performance.now() };
+          : { minimumMs: serverEarliest + uploadMs, receivedAt: Date.now() };
         const submit = await scheduleRetry.resolveSubmit(
           scheduledForRef.current,
           'video',
@@ -403,7 +403,7 @@ export default function VideosPage() {
             seedAfterMs: uploadMs,
             serverFloor,
             refreshServerFloor: serverFloor ? async () => {
-              const started = performance.now();
+              const started = Date.now();
               const controller = new AbortController();
               const deadline = setTimeout(() => controller.abort(), 10_000);
               try {
@@ -416,7 +416,7 @@ export default function VideosPage() {
                   ? new Date(data.earliest).getTime()
                   : Number.NaN;
                 if (!Number.isFinite(fresh)) throw new Error('Invalid server time');
-                const receivedAt = performance.now();
+                const receivedAt = Date.now();
                 return {
                   minimumMs: fresh + uploadMs + Math.max(0, receivedAt - started),
                   receivedAt,
