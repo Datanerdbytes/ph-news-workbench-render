@@ -5,13 +5,8 @@ const { lookupMock } = vi.hoisted(() => ({ lookupMock: vi.fn() }));
 // assertPublicUrl must never hit real DNS in unit tests.
 vi.mock('node:dns/promises', () => ({ lookup: lookupMock }));
 
-import {
-  assertPublicUrl,
-  isHlsUrl,
-  PreviewProxyError,
-  proxyUrl,
-  rewritePlaylist,
-} from './preview-proxy';
+import { isHlsUrl, proxyUrl, rewritePlaylist } from './preview-proxy';
+import { assertPublicUrl, PreviewProxyError } from './preview-proxy.server';
 
 /** Queue the addresses `lookup` reports for the hostname under test. */
 function resolveTo(...addresses: string[]) {

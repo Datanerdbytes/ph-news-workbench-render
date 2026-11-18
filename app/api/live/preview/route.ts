@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
+import { rewritePlaylist } from '@/lib/live/preview-proxy';
 import {
   assertPublicUrl,
   PreviewProxyError,
-  rewritePlaylist,
-} from '@/lib/live/preview-proxy';
+} from '@/lib/live/preview-proxy.server';
 import { requireWorkspace, unauthorized } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
