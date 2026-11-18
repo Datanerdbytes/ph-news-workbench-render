@@ -13,10 +13,11 @@ reviews:
   profile: chill
   # Informational only: CodeRabbit never issues approvals or
   # request-changes reviews, so its review can never gate a merge. Reviews
-  # and comments still run on every push to an open PR alongside the required
-  # CI checks; what blocks a merge is those checks alone. (The old gate —
-  # CodeRabbit's approval satisfying the 1-approval branch rule — was removed
-  # on purpose.)
+  # and comments still run on every push to an open PR. What gates a merge is
+  # the required CI checks plus the one approving review that `main`'s branch
+  # protection asks for — fulfilled by a person, not by CodeRabbit. (The old
+  # gate — CodeRabbit's approval satisfying that rule — was removed on
+  # purpose.)
   auto_approvals:
     enabled: false
   # A review that errors out fails the CodeRabbit check instead of passing it,
