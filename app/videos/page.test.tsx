@@ -524,4 +524,57 @@ describe("VideosPage composer", () => {
       new Date("2026-11-14T08:33").toISOString()
     );
   });
+
+  // Troll falls back two hours on 2026-10-25 (03:00 at +02 becomes 01:00 at
+  // +00), so the local hour 01:00–02:59 happens twice. CI runs this file
+  // under TZ=Antarctica/Troll for exactly that shift; elsewhere the wall
+  // clock does not repeat and the assertions would not hold, so the test
+  // skips outside it.
+  const tzIsTroll =
+    Intl.DateTimeFormat().resolvedOptions().timeZone === "Antarctica/Troll";
+  (tzIsTroll ? it : it.skip)(
+    "sends a repeated-hour slot that still clears the server's floor in UTC",
+    async () => {
+      // The clock starts before the fallback: 00:20 UTC is 02:20 local on the
+      // first pass of the repeated hour. The picked 02:50 is unambiguous to
+      // the parser (first occurrence, 00:50 UTC), but the 50-minute transfer
+      // spans the fallback — the server's floor has moved two hours past the
+      // wall clock by the time the body arrives.
+      serverOffsetMs = 10 * 60_000;
+      script = [{ onSend: () => vi.advanceTimersByTime(50 * 60_000) }, {}];
+      vi.setSystemTime(new Date("2026-10-25T00:20:00Z"));
+
+      render(<VideosPage />);
+      await flush();
+
+      pickVideo();
+      await flush();
+
+      fireEvent.click(screen.getByLabelText("Schedule with Facebook"));
+      fireEvent.change(screen.getByLabelText("Publish date and time"), {
+        target: { value: "2026-10-25T02:50" },
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /Schedule video/ }));
+      await waitFor(() => expect(sentForms).toHaveLength(1));
+      // The repeated hour's first occurrence: 02:50 at +02 is 00:50 UTC.
+      expect(sentForms[0].scheduledFor).toBe("2026-10-25T00:50:00.000Z");
+
+      // The server checks the slot on arrival (01:10 UTC), where its floor is
+      // already 01:30 UTC — the prompt re-seeds, and whatever it suggests must
+      // clear that floor as a UTC instant, not as a wall-clock label.
+      fireEvent.click(
+        await screen.findByRole("button", { name: /Schedule at/ })
+      );
+      await waitFor(() => expect(sentForms).toHaveLength(2));
+
+      expect(
+        new Date(String(sentForms[1].scheduledFor)).getTime()
+      ).toBeGreaterThanOrEqual(new Date("2026-10-25T01:30:00Z").getTime());
+      expect(toast.success).toHaveBeenCalledWith(
+        "Video scheduled",
+        expect.anything()
+      );
+    }
+  );
 });

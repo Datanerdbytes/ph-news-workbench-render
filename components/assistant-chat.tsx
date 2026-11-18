@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Loader2,
   SendHorizontal,
@@ -56,7 +56,11 @@ export function AssistantChat({
     draftRef.current = draft;
   }, [draft]);
   const revisionRef = useRef(revision);
-  useEffect(() => {
+  // Synced in a layout effect: a composer replacement queued in the same tick
+  // as a reply's continuation must be visible to the check that decides
+  // whether the reply still belongs to this composer, and a passive effect
+  // can run after that continuation reads the ref.
+  useLayoutEffect(() => {
     revisionRef.current = revision;
   }, [revision]);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -80,9 +84,12 @@ export function AssistantChat({
   // Chromium clears focus when the focused suggestion button unmounts (the
   // first message hides the suggestions), leaving the panel's Escape handler
   // with focus on <body> and ignoring the key. Recover only when focus was
-  // lost entirely — a modal that owns focus is left alone.
+  // lost entirely and no modal is open: the schedule retry's dialog owns the
+  // interaction while it is up, even in the instant its focus management has
+  // not landed yet.
   useEffect(() => {
     if (!open) return;
+    if (document.querySelector('[aria-modal="true"]')) return;
     if (!document.activeElement || document.activeElement === document.body) {
       closeRef.current?.focus();
     }

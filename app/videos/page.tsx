@@ -100,6 +100,11 @@ export default function VideosPage() {
     /** Monotonic reading when that floor was received. */
     observedMonoMs: number;
   } | null>(null);
+  // How long the last transfer of this clip took. The retry prompt adds it as
+  // the next upload's lead; it belongs to the clip, so a replacement drops it.
+  const uploadEstimateRef = useRef<{ generation: number; ms: number } | null>(
+    null
+  );
   const [uploadPct, setUploadPct] = useState<number | null>(null);
   const [results, setResults] = useState<PublishResult[] | null>(null);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
@@ -152,6 +157,8 @@ export default function VideosPage() {
     // Every pick or clear invalidates an in-flight publish: it must not retry
     // under a replaced clip, nor clear fields the user has since re-filled.
     fileGeneration.current += 1;
+    // The measured upload time described the old transfer, not this clip's.
+    uploadEstimateRef.current = null;
     // A new clip (or the reset after publishing) starts a new composer, so a
     // revision reply still in flight belongs to the old one.
     setComposerRevision((revision) => revision + 1);
@@ -266,16 +273,18 @@ export default function VideosPage() {
     // The refused slot and the server's reported floor advance with the
     // monotonic clock. The pre-bake check and the post-bake recheck share one
     // projection so a long bake cannot leave a slot below the server's floor.
+    // The stored floor is raw; each consumer applies the transit pad exactly
+    // once at its own boundary — here for the pre-bake check, and inside the
+    // retry hook for whatever the recheck passes it.
+    const projectedServerFloor = () => {
+      const refused = refusedSlotRef.current;
+      if (!refused?.earliestMs) return 0;
+      return refused.earliestMs + (performance.now() - refused.observedMonoMs);
+    };
     const serverFloorNow = () => {
       const refused = refusedSlotRef.current;
       if (!refused) return 0;
-      return Math.max(
-        refused.ms,
-        refused.earliestMs
-          ? refused.earliestMs +
-              (performance.now() - refused.observedMonoMs)
-          : 0
-      );
+      return Math.max(refused.ms, projectedServerFloor() + SERVER_FLOOR_TRANSIT_MS);
     };
     if (scheduleOn) {
       const schedule = resolveScheduledFor(scheduledFor);
@@ -323,12 +332,17 @@ export default function VideosPage() {
           }
           uploadFile = baked;
         } catch (error) {
-          toast.warning('Posting without the animation', {
-            description:
-              error instanceof Error
-                ? error.message
-                : 'The animation could not be rendered in this browser.',
-          });
+          // A replacement during the bake owns the composer now; the abandoned
+          // render's failure is not this clip's business. When the generation
+          // still matches, warn and fall back to the original clip as before.
+          if (generation === fileGeneration.current) {
+            toast.warning('Posting without the animation', {
+              description:
+                error instanceof Error
+                  ? error.message
+                  : 'The animation could not be rendered in this browser.',
+            });
+          }
         } finally {
           setBakePct(null);
         }
@@ -349,8 +363,15 @@ export default function VideosPage() {
           {
             // The bake may have outlasted the slot's clearance of the server
             // floor, so the recheck must see the same advancing floor the
-            // pre-bake check used.
-            serverEarliestMs: serverFloorNow() || undefined,
+            // pre-bake check used — unpadded, because the hook applies the
+            // transit pad itself. A previous transfer of this clip estimates
+            // the next upload's lead; without it the suggestion can sit
+            // inside the transfer it must survive.
+            seedAfterMs:
+              uploadEstimateRef.current?.generation === generation
+                ? uploadEstimateRef.current.ms
+                : undefined,
+            serverEarliestMs: projectedServerFloor() || undefined,
             afterMs: refusedSlotRef.current?.ms,
             afterLabel: refusedSlotRef.current?.label,
           }
@@ -456,6 +477,8 @@ export default function VideosPage() {
         // The transfer clock is monotonic; wall-clock jumps must not fake a
         // longer (or shorter) upload than actually happened.
         const uploadMs = performance.now() - startedAt;
+        // The next transfer of this clip will take about as long as this one.
+        uploadEstimateRef.current = { generation, ms: uploadMs };
         // The server's own floor, kept as an absolute instant so the retry
         // hook can advance it with the monotonic clock while the dialog is
         // open — a browser clock correction must not shrink the lead.
@@ -467,12 +490,10 @@ export default function VideosPage() {
           refusedSlotRef.current = {
             ms: new Date(sentIso).getTime(),
             label: sentLabel,
-            // Pad the received floor: the server sampled its clock before the
-            // response travelled back, so treating it as exact would project a
-            // floor behind the server's and re-earn the rejection.
-            earliestMs: Number.isNaN(serverEarliest)
-              ? 0
-              : serverEarliest + SERVER_FLOOR_TRANSIT_MS,
+            // The received floor is stored raw: the transit pad is applied
+            // once, by whichever consumer projects it — the pre-bake check
+            // here, and the retry hook at its own boundary.
+            earliestMs: Number.isNaN(serverEarliest) ? 0 : serverEarliest,
             observedMonoMs: performance.now(),
           };
         }

@@ -254,6 +254,13 @@ export default function ReelsPage() {
           });
           return null;
         });
+        // A replacement during the recording makes this bake stale: do not
+        // spend the finalization on a clip nobody will stage. The check after
+        // finalization still covers replacements that land while it runs.
+        if (generation !== pickGeneration.current) {
+          setRenderPct(null);
+          return;
+        }
         if (baked) {
           // MediaRecorder emits fragmented MP4 (Chrome et al.) or WebM
           // (fallback). Facebook needs a progressive H.264 MP4, and the old

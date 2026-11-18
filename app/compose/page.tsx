@@ -1,6 +1,13 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
@@ -76,6 +83,11 @@ const MAX_MESSAGE_LENGTH = 5000;
 const MAX_IMAGES = 10;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 1024 * 1024 * 1024;
+// A bake records the clip in real time and the API cannot cancel one, so a
+// cancelled schedule leaves its render draining in the background. Two cover
+// that render plus the composer's active one; a third attempt falls back to
+// the original clip until one drains instead of stacking recorders.
+const MAX_CONCURRENT_BAKES = 2;
 const ALLOWED_IMAGE_TYPES = new Set([
   'image/jpeg',
   'image/png',
@@ -234,18 +246,31 @@ function ComposeWorkspace() {
   // prompts for a new time or posts against an abandoned schedule.
   const scheduleAttempt = useRef(0);
   // Increments for every bake; an abandoned bake must not move the progress
-  // of the one that replaced it.
+  // of the one that replaced it. Cancelling bumps it too, which detaches the
+  // running bake: its progress and finally stop touching the composer, and
+  // the controls come back while the render drains.
   const bakeSequence = useRef(0);
+  const rendersInFlight = useRef(0);
   // Read by the assistant's reply handler, which can fire long after the
-  // render that started the request.
+  // render that started the request. Layout effects publish the lock during
+  // the commit itself — before the browser can hand another task the reply
+  // continuation that reads it — and the dispatch claim also writes its ref
+  // directly at the moment the request goes out.
   const editorLockedRef = useRef(false);
-  useEffect(() => {
+  useLayoutEffect(() => {
     editorLockedRef.current = editorLocked;
   }, [editorLocked]);
   const dispatchingRef = useRef(false);
-  useEffect(() => {
+  useLayoutEffect(() => {
     dispatchingRef.current = dispatching;
   }, [dispatching]);
+  // The publish flow holds the same editor lock as scheduling, but a reply
+  // meeting it must be dropped, not applied — the POST already carries the
+  // captured draft and there is no schedule attempt to hand back to.
+  const publishingRef = useRef(false);
+  useLayoutEffect(() => {
+    publishingRef.current = publishing;
+  }, [publishing]);
   // Leaving the page abandons a bake in flight: the attempt check makes it
   // stop before staging a blob for a post nobody can submit. The upload that
   // already started is cleaned up by the caller's generation check.
@@ -385,6 +410,15 @@ function ComposeWorkspace() {
   async function animatedVideoUrl(isCurrent?: () => boolean): Promise<string | null> {
     if (!videoUrl) return videoUrl;
     if (!animations.length || !videoPreviewUrl) return videoUrl;
+    // A detached render from a cancelled attempt may still be recording.
+    // Refuse a third rather than stacking recorders the compositor cannot
+    // serve: the throw surfaces in the caller's catch and fails the attempt
+    // with a clear message instead of queueing behind an unbounded pile.
+    if (rendersInFlight.current >= MAX_CONCURRENT_BAKES) {
+      throw new Error(
+        'The previous animation render is still finishing — try again in a moment.'
+      );
+    }
     // A cancelled attempt can leave its bake running while a newer one starts;
     // only the newest bake may move progress, warn, or clear the flags.
     const bakeId = ++bakeSequence.current;
@@ -392,14 +426,20 @@ function ComposeWorkspace() {
     setBaking(true);
     setBakePct(0);
     try {
-      const finalized = await bakeAndFinalizeVideo({
-        videoUrl: videoPreviewUrl,
-        attachments: animations,
-        values: animValues,
-        onProgress: (pct) => {
-          if (ownsBake()) setBakePct(pct);
-        },
-      });
+      let finalized: File;
+      rendersInFlight.current += 1;
+      try {
+        finalized = await bakeAndFinalizeVideo({
+          videoUrl: videoPreviewUrl,
+          attachments: animations,
+          values: animValues,
+          onProgress: (pct) => {
+            if (ownsBake()) setBakePct(pct);
+          },
+        });
+      } finally {
+        rendersInFlight.current -= 1;
+      }
       // A cancelled schedule must not pay for staging a blob nobody will post.
       if (isCurrent && !isCurrent()) return null;
       const staged = await stageUpload(
@@ -592,8 +632,9 @@ function ComposeWorkspace() {
     if (!selected || !draft.trim()) return;
     // Regeneration will replace the draft this request would capture, so wait
     // for it to land instead of scheduling text the editor is about to drop.
-    // A delete or a publish already in flight will clear or post this draft.
-    if (drafting || deleting || publishing) return;
+    // A delete or a publish already in flight will clear or post this draft;
+    // an image still processing would miss the attachments array entirely.
+    if (drafting || deleting || publishing || imagesBusy) return;
     // A video must finish staging before the post can be scheduled.
     if (videoFile && !videoUrl) return;
     const schedule = resolveScheduledFor(scheduledFor);
@@ -641,8 +682,11 @@ function ComposeWorkspace() {
       }
       if (submit.picked) setScheduledFor(submit.picked);
       const when = new Date(submit.iso);
-      // The request is on the wire now; Cancel can no longer abort it.
+      // The request is on the wire now; Cancel can no longer abort it. The
+      // ref moves synchronously so a reply landing before the re-render that
+      // publishes the state already sees the dispatch lock held.
       setDispatchingAttempt(attempt);
+      dispatchingRef.current = true;
       const res = await fetch('/api/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -689,10 +733,13 @@ function ComposeWorkspace() {
       });
     } finally {
       // This request is done either way; only its own attempt may release the
-      // composer, so a cancelled attempt cannot unlock a newer one.
-      setDispatchingAttempt((current) =>
-        current === attempt ? null : current
-      );
+      // composer, so a cancelled attempt cannot unlock a newer one. The ref
+      // tracks the same updater so the release is synchronous too.
+      setDispatchingAttempt((current) => {
+        const next = current === attempt ? null : current;
+        dispatchingRef.current = next !== null;
+        return next;
+      });
       if (attempt === scheduleAttempt.current) {
         setEditorLocked(false);
         setScheduling(false);
@@ -701,9 +748,10 @@ function ComposeWorkspace() {
   }
 
   async function deleteDraftFor(item: QueueItem) {
-    // A dispatch or a delete already in flight owns the composer until it
-    // settles; overlapping them would let the other clear the first's locks.
-    if (scheduling || deleting || publishing) return;
+    // A dispatch, a delete, or a pending draft generation owns the composer
+    // until it settles; overlapping them would let the other clear the
+    // first's locks — or delete the story the generation is writing for.
+    if (scheduling || deleting || publishing || drafting) return;
     setDeleting(true);
     try {
       const res = await fetch(`/api/drafts?newsItemId=${item.id}`, {
@@ -750,7 +798,12 @@ function ComposeWorkspace() {
       return;
     }
 
+    // The schedule flow locks the editor for the same reason: the request
+    // below carries the draft captured now, so a pending assistant rewrite
+    // must not change the editor while the POST is out.
     setPublishing(true);
+    publishingRef.current = true;
+    setEditorLocked(true);
     try {
       const finalVideoUrl = videoUrl ? await animatedVideoUrl() : null;
       const res = await fetch('/api/publish', {
@@ -789,6 +842,10 @@ function ComposeWorkspace() {
       });
     } finally {
       setPublishing(false);
+      publishingRef.current = false;
+      // Publish holds the lock itself, so releasing it unconditionally here
+      // cannot drop a schedule attempt's lock.
+      setEditorLocked(false);
     }
   }
 
@@ -1248,7 +1305,9 @@ function ComposeWorkspace() {
                                 variant="destructive"
                                 size="sm"
                                 onClick={() => selected && deleteDraftFor(selected)}
-                                disabled={deleting || scheduling || publishing}
+                                disabled={
+                                  deleting || scheduling || publishing || drafting
+                                }
                               >
                                 <Trash2 className="size-3.5" aria-hidden />
                                 {deleting ? 'Deleting…' : 'Confirm delete'}
@@ -1256,8 +1315,10 @@ function ComposeWorkspace() {
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                onClick={() => setConfirmDelete(false)}
-                                disabled={deleting || scheduling || publishing}
+                              onClick={() => setConfirmDelete(false)}
+                              disabled={
+                                deleting || scheduling || publishing || drafting
+                              }
                               >
                                 Cancel
                               </Button>
@@ -1267,7 +1328,7 @@ function ComposeWorkspace() {
                               variant="ghost"
                               size="sm"
                               onClick={() => setConfirmDelete(true)}
-                              disabled={scheduling || publishing}
+                              disabled={scheduling || publishing || drafting}
                             >
                               <Trash2 className="size-3.5" aria-hidden />
                               Delete draft
@@ -1328,7 +1389,11 @@ function ComposeWorkspace() {
                             variant="brand"
                             onClick={schedulePost}
                             disabled={
-                              scheduling || drafting || deleting || publishing
+                              scheduling ||
+                              drafting ||
+                              deleting ||
+                              publishing ||
+                              imagesBusy
                             }
                           >
                             {scheduling ? 'Scheduling…' : 'Confirm schedule'}
@@ -1341,6 +1406,14 @@ function ComposeWorkspace() {
                               // leaving it to prompt or post after Cancel.
                               scheduleAttempt.current += 1;
                               scheduleRetry.cancel();
+                              // The render API cannot be cancelled, so detach
+                              // the running bake instead: bumping the sequence
+                              // silences its progress and finally, and the
+                              // flags come back now rather than when the
+                              // recording happens to end.
+                              bakeSequence.current += 1;
+                              setBaking(false);
+                              setBakePct(null);
                               setScheduleOpen(false);
                               // Hand the controls back now; the abandoned bake
                               // unwinds in the background and its finally will
@@ -1418,7 +1491,7 @@ function ComposeWorkspace() {
       <AssistantChat
         draft={draft}
         storyId={selected?.id}
-        disabled={scheduling}
+        disabled={scheduling || publishing}
         revision={composerRevision}
         // A reply can land after the attempt started; read the live lock from
         // the ref, not the render that sent the request. Before dispatch the
@@ -1427,6 +1500,7 @@ function ComposeWorkspace() {
         // dropped rather than showing a draft that was not published.
         onDraftChange={(text) => {
           if (dispatchingRef.current) return false;
+          if (publishingRef.current) return false;
           if (editorLockedRef.current) {
             scheduleAttempt.current += 1;
             scheduleRetry.cancel();
