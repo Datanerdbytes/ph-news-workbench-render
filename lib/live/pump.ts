@@ -217,8 +217,23 @@ const FEEDER_FATAL_STDERR_SIGNATURES = [
 
 const MKFIFO_BIN = 'mkfifo';
 
-/** Per-phase deadline for one fifo write-end open (see `openFifoWriteEnd`). */
-const FIFO_OPEN_TIMEOUT_MS = 10_000;
+/**
+ * Per-phase deadline for one fifo write-end open (see `openFifoWriteEnd`).
+ * Generous on purpose: ffmpeg's avformat probe of the video pipe blocks
+ * until the feeder delivers enough bytes, and CDN variance makes yt-dlp's
+ * first burst unpredictable (the PoC saw ~1.4KB/s bursts ramping up to MB/s
+ * on fbcdn). A timeout here is transient anyway — it retries with a fresh
+ * attempt instead of failing the start.
+ */
+export const FIFO_OPEN_TIMEOUT_MS = 30_000;
+
+/**
+ * Thrown when a fifo write-end open outlasts its per-phase deadline — e.g.
+ * a slow CDN starved ffmpeg's probe past the ceiling. Transient by nature:
+ * the attempt settles into the normal retry path (fresh fifos, download
+ * restarts from zero) instead of failing the start outright.
+ */
+class OpenTimeoutError extends Error {}
 
 type FifoPair = { video: string; audio: string };
 
@@ -717,9 +732,18 @@ export class PumpManager {
     } catch (error) {
       if (!proc.attemptSettled && !proc.stopping) {
         // Setup failed without any child death owning the attempt — tear the
-        // half-built attempt down here; the caller decides spawn_failed vs
-        // retry.
+        // half-built attempt down here, then classify:
         this.teardownStagedAttempt(proc);
+        if (error instanceof OpenTimeoutError) {
+          // A probe-phase timeout is transient (slow-CDN first burst): it
+          // settles into the normal retry path — full teardown already
+          // happened, the retry creates fresh fifos and restarts the
+          // download from zero (documented v1 limitation).
+          this.failStagedSetup(proc, error);
+          return;
+        }
+        // Anything else (mkfifo failure, yt-dlp unavailable) cannot
+        // self-heal — rethrow for the caller's spawn_failed handling.
       }
       throw error;
     } finally {
@@ -768,7 +792,9 @@ export class PumpManager {
     return new Promise((_, reject) => {
       const timer = setTimeout(() => {
         reject(
-          new Error('timed out waiting for ffmpeg to open the source pipes')
+          new OpenTimeoutError(
+            'timed out waiting for ffmpeg to open the source pipes'
+          )
         );
       }, FIFO_OPEN_TIMEOUT_MS);
       timer.unref?.();
@@ -927,9 +953,10 @@ export class PumpManager {
   }
 
   /**
-   * A staged retry's setup failed without any child death settling the
-   * attempt (e.g. mkfifo or yt-dlp vanished mid-retry): settle it like a
-   * crash so the retry budget still applies.
+   * A staged setup failed transiently — a probe-phase timeout on a slow CDN,
+   * or a retry's setup broke (mkfifo/yt-dlp vanished mid-retry): settle it
+   * like a crash so the retry budget still applies. The attempt was already
+   * torn down by the caller.
    */
   private failStagedSetup(proc: PumpProc, error: unknown): void {
     if (!this.markAttemptSettled(proc)) return;

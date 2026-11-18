@@ -40,6 +40,7 @@ import {
   buildPumpArgs,
   buildStagedPumpArgs,
   decideTranscode,
+  FIFO_OPEN_TIMEOUT_MS,
   getPumpManager,
   REDACTED_KEY,
   redactStreamKey,
@@ -109,16 +110,17 @@ function buildProbeJson(probe: VideoStreams): string {
 
 /**
  * Wires the mocked spawn: ffprobe children answer immediately with the given
- * probe JSON, mkfifo children succeed immediately, ffmpeg children stay
- * silent until the test drives them, and yt-dlp feeder children emit the
- * spawn handshake (or an ENOENT error for the commands listed in
- * `failingFeederCommands`) on the next tick.
+ * probe JSON, mkfifo children succeed immediately (unless `mkfifoFails`),
+ * ffmpeg children stay silent until the test drives them, and yt-dlp feeder
+ * children emit the spawn handshake (or an ENOENT error for the commands
+ * listed in `failingFeederCommands`) on the next tick.
  */
 function useSpawns(
   options: {
     probe?: VideoStreams;
     probeFails?: boolean;
     failingFeederCommands?: string[];
+    mkfifoFails?: boolean;
   } = {}
 ): {
   ffmpegKids: FakeChild[];
@@ -144,7 +146,7 @@ function useSpawns(
       });
     } else if (command === 'mkfifo') {
       mkfifoKids.push(kid);
-      queueMicrotask(() => closeChild(kid, 0));
+      queueMicrotask(() => closeChild(kid, options.mkfifoFails ? 1 : 0));
     } else if (command === 'ffmpeg') {
       ffmpegKids.push(kid);
     } else {
@@ -1027,5 +1029,101 @@ describe('PumpManager staged mode', () => {
     expect(args[args.indexOf('-c') + 1]).toBe('copy');
     expect(args).not.toContain('libx264');
     expect(args[args.length - 1]).toBe(DEST);
+  });
+
+  it('a probe-phase timeout (slow CDN) is transient: the start succeeds and the attempt retries with a fresh fifo pair', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids, feederKids, mkfifoKids } = useSpawns();
+    // The video write-end never pairs in attempt 1: the mocked open hangs
+    // (a slow-CDN first burst starving ffmpeg's probe past the deadline).
+    fsMocks.open.mockImplementationOnce(() => new Promise(() => {}));
+
+    const pendingStart = manager.start({
+      id: 28,
+      source: FB_REPLAY,
+      dest: DEST,
+      mode: 'staged',
+    });
+    await vi.advanceTimersByTimeAsync(FIFO_OPEN_TIMEOUT_MS);
+
+    // NOT spawn_failed — the attempt settled into the retry state machine.
+    const result = await pendingStart;
+    expect(result).toEqual({ ok: true });
+    expect(mkfifoKids).toHaveLength(2);
+    expect(ffmpegKids).toHaveLength(1);
+    expect(manager.status(28).running).toBe(false);
+
+    // The timed-out attempt was fully torn down: pending write-end open
+    // rescued non-blocking, fifos unlinked, ffmpeg killed.
+    const firstFifos = latestFifoPaths();
+    expect(fsMocks.unlink).toHaveBeenCalledTimes(2);
+    expect(fsMocks.unlink).toHaveBeenCalledWith(firstFifos.video);
+    expect(fsMocks.unlink).toHaveBeenCalledWith(firstFifos.audio);
+    expect(fsMocks.open).toHaveBeenCalledWith(firstFifos.video, 4); // O_RDONLY | O_NONBLOCK
+    expect(ffmpegKids[0].kill).toHaveBeenCalledWith('SIGKILL');
+
+    await vi.advanceTimersByTimeAsync(RETRY_BACKOFF_MS[0]);
+
+    // Fresh pair, fresh ffmpeg, fresh feeders — the download restarts from zero.
+    expect(mkfifoKids).toHaveLength(4);
+    const secondFifos = latestFifoPaths();
+    expect(secondFifos.video).not.toBe(firstFifos.video);
+    expect(ffmpegKids).toHaveLength(2);
+    expect(feederKids).toHaveLength(2);
+    expect(manager.status(28).running).toBe(true);
+  });
+
+  it('a first attempt with no working yt-dlp (feeder ENOENT for every candidate) reports spawn_failed without retrying', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    vi.stubEnv('YTDLP_PYTHON', '/venv/python');
+    const { feederKids, mkfifoKids } = useSpawns({
+      failingFeederCommands: ['yt-dlp', '/venv/python'],
+    });
+
+    const result = await manager.start({
+      id: 29,
+      source: FB_REPLAY,
+      dest: DEST,
+      mode: 'staged',
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'spawn_failed',
+      error: expect.stringContaining('video feeder'),
+    });
+    expect(mkfifoKids).toHaveLength(2);
+    // The half-built attempt was torn down and nothing retries.
+    expect(fsMocks.unlink).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(feederKids).toHaveLength(2);
+    expect(manager.status(29).running).toBe(false);
+  });
+
+  it('a mkfifo failure reports spawn_failed immediately without retrying', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids, mkfifoKids } = useSpawns({ mkfifoFails: true });
+
+    const result = await manager.start({
+      id: 30,
+      source: FB_REPLAY,
+      dest: DEST,
+      mode: 'staged',
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'spawn_failed',
+      error: expect.stringContaining('could not create the source pipe'),
+    });
+    expect(mkfifoKids).toHaveLength(2);
+    expect(ffmpegKids).toHaveLength(0);
+    expect(fsMocks.unlink).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mkfifoKids).toHaveLength(2);
+    expect(manager.status(30).running).toBe(false);
   });
 });
