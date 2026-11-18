@@ -363,7 +363,12 @@ export function FilePicker({
       <div className="mt-1.5 flex items-center gap-2 rounded-lg border border-dashed border-border bg-background/60 px-2 py-1.5">
         <label
           htmlFor={id}
-          className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
+          className={cn(
+            'flex min-w-0 flex-1 items-center gap-1.5 text-left text-xs font-medium text-muted-foreground transition-colors',
+            disabled
+              ? 'cursor-not-allowed opacity-50'
+              : 'cursor-pointer hover:text-foreground'
+          )}
         >
           <span aria-hidden>{icon}</span>
           <span className="truncate">{file ? file.name : label}</span>
@@ -422,11 +427,14 @@ export function PageSelector({
   selected,
   onSelect,
   loading,
+  disabled = false,
 }: {
   pages: ManagedPage[];
   selected: string[];
   onSelect: (id: string) => void;
   loading: boolean;
+  /** Locks the destination while a submit built from it is in flight. */
+  disabled?: boolean;
 }) {
   const selectedId = selected[0] ?? null;
   const activePage = pages.find((page) => page.id === selectedId);
@@ -446,7 +454,7 @@ export function PageSelector({
   // focus), not from the controlled selection, so repeated presses keep
   // walking even before the parent state round-trips.
   function onKeyDown(event: React.KeyboardEvent) {
-    if (!pages.length) return;
+    if (!pages.length || disabled) return;
     const target =
       event.target instanceof HTMLButtonElement ? event.target : null;
     const focused = target ? radioRefs.current.indexOf(target) : -1;
@@ -501,8 +509,10 @@ export function PageSelector({
                   aria-checked={active}
                   tabIndex={page.id === tabIndexId ? 0 : -1}
                   onClick={() => onSelect(page.id)}
+                  disabled={disabled}
                   className={cn(
                     'flex cursor-pointer items-center gap-1.5 rounded-full border py-1.5 pl-2 pr-3 text-xs font-semibold transition-colors',
+                    'disabled:cursor-not-allowed disabled:opacity-50',
                     active
                       ? 'border-ink bg-ink text-paper'
                       : 'border-border bg-background/60 text-muted-foreground hover:text-foreground'

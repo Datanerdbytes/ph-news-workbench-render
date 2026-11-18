@@ -60,6 +60,12 @@ export default function ReelsPage() {
   // re-triggering the Downloads handover effect that depends on it.
   const cancelRetry = scheduleRetry.cancel;
   const [busy, setBusy] = useState(false);
+  // Read by the assistant's reply handler, which can outlive the render that
+  // sent the request.
+  const busyRef = useRef(false);
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
   const [results, setResults] = useState<PublishResult[] | null>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
   // Each pick/clear bumps this; an in-flight normalization whose generation
@@ -427,6 +433,7 @@ export default function ReelsPage() {
             id="reel-caption"
             value={caption}
             onChange={(event) => setCaption(event.target.value)}
+            disabled={busy}
             rows={4}
             maxLength={2200}
             placeholder="Write a caption for the reel…"
@@ -439,6 +446,7 @@ export default function ReelsPage() {
           selected={pages.selected}
           onSelect={pages.selectOne}
           loading={pages.loading}
+          disabled={busy}
         />
 
         <ScheduleField
@@ -513,7 +521,13 @@ export default function ReelsPage() {
       {scheduleRetry.dialog}
       <AssistantChat
         draft={caption}
-        onDraftChange={setCaption}
+        disabled={busy}
+        // A reply that lands mid-attempt must not replace the caption the
+        // request already captured (the textarea is locked for the same
+        // reason); a ref avoids the stale closure from the sending render.
+        onDraftChange={(text) => {
+          if (!busyRef.current) setCaption(text);
+        }}
         contextLabel="reel caption (2,200 character limit)"
       />
     </PublishPage>

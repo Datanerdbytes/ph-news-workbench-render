@@ -587,6 +587,7 @@ export default function VideosPage() {
             selected={pages.selected}
             onSelect={pages.selectOne}
             loading={pages.loading}
+            disabled={busy}
           />
 
           <ScheduleField
