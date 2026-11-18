@@ -513,6 +513,7 @@ export default function VideosPage() {
                 id="video-title"
                 value={title}
                 onChange={(event) => setTitle(event.target.value)}
+                disabled={busy}
                 maxLength={200}
                 placeholder="Headline for the video"
                 className={inputClass}
@@ -526,6 +527,7 @@ export default function VideosPage() {
                 id="video-thumbnail"
                 type="file"
                 accept="image/jpeg,image/png,image/webp"
+                disabled={busy}
                 onChange={(event) => {
                   const picked = event.target.files?.[0] ?? null;
                   event.target.value = '';
@@ -556,6 +558,7 @@ export default function VideosPage() {
               id="video-description"
               value={description}
               onChange={(event) => setDescription(event.target.value)}
+              disabled={busy}
               rows={4}
               maxLength={5000}
               placeholder="Describe the video…"
@@ -571,6 +574,7 @@ export default function VideosPage() {
               id="video-targeting"
               value={targeting}
               onChange={(event) => setTargeting(event.target.value)}
+              disabled={busy}
               rows={3}
               spellCheck={false}
               placeholder={'{"geo_locations":{"countries":["PH"]}}'}
