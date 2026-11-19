@@ -8,7 +8,9 @@ import {
   parseSourceMode,
   PumpStateError,
 } from '@/lib/live/pump-state';
+import { withWorkspaceLiveLock } from '@/lib/live/workspace-lock';
 import { requirePublishingConnection } from '@/lib/publishing/connection';
+import { requireWorkspace, unauthorized } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
 
@@ -147,22 +149,44 @@ export async function POST(
     );
   }
 
-  const result = await requirePublishingConnection(
-    request,
-    'control the live pump'
-  );
-  if (result.response) return result.response;
-  const { access } = result.context;
   const { id } = await params;
 
-  const stream = await findStream(access.workspace.id, id);
-  if (!stream) {
-    return NextResponse.json({ error: 'Live stream not found.' }, { status: 404 });
-  }
+  // Both lifecycle actions need the workspace lock. Stop deliberately uses
+  // workspace auth only: disconnecting a Page must never prevent cleanup of a
+  // pump because a Facebook token, scope, or runtime gate is unavailable.
+  const access = await requireWorkspace(request);
+  if (!access) return unauthorized();
 
   try {
-    if (action === 'stop') return await stopPump(access.workspace.id, stream);
-    return await startPump(access.workspace.id, stream);
+    return await withWorkspaceLiveLock(access.workspace.id, async () => {
+      if (action === 'stop') {
+        const stream = await findStream(access.workspace.id, id);
+        if (!stream) {
+          return NextResponse.json(
+            { error: 'Live stream not found.' },
+            { status: 404 }
+          );
+        }
+        return await stopPump(access.workspace.id, stream);
+      }
+
+      // Keep the publishing check inside the lifecycle lock. If disconnect
+      // wins the lock first, it deletes the connection before start can spawn.
+      const result = await requirePublishingConnection(
+        request,
+        'control the live pump'
+      );
+      if (result.response) return result.response;
+
+      const stream = await findStream(access.workspace.id, id);
+      if (!stream) {
+        return NextResponse.json(
+          { error: 'Live stream not found.' },
+          { status: 404 }
+        );
+      }
+      return await startPump(access.workspace.id, stream);
+    });
   } catch {
     // Unexpected DB failure — a plain 500 with no internals leaking.
     return NextResponse.json(
