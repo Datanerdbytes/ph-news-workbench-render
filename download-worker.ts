@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -221,6 +221,9 @@ export type PreparedRendition = {
  * Returns the file that should reach the cloud library. Sources Safari cannot
  * decode are re-encoded to H.264 first; sources that already play everywhere
  * are passed through untouched.
+ *
+ * The source file stays on disk until the rendition has been uploaded — see
+ * removeSupersededSource.
  */
 export async function prepareSafariFriendlyRendition(
   sourcePath: string,
@@ -242,6 +245,30 @@ export async function prepareSafariFriendlyRendition(
     throw new Error("The converted video file is empty.");
   }
   return { filePath: target, fileName: path.basename(target), converted: true };
+}
+
+/**
+ * Deletes the pre-conversion source once the rendition has been uploaded.
+ *
+ * A converted job folder must end up holding exactly one video: the source is
+ * an intermediate artifact, and leaving it next to the rendition made a single
+ * download show up twice (once as the source, once as the rendition). This
+ * runs only after the upload succeeds, so a failed upload still has the
+ * original on disk to fall back on.
+ */
+export async function removeSupersededSource(
+  sourcePath: string,
+  renditionPath: string
+): Promise<void> {
+  if (path.resolve(sourcePath) === path.resolve(renditionPath)) return;
+  try {
+    await rm(sourcePath, { force: true });
+  } catch (error) {
+    console.error(
+      `Could not remove the superseded source ${sourcePath}:`,
+      error instanceof Error ? error.message : error
+    );
+  }
 }
 
 // Vercel Blob derives the ?download=1 attachment name from the stored path, so
@@ -453,6 +480,8 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
         let uploadPath = state.filePath;
         let uploadName = path.basename(state.filePath);
         let uploadSize = fileInfo.size;
+        // Set when the upload uses a converted rendition instead of the source.
+        let supersededSource: string | null = null;
         state.status = "finalizing";
         try {
           state.statusMessage = "Checking playback compatibility…";
@@ -470,6 +499,7 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
             uploadPath = rendition.filePath;
             uploadName = rendition.fileName;
             uploadSize = convertedInfo.size;
+            supersededSource = state.filePath;
           }
         } catch (error) {
           console.error(
@@ -491,6 +521,11 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
             allowOverwrite: true,
           }
         );
+        // The rendition is safely in the cloud library, so the pre-conversion
+        // source can go. Keeping it made one download look like two.
+        if (supersededSource) {
+          await removeSupersededSource(supersededSource, uploadPath);
+        }
         settled = true;
         clearInterval(entry.heartbeat);
         await sql`

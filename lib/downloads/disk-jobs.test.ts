@@ -62,6 +62,37 @@ describe("discoverDiskDownloads", () => {
   it("returns nothing when the folder does not exist", async () => {
     expect(await discoverDiskDownloads(path.join(root, "missing-dir"))).toEqual([]);
   });
+
+  it("reports one file per job folder, preferring the Safari rendition", async () => {
+    // A converted job folder holds both the yt-dlp source and the H.264
+    // rendition. Surfacing both makes one download look like two.
+    const converted = await mkdtemp(path.join(tmpdir(), "disk-jobs-converted-"));
+    const jobDir = path.join(converted, "Facebook", "job-converted");
+    await mkdir(jobDir, { recursive: true });
+    await writeFile(path.join(jobDir, "clip.mp4"), "raw-av1");
+    await writeFile(path.join(jobDir, "clip (H.264).mp4"), "converted-h264");
+
+    const files = await discoverDiskDownloads(converted);
+    const fromJob = files.filter((file) => file.filePath.includes("job-converted"));
+
+    expect(fromJob).toHaveLength(1);
+    expect(fromJob[0].fileName).toBe("clip (H.264).mp4");
+    await rm(converted, { recursive: true, force: true });
+  });
+
+  it("falls back to the source file when a job folder has no rendition", async () => {
+    const plain = await mkdtemp(path.join(tmpdir(), "disk-jobs-plain-"));
+    const jobDir = path.join(plain, "Facebook", "job-plain");
+    await mkdir(jobDir, { recursive: true });
+    await writeFile(path.join(jobDir, "plain.mp4"), "only-file");
+
+    const files = await discoverDiskDownloads(plain);
+    const fromJob = files.filter((file) => file.filePath.includes("job-plain"));
+
+    expect(fromJob).toHaveLength(1);
+    expect(fromJob[0].fileName).toBe("plain.mp4");
+    await rm(plain, { recursive: true, force: true });
+  });
 });
 
 describe("diskJobId / findDiskDownload", () => {
