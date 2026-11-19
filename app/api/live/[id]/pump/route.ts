@@ -2,7 +2,10 @@ import { NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { decryptToken } from '@/lib/facebook-token';
 import { randomUUID } from 'node:crypto';
-import { getPumpManager } from '@/lib/live/pump';
+import {
+  getPumpManager,
+  isFacebookIngestUrl,
+} from '@/lib/live/pump';
 import {
   buildIngestUrl,
   parsePumpAction,
@@ -66,6 +69,19 @@ async function startPump(workspaceId: string, stream: PumpRow) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
     throw error;
+  }
+
+  // The RTMPS publisher is the only unsandboxed component (its destination
+  // is Facebook's own Graph response), so its target must be a Facebook
+  // ingest endpoint — verified before anything spawns.
+  if (!isFacebookIngestUrl(ingestUrl)) {
+    return NextResponse.json(
+      {
+        error:
+          'The RTMPS ingest URL is not a Facebook endpoint. Recreate the live stream to get a fresh one.',
+      },
+      { status: 400 }
+    );
   }
 
   const manager = getPumpManager();
