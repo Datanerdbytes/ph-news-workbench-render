@@ -12,7 +12,7 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { del, head } from '@vercel/blob';
+import { del, head, list } from '@vercel/blob';
 import { deleteFiles, uploadFile } from '@huggingface/hub';
 
 /**
@@ -329,6 +329,76 @@ export async function deleteStagedBlobs(urls: string[]): Promise<void> {
         error: error instanceof Error ? error.message : String(error),
       })
     );
+  }
+}
+
+/**
+ * The pathname a blob url points at, without the leading slash.
+ */
+function blobPathname(url: string): string | null {
+  try {
+    return decodeURIComponent(new URL(url).pathname).replace(/^\/+/, '');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every blob url in a folder of the store.
+ */
+async function listBlobUrls(prefix: string): Promise<string[]> {
+  const urls: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await list({ prefix, limit: 100, cursor });
+    for (const blob of page.blobs) urls.push(blob.url);
+    cursor = page.hasMore ? page.cursor : undefined;
+  } while (cursor);
+  return urls;
+}
+
+/**
+ * Delete every staged file that sits in the same store folder as the given
+ * urls.
+ *
+ * One download job can own more than one file: a retried upload lands under a
+ * different name (the video title carries the live view count), and a
+ * converted video leaves the source next to its Safari rendition. Removing
+ * the job must take all of them, not just the single url the row recorded.
+ */
+export async function deleteStagedBlobsInFolder(urls: string[]): Promise<void> {
+  if (!urls.length) return;
+  try {
+    if (getStorageDriver() === 'blob') {
+      const doomed = new Set(urls);
+      const prefixes = new Set<string>();
+      for (const url of urls) {
+        const pathname = blobPathname(url);
+        if (!pathname) continue;
+        const slash = pathname.lastIndexOf('/');
+        if (slash < 0) continue;
+        prefixes.add(pathname.slice(0, slash + 1));
+      }
+      for (const prefix of prefixes) {
+        for (const listed of await listBlobUrls(prefix)) doomed.add(listed);
+      }
+      await del([...doomed]);
+      return;
+    }
+    // Only the blob store can list a folder; the other drivers keep the
+    // recorded-file cleanup they had before.
+    await deleteStagedBlobs(urls);
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        route: 'storage',
+        event: 'delete_folder_failed',
+        count: urls.length,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    );
+    // The recorded files still go, even when the folder cannot be listed.
+    await deleteStagedBlobs(urls);
   }
 }
 

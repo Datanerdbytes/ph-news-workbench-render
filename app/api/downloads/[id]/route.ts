@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
-import { deleteStagedBlobs } from "@/lib/blob";
+import { deleteStagedBlobsInFolder } from "@/lib/blob";
 import { findDiskDownload, publicDiskDownload } from "@/lib/downloads/disk-jobs";
 import {
   ACTIVE_DOWNLOAD_STATUSES,
@@ -71,7 +71,9 @@ export async function DELETE(
     WHERE id = ${id} AND workspace_id = ${access.workspace.id}
   `;
   if (rows[0].blob_url) {
-    await deleteStagedBlobs([rows[0].blob_url]);
+    // The whole folder goes, not just the file the row recorded: a retried
+    // download and a converted video both leave extra files behind.
+    await deleteStagedBlobsInFolder([rows[0].blob_url]);
   }
   return new Response(null, { status: 204 });
 }

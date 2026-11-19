@@ -1,18 +1,27 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { sqlMock, requireWorkspaceMock, deleteStagedBlobsMock, findDiskDownloadMock } =
-  vi.hoisted(() => {
-    const sql = Object.assign(vi.fn(), { unsafe: (fragment: string) => fragment });
-    return {
-      sqlMock: sql,
-      requireWorkspaceMock: vi.fn(),
-      deleteStagedBlobsMock: vi.fn(),
-      findDiskDownloadMock: vi.fn(),
-    };
-  });
+const {
+  sqlMock,
+  requireWorkspaceMock,
+  deleteStagedBlobsMock,
+  deleteStagedBlobsInFolderMock,
+  findDiskDownloadMock,
+} = vi.hoisted(() => {
+  const sql = Object.assign(vi.fn(), { unsafe: (fragment: string) => fragment });
+  return {
+    sqlMock: sql,
+    requireWorkspaceMock: vi.fn(),
+    deleteStagedBlobsMock: vi.fn(),
+    deleteStagedBlobsInFolderMock: vi.fn(),
+    findDiskDownloadMock: vi.fn(),
+  };
+});
 
 vi.mock("@/lib/db", () => ({ sql: sqlMock }));
-vi.mock("@/lib/blob", () => ({ deleteStagedBlobs: deleteStagedBlobsMock }));
+vi.mock("@/lib/blob", () => ({
+  deleteStagedBlobs: deleteStagedBlobsMock,
+  deleteStagedBlobsInFolder: deleteStagedBlobsInFolderMock,
+}));
 vi.mock("@/lib/session", () => ({
   requireWorkspace: requireWorkspaceMock,
   unauthorized: () =>
@@ -60,6 +69,7 @@ beforeEach(() => {
   requireWorkspaceMock.mockResolvedValue(access);
   findDiskDownloadMock.mockResolvedValue(null);
   deleteStagedBlobsMock.mockResolvedValue(undefined);
+  deleteStagedBlobsInFolderMock.mockResolvedValue(undefined);
   sqlMock.mockResolvedValue([]);
 });
 
@@ -132,6 +142,7 @@ describe("DELETE /api/downloads/[id]", () => {
   it("returns 404 for unknown jobs", async () => {
     expect((await del("nope")).status).toBe(404);
     expect(deleteStagedBlobsMock).not.toHaveBeenCalled();
+    expect(deleteStagedBlobsInFolderMock).not.toHaveBeenCalled();
   });
 
   it("refuses to remove active jobs", async () => {
@@ -141,6 +152,7 @@ describe("DELETE /api/downloads/[id]", () => {
       expect(response.status).toBe(409);
     }
     expect(deleteStagedBlobsMock).not.toHaveBeenCalled();
+    expect(deleteStagedBlobsInFolderMock).not.toHaveBeenCalled();
   });
 
   it("deletes finished jobs and cleans up the staged blob", async () => {
@@ -150,9 +162,21 @@ describe("DELETE /api/downloads/[id]", () => {
     );
     const response = await del("job-1");
     expect(response.status).toBe(204);
-    expect(deleteStagedBlobsMock).toHaveBeenCalledWith([finished.blob_url]);
+    expect(deleteStagedBlobsInFolderMock).toHaveBeenCalledWith([finished.blob_url]);
     const deleteCall = sqlMock.mock.calls.find((call) => queryText(call).includes("DELETE FROM"));
     expect(deleteCall!.slice(1)).toEqual(["job-1", "ws1"]);
+  });
+
+  it("removes every blob the job left behind, not only the recorded one", async () => {
+    const finished = row();
+    sqlMock.mockImplementation(async (...args: unknown[]) =>
+      queryText(args).includes("DELETE FROM") ? [] : [{ status: finished.status, blob_url: finished.blob_url }]
+    );
+
+    const response = await del("job-1");
+
+    expect(response.status).toBe(204);
+    expect(deleteStagedBlobsInFolderMock).toHaveBeenCalledWith([finished.blob_url]);
   });
 
   it("deletes failed jobs without a blob", async () => {
@@ -162,5 +186,6 @@ describe("DELETE /api/downloads/[id]", () => {
     const response = await del("job-1");
     expect(response.status).toBe(204);
     expect(deleteStagedBlobsMock).not.toHaveBeenCalled();
+    expect(deleteStagedBlobsInFolderMock).not.toHaveBeenCalled();
   });
 });

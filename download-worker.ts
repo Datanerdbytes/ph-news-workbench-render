@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { neon } from "@neondatabase/serverless";
-import { put } from "@vercel/blob";
+import { del, list, put } from "@vercel/blob";
 
 // Local companion to the hosted app: claims queued download_jobs rows from the
 // shared database, runs yt-dlp on this machine, and uploads the finished file
@@ -280,6 +280,76 @@ export function blobFileName(fileName: string): string {
   return clean || "video.mp4";
 }
 
+/**
+ * Every blob of one download job lives in this folder of the store.
+ *
+ * The file name inside it is the video title, which changes between attempts
+ * (a Facebook title carries the live view count), so the folder — not the file
+ * name — is what identifies the job.
+ */
+export function blobJobPrefix(workspaceId: string, jobId: string): string {
+  return `downloads/${workspaceId}/${jobId}/`;
+}
+
+/**
+ * Delete the blobs a previous attempt left behind in a job folder.
+ *
+ * A retried download uploads under a new name, and `allowOverwrite` only
+ * replaces a file with the exact same path — so every attempt added another
+ * file to the job folder and the older copies piled up as orphans. Keeping one
+ * file per job (the one just uploaded, or none at all when the job failed)
+ * keeps the cloud library in step with the download list.
+ *
+ * Best-effort: a store that cannot be listed must never fail a download.
+ */
+export async function removeSupersededBlobs(
+  prefix: string,
+  keepUrl: string | null
+): Promise<void> {
+  try {
+    const doomed: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await list({ prefix, limit: 100, cursor });
+      for (const blob of page.blobs) {
+        if (blob.url === keepUrl) continue;
+        doomed.push(blob.url);
+      }
+      cursor = page.hasMore ? page.cursor : undefined;
+    } while (cursor);
+    if (!doomed.length) return;
+    await del(doomed);
+  } catch (error) {
+    console.error(
+      `Could not remove the superseded blobs under ${prefix}:`,
+      error instanceof Error ? error.message : error
+    );
+  }
+}
+
+/**
+ * Upload the finished video into the job's folder and drop whatever an
+ * earlier attempt left there.
+ */
+export async function uploadJobVideo(
+  prefix: string,
+  filePath: string,
+  fileName: string
+): Promise<{ url: string; pathname: string }> {
+  const blob = await put(
+    `${prefix}${blobFileName(fileName)}`,
+    createReadStream(filePath),
+    {
+      access: "public",
+      contentType: contentTypeFor(fileName),
+      addRandomSuffix: false,
+      allowOverwrite: true,
+    }
+  );
+  await removeSupersededBlobs(prefix, blob.url);
+  return blob;
+}
+
 export type OutputUpdate = {
   status?: "downloading" | "finalizing";
   statusMessage?: string;
@@ -423,6 +493,9 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
     } catch (error) {
       console.error(`Could not record failure for ${job.id}:`, error);
     }
+    // A failed job owns no file in the cloud library — an upload that landed
+    // before the failure would otherwise stay behind as an orphan.
+    await removeSupersededBlobs(blobJobPrefix(job.workspace_id, job.id), null);
     console.error(`Failed ${job.platform} job ${job.id}: ${message}`);
     active.delete(job.id);
   }
@@ -511,15 +584,10 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
         state.status = "finalizing";
         state.statusMessage = "Uploading to the cloud library…";
         await writeState(true);
-        const blob = await put(
-          `downloads/${job.workspace_id}/${job.id}/${blobFileName(uploadName)}`,
-          createReadStream(uploadPath),
-          {
-            access: "public",
-            contentType: contentTypeFor(uploadName),
-            addRandomSuffix: false,
-            allowOverwrite: true,
-          }
+        const blob = await uploadJobVideo(
+          blobJobPrefix(job.workspace_id, job.id),
+          uploadPath,
+          uploadName
         );
         // The rendition is safely in the cloud library, so the pre-conversion
         // source can go. Keeping it made one download look like two.
