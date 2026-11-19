@@ -23,9 +23,10 @@ const LIVE_RESTREAM_COLUMNS = [
 ];
 
 test("resolve rejects a non-URL before yt-dlp can run", async ({ page }) => {
-  // 'not-a-url' has no scheme: lib/live/resolve.ts rejects it with
-  // ResolveError invalid_url before building any candidate command line, so
-  // no yt-dlp process is ever spawned — the whole suite stays network-free.
+  // 'not-a-url' has no scheme: the shared network policy (validateSourceUrl)
+  // rejects it with NetworkPolicyError before the resolver can build any
+  // candidate command line, so no yt-dlp process is ever spawned — the whole
+  // suite stays network-free.
   const response = await page.request.post("/api/live/resolve", {
     data: { url: "not-a-url" },
   });
@@ -33,9 +34,9 @@ test("resolve rejects a non-URL before yt-dlp can run", async ({ page }) => {
   expect(response.status()).toBe(400);
   const body = await response.json();
   expect(body.code).toBe("invalid_url");
-  // The message is friendly by construction — raw yt-dlp stderr never leaves
-  // the resolver, and there was no stderr here at all.
-  expect(body.error).toContain("http");
+  // The message is friendly by construction — the policy's text, not raw
+  // yt-dlp stderr.
+  expect(body.error).toContain("URL");
 });
 
 test("the Live Page renders the source composer controls", async ({ page }) => {
