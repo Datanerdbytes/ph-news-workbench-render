@@ -11,6 +11,8 @@ export const dynamic = 'force-dynamic';
 const PLAYLIST_TAG = '#EXTM3U';
 const MAX_REDIRECTS = 3;
 const MAX_SNIFF_BYTES = 1_048_576;
+/** Binary bodies start streaming once this small prefix is proven inert. */
+const BINARY_PREFIX_BYTES = 65_536;
 const SECURITY_HEADERS = {
   'cache-control': 'no-store',
   'content-security-policy': "sandbox; default-src 'none'; frame-ancestors 'none'",
@@ -115,29 +117,39 @@ async function classifyAndStream(
       buffered.push(chunk);
       bufferedBytes += chunk.byteLength;
       const prefix = concatBytes(buffered, bufferedBytes);
-      if (looksActiveBody(decodeBytes(prefix))) {
+      if (looksActiveMarkup(decodeBytes(prefix))) {
         await reader.cancel();
         throw new Error('Upstream preview returned active content.');
       }
 
-      if (isPlaylistText(decodeBytes(prefix))) playlist = true;
+      const text = decodeBytes(prefix);
+      if (isPlaylistText(text)) playlist = true;
       if (playlist && bufferedBytes > MAX_SNIFF_BYTES) {
         await reader.cancel();
         throw new Error('Upstream playlist is too large.');
       }
 
-      // Keep collecting inside the bounded sniff window so active markup
-      // later in the prefix cannot leak; past the window, stream as binary.
-      if (playlist) continue;
-      if (bufferedBytes < MAX_SNIFF_BYTES) continue;
-      return binaryResponse(reader, buffered);
+      // Active-markup scanning always runs on the bounded prefix. Once the
+      // prefix is proven inert and the body is not a playlist, start
+      // streaming immediately — a segment need not wait for the full window.
+      if (looksActiveMarkup(text)) {
+        await reader.cancel();
+        throw new Error('Upstream preview returned active content.');
+      }
+      if (!playlist && bufferedBytes >= BINARY_PREFIX_BYTES) {
+        return binaryResponse(reader, buffered);
+      }
     }
 
     const bytes = concatBytes(buffered, bufferedBytes);
-    if (looksActiveBody(decodeBytes(bytes))) {
+    const text = decodeBytes(bytes);
+    if (looksActiveMarkup(text)) {
       throw new Error('Upstream preview returned active content.');
     }
-    if (isPlaylistText(decodeBytes(bytes))) {
+    if (!isPlaylistText(text) && looksActiveJs(text)) {
+      throw new Error('Upstream preview returned active content.');
+    }
+    if (isPlaylistText(text)) {
       return safeResponse(
         rewritePlaylist(decodeBytes(bytes), baseUrl),
         'application/vnd.apple.mpegurl'
@@ -254,15 +266,27 @@ function looksActiveContentType(contentType: string): boolean {
   );
 }
 
-function looksActiveBody(text: string): boolean {
+/**
+ * Markup patterns run against EVERY body — playlists included — so an
+ * attacker cannot smuggle HTML/SVG/script tags inside a playlist-shaped
+ * response.
+ */
+function looksActiveMarkup(text: string): boolean {
   const normalized = text.replace(/^\uFEFF/, '').replace(/^\s+/, '');
-  return (
-    /(?:<!doctype\s+html|<html(?:\s|>)|<script(?:\s|>)|<svg(?:\s|>)|<\?xml(?:\s|>)|<iframe(?:\s|>)|<object(?:\s|>)|<embed(?:\s|>))/i.test(
-      normalized
-    ) ||
-    /(?:['"]use strict['"]|(?:const|let|var|function|class|import|export)\s|(?:window|document|globalThis|alert)\s*[.(])/i.test(
-      normalized
-    )
+  return /(?:<!doctype\s+html|<html(?:\s|>)|<script(?:\s|>)|<svg(?:\s|>)|<\?xml(?:\s|>)|<iframe(?:\s|>)|<object(?:\s|>)|<embed(?:\s|>))/i.test(
+    normalized
+  );
+}
+
+/**
+ * JS-keyword patterns run only against NON-playlist bodies: playlist URIs
+ * legitimately contain words like "outlet", which must not trip the keyword
+ * heuristic. Word boundaries keep the patterns from matching substrings.
+ */
+function looksActiveJs(text: string): boolean {
+  const normalized = text.replace(/^\uFEFF/, '').replace(/^\s+/, '');
+  return /(?:['"]use strict['"]|\b(?:const|var|function|class|import|export)\b\s|\b(?:window|document|globalThis|alert)\b\s*[.(])/i.test(
+    normalized
   );
 }
 

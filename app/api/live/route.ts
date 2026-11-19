@@ -18,6 +18,7 @@ import { parseScheduledPublishTime } from '@/lib/publishing/schedule';
 import { recordNativeSchedule } from '@/lib/schedule-mirror';
 import {
   assertPublicSourceUrl,
+  MAX_SOURCE_URL_LENGTH,
   NetworkPolicyError,
 } from '@/lib/live/public-network';
 
@@ -179,7 +180,21 @@ export async function POST(request: Request) {
   // rejected, never truncated (truncation would drop signature parameters).
   // The full public-host policy applies here too: a stored source is a
   // server-side fetch target even if it never saw /api/live/resolve.
-  const sourceUrl = readText(body?.sourceUrl, 32_768);
+  // Oversized input is REJECTED, never truncated: truncation would drop
+  // signature parameters and yield a differently-addressed request.
+  const rawSourceUrl = body?.sourceUrl;
+  if (
+    rawSourceUrl !== undefined &&
+    rawSourceUrl !== null &&
+    (typeof rawSourceUrl !== 'string' ||
+      rawSourceUrl.trim().length > MAX_SOURCE_URL_LENGTH)
+  ) {
+    return NextResponse.json(
+      { error: 'The source link is too long to be used as a source.' },
+      { status: 400 }
+    );
+  }
+  const sourceUrl = readText(rawSourceUrl, MAX_SOURCE_URL_LENGTH);
   if (sourceUrl) {
     try {
       await assertPublicSourceUrl(sourceUrl);
