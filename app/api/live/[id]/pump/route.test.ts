@@ -26,6 +26,9 @@ vi.mock('@/lib/facebook-token', () => ({ decryptToken: vi.fn(() => 'decrypted-ke
 vi.mock('@/lib/live/pump', () => ({
   assembleRtmpsUrl: (base: string | null, key: string | null) =>
     base && key ? `${base.replace(/\/$/, '')}/${key}` : null,
+  // The ingest allowlist has its own unit tests (pump.test.ts); the route
+  // tests only need it to pass so the lifecycle behavior is exercised.
+  isFacebookIngestUrl: vi.fn(() => true),
   getPumpManager: () => managerMock,
 }));
 

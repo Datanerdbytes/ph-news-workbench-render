@@ -1,7 +1,11 @@
 import { NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { decryptToken } from '@/lib/facebook-token';
-import { getPumpManager } from '@/lib/live/pump';
+import { randomUUID } from 'node:crypto';
+import {
+  getPumpManager,
+  isFacebookIngestUrl,
+} from '@/lib/live/pump';
 import {
   buildIngestUrl,
   parsePumpAction,
@@ -67,6 +71,19 @@ async function startPump(workspaceId: string, stream: PumpRow) {
     throw error;
   }
 
+  // The RTMPS publisher is the only unsandboxed component (its destination
+  // is Facebook's own Graph response), so its target must be a Facebook
+  // ingest endpoint — verified before anything spawns.
+  if (!isFacebookIngestUrl(ingestUrl)) {
+    return NextResponse.json(
+      {
+        error:
+          'The RTMPS ingest URL is not a Facebook endpoint. Recreate the live stream to get a fresh one.',
+      },
+      { status: 400 }
+    );
+  }
+
   const manager = getPumpManager();
   if (manager.status(stream.id).running) {
     return NextResponse.json(
@@ -82,6 +99,9 @@ async function startPump(workspaceId: string, stream: PumpRow) {
     // no playable URL) are piped through yt-dlp feeders, everything else —
     // including legacy rows predating the column — takes the ffprobe path.
     mode: parseSourceMode(stream.source_mode) ?? 'direct',
+    // The local flv fifo: the sandboxed side writes it, the publisher reads
+    // it. Fresh per start; the manager unlinks it on every exit path.
+    outFifo: `/tmp/live-pump-out-${randomUUID()}.flv`,
     // Never logged or returned — the manager redacts it everywhere it lands.
     dest: ingestUrl,
   });

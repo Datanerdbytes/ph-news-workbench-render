@@ -239,6 +239,18 @@ jobs:
           # it leaves the gate scanning what actually ships.
           skip-dirs: "/usr/local/lib/node_modules/npm"
 
+      # DIAGNOSTIC, NOT A GATE: probes whether the runtime permits the
+      # namespace sandbox the verified isolation runner needs. GitHub-hosted
+      # Ubuntu runners (and Render-like runtimes) refuse unprivileged user
+      # namespaces, so this is expected to fail here — the media paths fail
+      # closed at runtime regardless, and OBS publishing remains the manual
+      # path. Kept as a step so the empirical answer is visible per image.
+      - name: Probe sandbox feasibility in the image (informational)
+        continue-on-error: true
+        run: |
+          docker run --rm ${{ env.IMAGE }}:${{ env.IMAGE_SHA }} \
+            sh -c 'bwrap --version && bwrap --unshare-all --ro-bind / / echo sandbox-ok || echo "SANDBOX UNAVAILABLE on this runtime" '
+
       - name: Upload the scan results
         if: always() && hashFiles('trivy-results.sarif') != ''
         uses: github/codeql-action/upload-sarif@v4

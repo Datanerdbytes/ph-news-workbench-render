@@ -38,8 +38,15 @@ ENV NODE_ENV=production \
 # pinned version disappears from the mirror as soon as Debian publishes a new
 # revision, which breaks the build rather than hardening it.
 # hadolint ignore=DL3008
+# bubblewrap + socat + ripgrep power the verified isolation runner for
+# native media processes (lib/live/media-sandbox.ts): the sandboxed source
+# side has NO direct network access — every connection is forced through the
+# sandbox's local filtering proxies. ripgrep is a required Linux dependency
+# of the sandbox runtime itself.
+# hadolint ignore=DL3008
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl \
+       bubblewrap socat ripgrep \
     && rm -rf /var/lib/apt/lists/*
 # yt-dlp resolves public video links behind the Live Page's Source URL field
 # (lib/live/resolve.ts runs `yt-dlp -J --no-playlist <url>`). The official

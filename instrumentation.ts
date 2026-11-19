@@ -1,6 +1,13 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
 
+  // The media sandbox bootstraps first and independently of the scheduler
+  // guards: it is what makes native media execution safe, and its proxies
+  // live for the whole server process. It fails closed on its own if the
+  // platform primitives are missing (see lib/live/media-sandbox.ts).
+  const mediaSandbox = await import("./lib/live/media-sandbox");
+  await mediaSandbox.ensureMediaSandbox();
+
   const onVercel = Boolean(process.env.VERCEL);
   const production = process.env.NODE_ENV === "production";
 
