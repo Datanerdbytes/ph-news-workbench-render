@@ -152,7 +152,9 @@ function verifyPlatformDependencies(): void {
     }
   } else if (process.platform === 'linux') {
     if (!commandWorks('bwrap', ['--version'])) missing.push('bubblewrap (bwrap)');
-    if (!commandWorks('socat', ['-u'])) missing.push('socat');
+    // `-h` prints the help and exits 0 — bare `-u` needs operands and exits 1
+    // even on a perfectly healthy binary.
+    if (!commandWorks('socat', ['-h'])) missing.push('socat');
     if (!commandWorks('rg', ['--version'])) missing.push('ripgrep (rg)');
     // FUNCTIONAL probe: bwrap must actually unshare namespaces. CI on
     // Ubuntu 24.04 runners (and Render-like runtimes) refuses unprivileged
