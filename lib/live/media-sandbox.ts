@@ -131,12 +131,31 @@ async function initialize(): Promise<void> {
 function verifyPlatformDependencies(): void {
   const missing: string[] = [];
   if (process.platform === 'darwin') {
-    if (!commandWorks('/usr/bin/sandbox-exec', ['h'])) missing.push('sandbox-exec');
+    if (!commandWorks('/usr/bin/sandbox-exec', ['h'])) {
+      missing.push('sandbox-exec');
+    }
     if (!commandWorks('rg', ['--version'])) missing.push('ripgrep (rg)');
+    // FUNCTIONAL probe: a tiny Seatbelt run — `--version` alone can lie.
+    if (!commandWorks('sandbox-exec', ['-p', '(allow default)', '/bin/echo', 'ok'])) {
+      missing.push('a working sandbox-exec profile run');
+    }
   } else if (process.platform === 'linux') {
     if (!commandWorks('bwrap', ['--version'])) missing.push('bubblewrap (bwrap)');
     if (!commandWorks('socat', ['-u'])) missing.push('socat');
     if (!commandWorks('rg', ['--version'])) missing.push('ripgrep (rg)');
+    // FUNCTIONAL probe: bwrap must actually unshare namespaces. CI on
+    // Ubuntu 24.04 runners (and Render-like runtimes) refuses unprivileged
+    // user namespaces even though `bwrap --version` succeeds.
+    if (
+      !commandWorks(
+        'bwrap',
+        ['--unshare-all', '--ro-bind', '/', '/', '/bin/echo', 'sandbox-ok']
+      )
+    ) {
+      missing.push(
+        'a working bubblewrap namespace run (the runtime refuses unprivileged user namespaces)'
+      );
+    }
   } else {
     throw new Error(
       `The media sandbox does not support this platform (${process.platform}).`
@@ -144,7 +163,7 @@ function verifyPlatformDependencies(): void {
   }
   if (missing.length > 0) {
     throw new Error(
-      `The media sandbox is missing required tools: ${missing.join(', ')}.`
+      `The media sandbox cannot run on this runtime: ${missing.join(', ')}.`
     );
   }
 }
@@ -152,7 +171,7 @@ function verifyPlatformDependencies(): void {
 function commandWorks(command: string, args: string[]): boolean {
   try {
     const probe = spawnSync(command, args, { timeout: 15_000 });
-    return probe.status === 0 || probe.error === undefined;
+    return probe.status === 0 && !probe.error;
   } catch {
     return false;
   }
