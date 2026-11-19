@@ -22,12 +22,18 @@ export type LiveVideo = {
   plannedStartTime: string | null;
 };
 
-function mapLiveVideo(body: RawLiveVideo, fallbackId = ''): LiveVideo {
+function mapLiveVideo(
+  body: RawLiveVideo,
+  fallbackId = '',
+  // The create response does not echo title/description/status, so the
+  // values we just sent stand in for them.
+  known: Partial<Pick<LiveVideo, 'title' | 'description' | 'status'>> = {}
+): LiveVideo {
   return {
     id: body.id ?? fallbackId,
-    title: body.title ?? 'Untitled live stream',
-    description: body.description ?? '',
-    status: body.status ?? 'UNKNOWN',
+    title: body.title ?? known.title ?? 'Untitled live stream',
+    description: body.description ?? known.description ?? '',
+    status: body.status ?? known.status ?? 'UNKNOWN',
     streamUrl: body.stream_url ?? null,
     secureStreamUrl: body.secure_stream_url ?? null,
     permalink: body.permalink_url ?? null,
@@ -63,7 +69,11 @@ export async function createPageLiveVideo({
     accessToken
   );
 
-  return mapLiveVideo(body);
+  return mapLiveVideo(body, '', {
+    title,
+    description,
+    status: plannedStartTime ? 'UNPUBLISHED' : 'LIVE_NOW',
+  });
 }
 
 export async function updatePageLiveVideo({
