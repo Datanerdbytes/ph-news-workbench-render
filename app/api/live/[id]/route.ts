@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
+import { getPumpManager } from '@/lib/live/pump';
+import { withWorkspaceLiveLock } from '@/lib/live/workspace-lock';
 import { requirePublishingConnection } from '@/lib/publishing/connection';
+import { requireWorkspace, unauthorized } from '@/lib/session';
 import { facebookErrorResponse } from '@/lib/publishing/errors';
 import {
   endPageLiveVideo,
@@ -85,34 +88,49 @@ export async function DELETE(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const result = await requirePublishingConnection(request, 'end a live stream');
-  if (result.response) return result.response;
-
-  const { access, connection } = result.context;
+  const access = await requireWorkspace(request);
+  if (!access) return unauthorized();
   const { id } = await params;
-  const stream = await findStream(access.workspace.id, id);
-  if (!stream) {
-    return NextResponse.json({ error: 'Live stream not found.' }, { status: 404 });
-  }
 
   try {
-    await endPageLiveVideo({
-      liveVideoId: stream.facebook_video_id,
-      accessToken: connection.accessToken,
+    return await withWorkspaceLiveLock(access.workspace.id, async () => {
+      const result = await requirePublishingConnection(request, 'end a live stream');
+      if (result.response) return result.response;
+      const { connection } = result.context;
+
+      const stream = await findStream(access.workspace.id, id);
+      if (!stream) {
+        return NextResponse.json({ error: 'Live stream not found.' }, { status: 404 });
+      }
+
+      try {
+        // End Facebook first; a failed end request must leave the pump and
+        // controls available for another attempt.
+        await endPageLiveVideo({
+          liveVideoId: stream.facebook_video_id,
+          accessToken: connection.accessToken,
+        });
+
+        getPumpManager().stop(stream.id);
+        await sql`
+          UPDATE live_streams
+          SET status = 'ENDED', pump_status = 'stopped', updated_at = now()
+          WHERE id = ${stream.id} AND workspace_id = ${access.workspace.id}
+        `;
+
+        return NextResponse.json({ ended: true });
+      } catch (error) {
+        return facebookErrorResponse(
+          error,
+          'live_end_failed',
+          'The live stream could not be ended.'
+        );
+      }
     });
-
-    await sql`
-      UPDATE live_streams
-      SET status = 'ENDED', updated_at = now()
-      WHERE id = ${stream.id} AND workspace_id = ${access.workspace.id}
-    `;
-
-    return NextResponse.json({ ended: true });
-  } catch (error) {
-    return facebookErrorResponse(
-      error,
-      'live_end_failed',
-      'The live stream could not be ended.'
+  } catch {
+    return NextResponse.json(
+      { error: 'The live stream could not be ended. Try again.' },
+      { status: 500 }
     );
   }
 }
