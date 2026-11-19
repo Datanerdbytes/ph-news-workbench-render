@@ -34,9 +34,10 @@ RUN case "${TARGETARCH}" in \
     && yt-dlp --version
 
 COPY package.json package-lock.json .npmrc ./
-# Runtime deps only — the worker imports the neon client, the sandbox
-# runtime, and undici; tsx comes from the global install above.
-RUN npm ci --omit=dev --no-audit --no-fund
+# Runtime deps only, lifecycle scripts skipped — prepare runs husky (a dev
+# dep) and no production dependency ships a postinstall. tsx comes from the
+# global install above.
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 
 COPY tsconfig.json ./
 COPY media-runner.ts ./
