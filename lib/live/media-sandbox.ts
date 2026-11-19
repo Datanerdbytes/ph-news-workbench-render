@@ -133,12 +133,21 @@ async function initialize(): Promise<void> {
 function verifyPlatformDependencies(): void {
   const missing: string[] = [];
   if (process.platform === 'darwin') {
-    if (!commandWorks('/usr/bin/sandbox-exec', ['h'])) {
+    // The binary probe cannot demand exit 0: sandbox-exec answers a usage
+    // probe with EX_USAGE (64) even when perfectly healthy.
+    if (!binaryRuns('/usr/bin/sandbox-exec', ['h'])) {
       missing.push('sandbox-exec');
     }
     if (!commandWorks('rg', ['--version'])) missing.push('ripgrep (rg)');
     // FUNCTIONAL probe: a tiny Seatbelt run — `--version` alone can lie.
-    if (!commandWorks('sandbox-exec', ['-p', '(allow default)', '/bin/echo', 'ok'])) {
+    // The profile carries the standard `(version 1)` header, which macOS 27
+    // requires and older releases accept.
+    if (
+      !commandWorks(
+        'sandbox-exec',
+        ['-p', '(version 1)(allow default)', '/bin/echo', 'ok']
+      )
+    ) {
       missing.push('a working sandbox-exec profile run');
     }
   } else if (process.platform === 'linux') {
@@ -167,6 +176,16 @@ function verifyPlatformDependencies(): void {
     throw new Error(
       `The media sandbox cannot run on this runtime: ${missing.join(', ')}.`
     );
+  }
+}
+
+/** The command spawned, ran, and exited — whatever its exit code. */
+function binaryRuns(command: string, args: string[]): boolean {
+  try {
+    const probe = spawnSync(command, args, { timeout: 15_000 });
+    return !probe.error;
+  } catch {
+    return false;
   }
 }
 

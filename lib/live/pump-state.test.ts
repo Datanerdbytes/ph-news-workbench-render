@@ -106,14 +106,19 @@ describe('mapPumpStatus', () => {
 describe('pumpProcessRecord', () => {
   it('manager status without startedAt (no record for the id) → undefined', () => {
     expect(
-      pumpProcessRecord({ running: false, startedAt: null, error: null })
+      pumpProcessRecord({
+        running: false,
+        startedAt: null,
+        error: null,
+        retrying: false,
+      })
     ).toBeUndefined();
   });
 
   it('manager status of a live process (startedAt set, running) → { running: true }', () => {
     const startedAt = new Date('2026-11-19T10:00:00Z');
     expect(
-      pumpProcessRecord({ running: true, startedAt, error: null })
+      pumpProcessRecord({ running: true, startedAt, error: null, retrying: false })
     ).toEqual({ running: true, error: null });
   });
 
@@ -124,6 +129,7 @@ describe('pumpProcessRecord', () => {
         running: false,
         startedAt,
         error: 'ffmpeg exited with code 1',
+        retrying: false,
       })
     ).toEqual({ running: false, error: 'ffmpeg exited with code 1' });
   });

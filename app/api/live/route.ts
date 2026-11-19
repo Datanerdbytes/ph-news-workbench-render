@@ -6,7 +6,9 @@ import {
   mapPumpStatus,
   parseSourceMode,
   pumpProcessRecord,
+  type PumpStatusValue,
 } from '@/lib/live/pump-state';
+import { runnerMode } from '@/lib/live/runner-config';
 import { requirePublishingConnection } from '@/lib/publishing/connection';
 import { facebookErrorResponse } from '@/lib/publishing/errors';
 import {
@@ -71,10 +73,16 @@ function toStream(row: StreamRow) {
     createdAt: row.created_at,
     sourceUrl: row.source_url,
     sourceMode: parseSourceMode(row.source_mode),
-    pumpStatus: mapPumpStatus(
-      { pumpStatus: row.pump_status },
-      pumpProcessRecord(getPumpManager().status(row.id))
-    ),
+    pumpStatus: runnerMode()
+      ? // The pump lives in the media runner worker, which owns every
+        // pump_status write (start, crash reconcile, stop) — the DB column is
+        // the source of truth and must not be merged with THIS process's
+        // (empty) manager, or every running row would read `interrupted`.
+        (row.pump_status as PumpStatusValue)
+      : mapPumpStatus(
+          { pumpStatus: row.pump_status },
+          pumpProcessRecord(getPumpManager().status(row.id))
+        ),
     pumpStartedAt: row.pump_started_at,
     pumpError: row.pump_error,
   };

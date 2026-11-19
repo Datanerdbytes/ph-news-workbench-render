@@ -12,6 +12,11 @@ import {
   parseSourceMode,
   PumpStateError,
 } from '@/lib/live/pump-state';
+import {
+  runnerMode,
+  runnerRequest,
+  RUNNER_UNREACHABLE_ERROR,
+} from '@/lib/live/runner-config';
 import { withWorkspaceLiveLock } from '@/lib/live/workspace-lock';
 import { requirePublishingConnection } from '@/lib/publishing/connection';
 import { requireWorkspace, unauthorized } from '@/lib/session';
@@ -44,6 +49,26 @@ async function startPump(workspaceId: string, stream: PumpRow) {
       { error: 'Resolve a source URL for this stream before going live.' },
       { status: 400 }
     );
+  }
+
+  // Media runner mode: the sandboxed pipeline lives in the worker. It owns
+  // the stream-key decryption, the ingest allowlist, the duplicate guard and
+  // every pump_status write — this route keeps only the auth/tenant checks
+  // (already done by the caller) and relays the start.
+  if (runnerMode()) {
+    const outcome = await runnerRequest('/pump/start', {
+      workspaceId,
+      streamId: String(stream.id),
+    });
+    if (outcome.kind === 'unreachable') {
+      return NextResponse.json(
+        { error: RUNNER_UNREACHABLE_ERROR },
+        { status: 502 }
+      );
+    }
+    return NextResponse.json(outcome.body as object, {
+      status: outcome.status,
+    });
   }
 
   let streamKey: string | null = null;
@@ -142,6 +167,24 @@ async function startPump(workspaceId: string, stream: PumpRow) {
 }
 
 async function stopPump(workspaceId: string, stream: PumpRow) {
+  // Media runner mode: the pump lives in the worker, which owns the
+  // pump_status write — this route only relays the stop.
+  if (runnerMode()) {
+    const outcome = await runnerRequest('/pump/stop', {
+      workspaceId,
+      streamId: String(stream.id),
+    });
+    if (outcome.kind === 'unreachable') {
+      return NextResponse.json(
+        { error: RUNNER_UNREACHABLE_ERROR },
+        { status: 502 }
+      );
+    }
+    return NextResponse.json(outcome.body as object, {
+      status: outcome.status,
+    });
+  }
+
   // Stop the process even when the DB row is stale; stopping an idle stream
   // is a no-op success, not an error.
   getPumpManager().stop(stream.id);

@@ -552,6 +552,7 @@ describe('PumpManager state machine', () => {
       running: false,
       startedAt: null,
       error: null,
+      retrying: false,
     });
   });
 

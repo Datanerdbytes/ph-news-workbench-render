@@ -408,6 +408,12 @@ export type PumpStatus = {
   running: boolean;
   startedAt: Date | null;
   error: string | null;
+  /**
+   * True while a retry backoff timer is pending: the current attempt is dead
+   * but the pump is not terminal — the next spawn is already scheduled.
+   * External reconcilers must treat this as still running, never as an exit.
+   */
+  retrying: boolean;
 };
 
 export type PumpStopResult = { ok: true; wasRunning: boolean };
@@ -635,11 +641,14 @@ export class PumpManager {
    */
   status(id: number | string): PumpStatus {
     const proc = this.procs.get(String(id));
-    if (!proc) return { running: false, startedAt: null, error: null };
+    if (!proc) {
+      return { running: false, startedAt: null, error: null, retrying: false };
+    }
     return {
       running: proc.running,
       startedAt: proc.startedAt,
       error: proc.lastError,
+      retrying: proc.retryTimer !== null,
     };
   }
 

@@ -5,6 +5,11 @@ import {
   NetworkPolicyError,
   validateSourceUrl,
 } from '@/lib/live/public-network';
+import {
+  runnerMode,
+  runnerRequest,
+  RUNNER_UNREACHABLE_ERROR,
+} from '@/lib/live/runner-config';
 import { requireWorkspace, unauthorized } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
@@ -22,6 +27,23 @@ export async function POST(request: Request) {
       { error: 'Paste a video link to preview.' },
       { status: 400 }
     );
+  }
+
+  // Media runner mode: the sandboxed yt-dlp run belongs to the worker. The
+  // worker reproduces this route's JSON contract ({error, code} on failure)
+  // exactly, so the pass-through keeps the client untouched.
+  if (runnerMode()) {
+    const outcome = await runnerRequest('/resolve', { url });
+    if (outcome.kind === 'unreachable') {
+      return NextResponse.json(
+        { error: RUNNER_UNREACHABLE_ERROR },
+        { status: 502 }
+      );
+    }
+    return NextResponse.json(outcome.body, {
+      status: outcome.status,
+      headers: { 'cache-control': 'no-store' },
+    });
   }
 
   try {
