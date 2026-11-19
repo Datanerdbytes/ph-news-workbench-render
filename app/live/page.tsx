@@ -1,9 +1,15 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Copy, Radio, RefreshCw, Square, MessageSquare } from 'lucide-react';
+import { Copy, Play, Radio, RefreshCw, Square, MessageSquare } from 'lucide-react';
 import { toast } from 'sonner';
 import { AssistantChat } from '@/components/assistant-chat';
+import {
+  PumpControls,
+  SourcePreview,
+  type PumpStatus,
+  type ResolvedSource,
+} from '@/components/live/source-preview';
 import { Button } from '@/components/ui/button';
 import { ConfirmButton } from '@/components/ui/confirm-button';
 import { ErrorState } from '@/components/ui/error-state';
@@ -34,6 +40,11 @@ type Stream = {
   permalink: string | null;
   plannedStartTime: string | null;
   createdAt: string;
+  sourceUrl: string | null;
+  sourceMode: 'direct' | 'staged' | null;
+  pumpStatus: PumpStatus;
+  pumpStartedAt: string | null;
+  pumpError: string | null;
 };
 
 type Comment = {
@@ -60,6 +71,14 @@ function toLocalInput(value: string | null) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+// A paste that resolves is stored as its resolved playable address; a direct
+// media file can feed the pump as pasted. Page links (YouTube, Facebook, …)
+// need yt-dlp first — ffmpeg cannot open them, so they are never attached
+// without a Preview. Staged resolves (DASH-only sources such as Facebook
+// replay VODs) have no playable URL at all, so create keeps the original
+// pasted link and flags mode:'staged' — the pump pipes it through yt-dlp.
+const DIRECT_SOURCE_PATTERN = /^https?:\/\/\S+\.(mp4|webm)(?:[?#]|$)/i;
+
 export default function LivePage() {
   const [streams, setStreams] = useState<Stream[]>([]);
   const [loading, setLoading] = useState(true);
@@ -72,6 +91,13 @@ export default function LivePage() {
   const [scheduleOn, setScheduleOn] = useState(false);
   const [scheduledFor, setScheduledFor] = useState(defaultScheduleValue);
   const [scheduleError, setScheduleError] = useState('');
+
+  const [sourceUrl, setSourceUrl] = useState('');
+  const [resolving, setResolving] = useState(false);
+  const [resolvedSource, setResolvedSource] = useState<ResolvedSource | null>(
+    null
+  );
+  const [resolveError, setResolveError] = useState('');
 
   const load = useCallback(async (refresh = false) => {
     setLoading(true);
@@ -95,6 +121,40 @@ export default function LivePage() {
     void load();
   }, [load]);
 
+  async function previewSource() {
+    const url = sourceUrl.trim();
+    if (!url) return;
+    setResolving(true);
+    setResolveError('');
+    try {
+      const res = await fetch('/api/live/resolve', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(data?.error ?? 'The video link could not be resolved.');
+      }
+      setResolvedSource(data);
+      // Auto-fill the title, but never clobber one the user already typed.
+      if (!title.trim() && data.title) {
+        setTitle(String(data.title).slice(0, 200));
+      }
+    } catch (error) {
+      setResolvedSource(null);
+      // The resolve API's message is already friendly — show it as-is and
+      // keep Preview usable as the retry.
+      setResolveError(
+        error instanceof Error
+          ? error.message
+          : 'The video link could not be resolved.'
+      );
+    } finally {
+      setResolving(false);
+    }
+  }
+
   async function create() {
     let scheduledForIso: string | null = null;
     if (scheduleOn) {
@@ -108,6 +168,15 @@ export default function LivePage() {
     setScheduleError('');
     setBusy(true);
     try {
+      const pastedUrl = sourceUrl.trim();
+      // Staged keeps the pasted page link (yt-dlp reads it itself); direct
+      // stores the resolved playable file. Unpreviewed direct-file pastes
+      // still attach as-is and stay 'direct'.
+      const sourceUrlForCreate =
+        resolvedSource?.mode === 'staged'
+          ? pastedUrl
+          : resolvedSource?.playableUrl ??
+            (DIRECT_SOURCE_PATTERN.test(pastedUrl) ? pastedUrl : undefined);
       const res = await fetch('/api/live', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -115,6 +184,8 @@ export default function LivePage() {
           title,
           description,
           scheduledFor: scheduledForIso,
+          sourceUrl: sourceUrlForCreate,
+          mode: resolvedSource?.mode ?? 'direct',
         }),
       });
       const data = await res.json().catch(() => null);
@@ -123,6 +194,9 @@ export default function LivePage() {
       setTitle('');
       setDescription('');
       setScheduleOn(false);
+      setSourceUrl('');
+      setResolvedSource(null);
+      setResolveError('');
       toast.success('Live stream created', {
         description: 'Copy the server URL and stream key into your encoder.',
       });
@@ -135,6 +209,26 @@ export default function LivePage() {
       setBusy(false);
     }
   }
+
+  // The pump API returns the fresh status on every start/stop — patch the
+  // card in place so the chip flips without a refetch round-trip.
+  const patchPump = useCallback(
+    (id: number, pump: { status: PumpStatus; startedAt: string | null }) => {
+      setStreams((current) =>
+        current.map((stream) => {
+          if (stream.id !== id) return stream;
+          return {
+            ...stream,
+            pumpStatus: pump.status,
+            pumpStartedAt: pump.startedAt,
+            // A fresh start clears the old failure text, matching the row.
+            pumpError: pump.status === 'running' ? null : stream.pumpError,
+          };
+        })
+      );
+    },
+    []
+  );
 
   const hasTitle = Boolean(title.trim());
 
@@ -240,6 +334,47 @@ export default function LivePage() {
                 className={textareaClass}
               />
             </div>
+            <div>
+              <FieldLabel htmlFor="live-source-url" hint="Optional">
+                Source URL
+              </FieldLabel>
+              <div className="mt-1.5 flex items-center gap-2">
+                <input
+                  id="live-source-url"
+                  value={sourceUrl}
+                  onChange={(event) => {
+                    setSourceUrl(event.target.value);
+                    setResolveError('');
+                    setResolvedSource(null);
+                  }}
+                  maxLength={2048}
+                  placeholder="https://… paste a public video link to restream"
+                  className={inputClass}
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void previewSource()}
+                  disabled={resolving || !sourceUrl.trim()}
+                >
+                  <Play className="size-3.5" aria-hidden />
+                  {resolving ? 'Resolving…' : resolveError ? 'Retry preview' : 'Preview'}
+                </Button>
+              </div>
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                Only stream content you own or have licensed.
+              </p>
+              {resolveError && (
+                <p role="alert" className="mt-1 text-[11px] text-destructive">
+                  {resolveError}
+                </p>
+              )}
+              {resolvedSource && (
+                <div className="mt-2">
+                  <SourcePreview {...resolvedSource} />
+                </div>
+              )}
+            </div>
             <ScheduleField
               enabled={scheduleOn}
               onEnabled={setScheduleOn}
@@ -341,6 +476,7 @@ export default function LivePage() {
                   key={stream.id}
                   stream={stream}
                   onChanged={() => void load()}
+                  onPumpChanged={patchPump}
                 />
               ))}
             </div>
@@ -360,9 +496,14 @@ export default function LivePage() {
 function StreamCard({
   stream,
   onChanged,
+  onPumpChanged,
 }: {
   stream: Stream;
   onChanged: () => void;
+  onPumpChanged: (
+    id: number,
+    pump: { status: PumpStatus; startedAt: string | null }
+  ) => void;
 }) {
   const [title, setTitle] = useState(stream.title);
   const [description, setDescription] = useState(stream.description);
@@ -477,6 +618,37 @@ function StreamCard({
     }
   }
 
+  async function setPump(action: 'start' | 'stop') {
+    try {
+      const res = await fetch(`/api/live/${stream.id}/pump`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(data?.error ?? 'The live pump could not be updated.');
+      }
+      onPumpChanged(stream.id, data.pump);
+      toast.success(action === 'start' ? 'Going live' : 'Pump stopped', {
+        description:
+          action === 'start'
+            ? 'The source is being copied into the Facebook broadcast.'
+            : 'The Facebook broadcast stays open until you end the stream.',
+      });
+    } catch (error) {
+      toast.error(
+        action === 'start' ? 'Could not go live' : 'Could not stop the pump',
+        {
+          description: error instanceof Error ? error.message : undefined,
+        }
+      );
+      // Start failures leave pump_status/pump_error on the row — resync the
+      // card so the chip tells the same story as the server.
+      onChanged();
+    }
+  }
+
   return (
     <div className="grid gap-3 py-4 lg:grid-cols-[minmax(0,1fr)_240px]">
       <div className="min-w-0 space-y-2">
@@ -566,6 +738,15 @@ function StreamCard({
             End stream
           </ConfirmButton>
         </div>
+        {!ended && (
+          <PumpControls
+            pumpStatus={stream.pumpStatus}
+            pumpError={stream.pumpError}
+            disabled={!stream.sourceUrl}
+            onStart={() => void setPump('start')}
+            onStop={() => void setPump('stop')}
+          />
+        )}
         {comments && (
           <div
             aria-live="polite"

@@ -20,6 +20,12 @@ export const FACEBOOK_SCOPES = [
   // fails the whole OAuth dialog. fetchPageTopPosts already retries
   // without the summaries; if the app later passes App Review for these,
   // add them here and reconnect to unlock the richer counts.
+  // Going live on a Page needs publish_video on the Page token — without it
+  // POST /{page-id}/live_videos fails with Graph error 200 "Permissions
+  // error". Like pages_manage_posts it must be enabled on the app's Pages
+  // use case before the login dialog will grant it; Development-mode admins
+  // and testers get it without App Review.
+  'publish_video',
   'pages_manage_posts',
   'business_management',
 ] as const;

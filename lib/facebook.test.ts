@@ -102,6 +102,25 @@ describe("facebookRedirectUri", () => {
   });
 });
 
+describe("FACEBOOK_SCOPES", () => {
+  it("includes publish_video — going live fails deep in Graph without it", () => {
+    expect(FACEBOOK_SCOPES).toContain("publish_video");
+  });
+
+  it("carries the exact granted scope set, in order", () => {
+    // Any change here must be deliberate: scopes are granted at OAuth time
+    // and a Page connected before a scope was requested stays missing it
+    // until the user reconnects.
+    expect([...FACEBOOK_SCOPES]).toEqual([
+      "pages_show_list",
+      "pages_read_engagement",
+      "publish_video",
+      "pages_manage_posts",
+      "business_management",
+    ]);
+  });
+});
+
 describe("buildAuthorizationUrl", () => {
   it("requests the expected OAuth dialog parameters", () => {
     vi.stubEnv("FACEBOOK_APP_ID", "app123");

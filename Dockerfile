@@ -39,8 +39,29 @@ ENV NODE_ENV=production \
 # revision, which breaks the build rather than hardening it.
 # hadolint ignore=DL3008
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
+# yt-dlp resolves public video links behind the Live Page's Source URL field
+# (lib/live/resolve.ts runs `yt-dlp -J --no-playlist <url>`). The official
+# static Linux binary is pinned to one release so the artifact is reproducible
+# and Trivy scans of the image stay clean — bump the pin deliberately, and
+# check the release notes for CVE fixes when you do. The release ships one
+# binary per architecture: the deploy target (Render) is amd64, and a local
+# build on an Apple-silicon Mac is arm64, so the download follows BuildKit's
+# TARGETARCH instead of assuming x86-64. TARGETARCH is declared without a
+# default on purpose: a default here would shadow the value BuildKit injects
+# for the target platform, and the amd64 binary does not run under Rosetta.
+ARG YTDLP_VERSION=2026.10.26
+ARG TARGETARCH
+RUN case "${TARGETARCH}" in \
+      arm64) YTDLP_ASSET=yt-dlp_linux_aarch64 ;; \
+      *) YTDLP_ASSET=yt-dlp_linux ;; \
+    esac \
+    && curl -fsSL \
+      "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/${YTDLP_ASSET}" \
+      -o /usr/local/bin/yt-dlp \
+    && chmod 0755 /usr/local/bin/yt-dlp \
+    && yt-dlp --version
 # Hugging Face Spaces require the container to run as uid 1000; the base
 # image's `node` user is exactly that, so reuse it. The numeric form is what
 # the runtime resolves to anyway, and hadolint cannot look a name up.

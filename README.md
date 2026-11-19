@@ -39,7 +39,8 @@ Full pipeline, required secrets, troubleshooting and rollback:
 | Scheduled publishing | In-process scheduler sweeps due posts every 60s (auto-starts in production; set `DISABLE_LOCAL_SCHEDULER=1` to stop it) |
 | Reel normalization | ffmpeg is baked into the image; enabled with `ENABLE_LOCAL_VIDEO_PROCESSING=1` |
 | Keep-alive | `.github/workflows/keep-alive.yml` pings `/login` every 10 min so the free tier doesn't sleep — scheduled posts would stall while asleep |
-| Video downloads | **Not available** — the yt-dlp download worker is a macOS launchd agent, not part of this image; `/downloads` keeps its explainer state |
+| Live restream | yt-dlp (pinned static binary) + ffmpeg baked into the image; the pump spawns only when `ENABLE_LOCAL_VIDEO_PROCESSING=1` (dev runtimes are always allowed) — see [Live Restream](#live-restream) |
+| Video downloads | **Not available** — the yt-dlp download worker is a macOS launchd agent, not part of this image (the pinned binary in the image serves the live restream resolver only); `/downloads` keeps its explainer state |
 
 ## Deploy checklist (Render)
 
@@ -94,6 +95,40 @@ on the same driver.
 
 Switching drivers later only affects *new* stagings — staged copies are
 transient and gone after each publish, so nothing to migrate.
+
+## Live Restream
+
+The Live Page can broadcast a public video to the connected Facebook Page
+without an encoder:
+
+1. Paste a public video URL (YouTube, Facebook, …) into the **Source URL**
+   field and press **Preview** — the server resolves the link with yt-dlp
+   (`POST /api/live/resolve`) and the stream behind it plays inline on the
+   page. Nothing is sent to Facebook yet.
+2. Create the stream — Facebook returns the usual RTMPS server URL and
+   stream key, as it does for encoder-based streams.
+3. Press **Go live** — an ffmpeg pump on the server copies the resolved
+   stream into Facebook's RTMPS ingest (`POST /api/live/<id>/pump`), non-stop.
+   The Page goes live; viewers and the comments panel work unchanged.
+
+Requirements and caveats:
+
+- The production image carries the pinned yt-dlp static binary (downloaded
+  per architecture — amd64 on Render, arm64 for a local Apple-silicon build —
+  from the release pinned in `YTDLP_VERSION`) and ffmpeg. The pump only runs
+  when `ENABLE_LOCAL_VIDEO_PROCESSING=1`; dev runtimes are always allowed.
+- **Only stream content you own or have licensed** — the Live Page shows the
+  same hint next to the Source URL field.
+- A VOD source broadcasts once through: when the file ends, the pump stops.
+  Live sources (HLS) get reconnect flags and retry with backoff. Replay VODs
+  that expose only DASH fragments (typical Facebook replays) have no playable
+  URL to preview — resolve marks them `staged`, the preview shows a neutral
+  notice instead of a player, and **Go live** broadcasts them once through
+  the pump piping (two yt-dlp feeders feeding ffmpeg), restarting any retry
+  from the beginning.
+- The pump runs inside the web service, so a deploy or restart kills it. A
+  stream whose pump died that way reports **interrupted** on its card with a
+  one-click restart; a dedicated background worker is the follow-up.
 
 ## Local Docker test
 
