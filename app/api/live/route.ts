@@ -16,6 +16,10 @@ import {
 import { readText } from '@/lib/publishing/request';
 import { parseScheduledPublishTime } from '@/lib/publishing/schedule';
 import { recordNativeSchedule } from '@/lib/schedule-mirror';
+import {
+  assertPublicSourceUrl,
+  NetworkPolicyError,
+} from '@/lib/live/public-network';
 
 export const dynamic = 'force-dynamic';
 
@@ -170,15 +174,19 @@ export async function POST(request: Request) {
     );
   }
 
-  // The pump copies this address into Facebook's RTMPS ingest, so it must
-  // look like a URL. Light shape check only — full validation (and the
-  // playable stream address) happened at /api/live/resolve time.
-  const sourceUrl = readText(body?.sourceUrl, 2048);
-  if (sourceUrl && !/^https?:\/\//i.test(sourceUrl)) {
-    return NextResponse.json(
-      { error: 'The source link must be an http:// or https:// URL.' },
-      { status: 400 }
-    );
+  // The pump copies this address into Facebook's RTMPS ingest. Signed CDN
+  // URLs are long, so the bound is generous — but oversized input is
+  // rejected, never truncated (truncation would drop signature parameters).
+  // The full public-host policy applies here too: a stored source is a
+  // server-side fetch target even if it never saw /api/live/resolve.
+  const sourceUrl = readText(body?.sourceUrl, 32_768);
+  if (sourceUrl) {
+    try {
+      await assertPublicSourceUrl(sourceUrl);
+    } catch (error) {
+      if (!(error instanceof NetworkPolicyError)) throw error;
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
   }
 
   // How the pump consumes the source, straight from the resolve response:

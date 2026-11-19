@@ -1,6 +1,10 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import os from 'node:os';
+import {
+  assertMediaIsolationAvailable,
+  MediaIsolationError,
+} from './media-egress';
 import path from 'node:path';
 
 /**
@@ -27,6 +31,7 @@ export type ResolveErrorCode =
   | 'auth_required'
   | 'unsupported'
   | 'timeout'
+  | 'media_isolation_unavailable'
   | 'failed';
 
 export class ResolveError extends Error {
@@ -254,6 +259,16 @@ export async function resolveVideoUrl(url: string): Promise<ResolvedVideo> {
       'invalid_url',
       'Only http:// and https:// video links can be resolved.'
     );
+  }
+
+  // Fail closed before yt-dlp can run: without verified socket-level
+  // isolation its extractor requests, redirects, and fragment fetches are
+  // not constrained by the URL checks above.
+  try {
+    assertMediaIsolationAvailable();
+  } catch (error) {
+    if (!(error instanceof MediaIsolationError)) throw error;
+    throw new ResolveError(error.code, error.message);
   }
 
   let run: YtdlpRun | null = null;

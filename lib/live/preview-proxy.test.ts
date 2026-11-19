@@ -6,7 +6,6 @@ const { lookupMock } = vi.hoisted(() => ({ lookupMock: vi.fn() }));
 vi.mock('node:dns/promises', () => ({ lookup: lookupMock }));
 
 import { isHlsUrl, proxyUrl, rewritePlaylist } from './preview-proxy';
-import { assertPublicUrl, PreviewProxyError } from './preview-proxy.server';
 
 /** Queue the addresses `lookup` reports for the hostname under test. */
 function resolveTo(...addresses: string[]) {
@@ -176,108 +175,5 @@ describe('rewritePlaylist', () => {
     expect(rewritePlaylist('#EXTM3U\nseg1.ts', BASE)).toBe(
       `#EXTM3U\n${proxied('https://manifest.example/live/seg1.ts')}`
     );
-  });
-});
-
-describe('assertPublicUrl', () => {
-  it('accepts a public host and returns the normalized URL', async () => {
-    resolveTo('93.184.216.34');
-
-    await expect(
-      assertPublicUrl('https://manifest.example/live.m3u8')
-    ).resolves.toBe('https://manifest.example/live.m3u8');
-    expect(lookupMock).toHaveBeenCalledWith('manifest.example', { all: true });
-  });
-
-  it('rejects localhost resolving to 127.0.0.1', async () => {
-    resolveTo('127.0.0.1');
-
-    await expect(assertPublicUrl('https://localhost:3000/live.m3u8')).rejects.toThrow(
-      PreviewProxyError
-    );
-  });
-
-  it('rejects private, link-local, and loopback IPv4 ranges', async () => {
-    const privates = [
-      '127.0.0.1', // loopback
-      '10.1.2.3', // 10/8
-      '172.16.0.1', // 172.16/12
-      '172.31.255.255', // 172.16/12 top
-      '192.168.1.1', // 192.168/16
-      '169.254.169.254', // cloud metadata endpoint
-      '0.0.0.0', // unspecified
-    ];
-    for (const address of privates) {
-      resolveTo(address);
-      await expect(
-        assertPublicUrl('https://evil.example/live.m3u8')
-      ).rejects.toThrow(PreviewProxyError);
-    }
-    expect(lookupMock).toHaveBeenCalledTimes(privates.length);
-  });
-
-  it('rejects IPv6 loopback, link-local, and unique-local addresses', async () => {
-    for (const address of ['::1', 'fe80::1', 'fc00::1', 'fd12:3455:67ab::1']) {
-      resolveTo(address);
-      await expect(
-        assertPublicUrl('https://evil.example/live.m3u8')
-      ).rejects.toThrow(PreviewProxyError);
-    }
-  });
-
-  it('judges IPv4-mapped IPv6 by the embedded IPv4 address', async () => {
-    resolveTo('::ffff:10.0.0.7');
-    await expect(
-      assertPublicUrl('https://evil.example/live.m3u8')
-    ).rejects.toThrow(PreviewProxyError);
-
-    resolveTo('::ffff:93.184.216.34');
-    await expect(
-      assertPublicUrl('https://ok.example/live.m3u8')
-    ).resolves.toBe('https://ok.example/live.m3u8');
-  });
-
-  it('rejects when any resolved address is private, even alongside a public one', async () => {
-    resolveTo('93.184.216.34', '192.168.0.10');
-    await expect(
-      assertPublicUrl('https://dual.example/live.m3u8')
-    ).rejects.toThrow(PreviewProxyError);
-  });
-
-  it('accepts 172.32.x.x, which sits outside the 172.16/12 range', async () => {
-    resolveTo('172.32.0.1');
-    await expect(
-      assertPublicUrl('https://edge.example/live.m3u8')
-    ).resolves.toBe('https://edge.example/live.m3u8');
-  });
-
-  it('rejects non-http schemes', async () => {
-    await expect(assertPublicUrl('file:///etc/passwd')).rejects.toThrow(
-      PreviewProxyError
-    );
-    await expect(assertPublicUrl('ftp://host.example/video.ts')).rejects.toThrow(
-      PreviewProxyError
-    );
-    expect(lookupMock).not.toHaveBeenCalled();
-  });
-
-  it('rejects strings that are not URLs at all', async () => {
-    await expect(assertPublicUrl('not a url')).rejects.toThrow(
-      PreviewProxyError
-    );
-  });
-
-  it('rejects when DNS lookup fails', async () => {
-    lookupMock.mockRejectedValue(new Error('ENOTFOUND'));
-    await expect(
-      assertPublicUrl('https://gone.example/live.m3u8')
-    ).rejects.toThrow(PreviewProxyError);
-  });
-
-  it('rejects unparseable resolved addresses instead of trusting them', async () => {
-    resolveTo('not-an-address');
-    await expect(
-      assertPublicUrl('https://weird.example/live.m3u8')
-    ).rejects.toThrow(PreviewProxyError);
   });
 });

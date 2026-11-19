@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   constants as fsConstants,
@@ -10,6 +10,11 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { localRuntimeEnabled } from '@/lib/reels/media';
+import {
+  assertMediaIsolationAvailable,
+  guardedSpawn,
+  MediaIsolationError,
+} from './media-egress';
 import { pythonExecutable } from '@/lib/live/resolve';
 
 /**
@@ -253,7 +258,7 @@ function stagedFifoPaths(): FifoPair {
  */
 function makeFifo(fifoPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(MKFIFO_BIN, ['-m', '0600', fifoPath], {
+    const child = guardedSpawn(MKFIFO_BIN, ['-m', '0600', fifoPath], {
       stdio: ['ignore', 'ignore', 'pipe'],
     });
     let stderr = '';
@@ -352,6 +357,7 @@ export type PumpStartRequest = {
 
 export type PumpStartFailureReason =
   | 'gate_disabled'
+  | 'isolation_unavailable'
   | 'already_running'
   | 'spawn_failed';
 
@@ -433,6 +439,19 @@ export class PumpManager {
         reason: 'gate_disabled',
         error:
           'Local video processing is disabled on this runtime, so the pump cannot spawn ffmpeg.',
+      };
+    }
+    // Fail closed before ANY native child can be launched (probe, ffmpeg,
+    // feeders, fifo helpers): without verified socket-level isolation the
+    // tools' nested requests are not constrained by URL checks alone.
+    try {
+      assertMediaIsolationAvailable();
+    } catch (error) {
+      if (!(error instanceof MediaIsolationError)) throw error;
+      return {
+        ok: false,
+        reason: 'isolation_unavailable',
+        error: error.message,
       };
     }
     const existing = this.procs.get(key);
@@ -587,7 +606,7 @@ export class PumpManager {
     if (proc.attempts === 1) {
       this.log(proc, 'started', { transcode: proc.params.needsTranscode });
     }
-    const child = spawn(FFMPEG_BIN, buildPumpArgs(proc.params), {
+    const child = guardedSpawn(FFMPEG_BIN, buildPumpArgs(proc.params), {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     proc.child = child;
@@ -699,7 +718,7 @@ export class PumpManager {
     let audioHandle: FileHandle | null = null;
     try {
       // (2) ffmpeg first — see the ordering note above.
-      const child = spawn(
+      const child = guardedSpawn(
         FFMPEG_BIN,
         buildStagedPumpArgs({
           videoFifo: fifos.video,
@@ -827,7 +846,7 @@ export class PumpManager {
     for (const candidate of feederCandidates(proc.params.source, kind)) {
       let child: ChildProcess;
       try {
-        child = spawn(candidate.command, candidate.args, {
+        child = guardedSpawn(candidate.command, candidate.args, {
           // stdio[1] is the fifo write-end fd: the feeder's stdout IS the
           // pipe — yt-dlp writes the media bytes straight into it.
           stdio: ['ignore', fifoHandle.fd, 'pipe'],
@@ -1104,7 +1123,7 @@ export class PumpManager {
 
   private probeSource(source: string, timeoutMs = 15_000): Promise<VideoStreams> {
     return new Promise((resolve) => {
-      const child = spawn(
+      const child = guardedSpawn(
         FFPROBE_BIN,
         ['-v', 'error', '-show_streams', '-of', 'json', source],
         { stdio: ['ignore', 'pipe', 'pipe'] }

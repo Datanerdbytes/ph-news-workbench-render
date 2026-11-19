@@ -1,9 +1,25 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
-const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
+const { spawnMock, isolationMock } = vi.hoisted(() => ({
+  spawnMock: vi.fn(),
+  isolationMock: vi.fn(),
+}));
 
 vi.mock('node:child_process', () => ({ spawn: spawnMock }));
+vi.mock('./media-egress', () => ({
+  guardedSpawn: (...args: unknown[]) => spawnMock(...args),
+  assertMediaIsolationAvailable: isolationMock,
+  MediaIsolationError: class MediaIsolationError extends Error {
+    readonly code = 'media_isolation_unavailable';
+    constructor(message = 'isolation unavailable') {
+      super(message);
+      this.name = 'MediaIsolationError';
+    }
+  },
+  MEDIA_ISOLATION_ERROR_CODE: 'media_isolation_unavailable',
+  MEDIA_ISOLATION_UNAVAILABLE_MESSAGE: 'isolation unavailable',
+}));
 
 import { ResolveError, resolveVideoUrl } from './resolve';
 
@@ -135,6 +151,8 @@ async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
 
 beforeEach(() => {
   spawnMock.mockReset();
+  isolationMock.mockReset();
+  isolationMock.mockImplementation(() => {}); // verified runner present
 });
 
 afterEach(() => {
@@ -354,5 +372,19 @@ describe('resolveVideoUrl', () => {
       ]);
       expect(args.at(-1)).toBe(VOD_URL);
     });
+  });
+});
+
+describe('media isolation quarantine', () => {
+  it('refuses to resolve and never spawns yt-dlp when the verified runner is absent', async () => {
+    isolationMock.mockImplementation(() => {
+      throw new Error('isolation unavailable'); // not MediaIsolationError:
+      // the resolver rethrows unknown errors untouched.
+    });
+
+    const error = (await rejectionOf(resolveVideoUrl(VOD_URL))) as Error;
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toBe('isolation unavailable');
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 });

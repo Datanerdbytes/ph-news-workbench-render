@@ -90,6 +90,9 @@ async function startPump(workspaceId: string, stream: PumpRow) {
     if (outcome.reason === 'gate_disabled') {
       return NextResponse.json({ error: outcome.error }, { status: 400 });
     }
+    if (outcome.reason === 'isolation_unavailable') {
+      return NextResponse.json({ error: outcome.error }, { status: 503 });
+    }
     if (outcome.reason === 'already_running') {
       return NextResponse.json({ error: outcome.error }, { status: 409 });
     }

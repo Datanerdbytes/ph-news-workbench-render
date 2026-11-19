@@ -10,8 +10,9 @@ import {
   type Mock,
 } from 'vitest';
 
-const { spawnMock, fsMocks } = vi.hoisted(() => {
+const { spawnMock, fsMocks, isolationMock } = vi.hoisted(() => {
   const spawnMock = vi.fn();
+  const isolationMock = vi.fn();
   const open = vi.fn(async (filePath: string) => ({
     fd: filePath.endsWith('-video') ? 31 : 32,
     close: vi.fn(async () => {}),
@@ -19,6 +20,7 @@ const { spawnMock, fsMocks } = vi.hoisted(() => {
   const unlink = vi.fn(async () => {});
   return {
     spawnMock,
+    isolationMock,
     fsMocks: {
       open,
       unlink,
@@ -28,12 +30,29 @@ const { spawnMock, fsMocks } = vi.hoisted(() => {
 });
 
 vi.mock('node:child_process', () => ({ spawn: spawnMock }));
+vi.mock('./media-egress', () => ({
+  // guardedSpawn forwards to the mocked spawn so lifecycle tests keep their
+  // existing child fixtures; assertMediaIsolationAvailable defaults to
+  // "verified runner present" and individual tests flip it to deny.
+  guardedSpawn: (...args: unknown[]) => spawnMock(...args),
+  assertMediaIsolationAvailable: isolationMock,
+  MediaIsolationError: class MediaIsolationError extends Error {
+    readonly code = 'media_isolation_unavailable';
+    constructor(message = 'isolation unavailable') {
+      super(message);
+      this.name = 'MediaIsolationError';
+    }
+  },
+  MEDIA_ISOLATION_ERROR_CODE: 'media_isolation_unavailable',
+  MEDIA_ISOLATION_UNAVAILABLE_MESSAGE: 'isolation unavailable',
+}));
 vi.mock('node:fs/promises', () => ({
   constants: fsMocks.constants,
   open: fsMocks.open,
   unlink: fsMocks.unlink,
 }));
 
+import { MediaIsolationError } from './media-egress';
 import {
   assembleRtmpsUrl,
   buildFeederArgs,
@@ -1125,5 +1144,30 @@ describe('PumpManager staged mode', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(mkfifoKids).toHaveLength(2);
     expect(manager.status(30).running).toBe(false);
+  });
+});
+
+describe('media isolation quarantine', () => {
+  it('refuses to start and never spawns when the verified runner is absent', async () => {
+    stubGateOn(); // pass the runtime gate — the isolation check comes next
+    isolationMock.mockImplementation(() => {
+      // Throw the mocked module's error class so the manager maps it to
+      // isolation_unavailable instead of rethrowing it.
+      throw new MediaIsolationError('isolation unavailable');
+    });
+
+    const result = await getPumpManager().start({
+      id: 9001,
+      source: LIVE_HLS,
+      dest: DEST,
+      mode: 'direct',
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'isolation_unavailable',
+      error: 'isolation unavailable',
+    });
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 });

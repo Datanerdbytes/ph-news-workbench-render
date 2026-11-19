@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { ResolveError, resolveVideoUrl } from '@/lib/live/resolve';
 import { readText } from '@/lib/publishing/request';
+import { validateSourceUrl } from '@/lib/live/public-network';
 import { requireWorkspace, unauthorized } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
@@ -21,7 +22,11 @@ export async function POST(request: Request) {
   }
 
   try {
-    const video = await resolveVideoUrl(url);
+    // Shared network policy: shape + scheme + port checks run here, before
+    // yt-dlp can ever see the input. DNS-based public checks happen inside
+    // the resolver path and (for HLS) the preview proxy.
+    const validated = validateSourceUrl(url);
+    const video = await resolveVideoUrl(validated);
     return NextResponse.json(video, {
       headers: { 'cache-control': 'no-store' },
     });

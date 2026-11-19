@@ -1,158 +1,283 @@
-import { NextResponse } from 'next/server';
 import { rewritePlaylist } from '@/lib/live/preview-proxy';
+import { fetchPublicSource } from '@/lib/live/public-fetch';
 import {
-  assertPublicUrl,
-  PreviewProxyError,
-} from '@/lib/live/preview-proxy.server';
+  assertPublicSourceUrl,
+  NetworkPolicyError,
+} from '@/lib/live/public-network';
 import { requireWorkspace, unauthorized } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
 
-/** A playlist body opens with this exact tag — that is the sniff. */
 const PLAYLIST_TAG = '#EXTM3U';
-
-/** Redirect hops allowed before the chain is called a loop. */
 const MAX_REDIRECTS = 3;
+const MAX_SNIFF_BYTES = 1_048_576;
+const SECURITY_HEADERS = {
+  'cache-control': 'no-store',
+  'content-security-policy': "sandbox; default-src 'none'; frame-ancestors 'none'",
+  'x-content-type-options': 'nosniff',
+};
 
-/**
- * GET /api/live/preview?url=… — CORS-safe streaming preview proxy.
- *
- * googlevideo HLS (manifests and segments) sends no
- * `Access-Control-Allow-Origin`, so hls.js in Chrome/Firefox cannot load it
- * cross-origin. This signed-in route fetches server-side and streams the
- * bytes back same-origin: playlists are rewritten so every nested URI (the
- * variants, keys, maps, and segments) points back at this route, and
- * segments pass through as a stream — the first chunk is sniffed to decide
- * which, and only that chunk is ever held in memory.
- */
-export async function GET(request: Request) {
-  // Streaming arbitrary URLs through the origin is signed-in only — the
-  // same guard as /api/live/resolve.
-  const access = await requireWorkspace(request);
-  if (!access) return unauthorized();
-
-  const target = new URL(request.url).searchParams.get('url');
-  if (!target) {
-    return NextResponse.json(
-      { error: 'A stream URL is required to preview.' },
-      { status: 400 }
-    );
-  }
-
+export async function GET(request: Request): Promise<Response> {
   try {
-    return await streamPreview(target);
-  } catch (error) {
-    if (error instanceof PreviewProxyError) {
-      // Friendly by construction: bad input, private hosts, redirect loops.
-      return NextResponse.json({ error: error.message }, { status: 400 });
+    const access = await requireWorkspace(request);
+    if (!access) return secureResponse(unauthorized());
+
+    const target = new URL(request.url).searchParams.get('url');
+    if (!target) {
+      return errorResponse('A stream URL is required to preview.', 400);
     }
-    // Anything else is the upstream side of the proxy (fetch threw, empty
-    // body, non-2xx) — the raw cause never reaches the client.
-    return NextResponse.json(
-      { error: 'The stream could not be reached for preview.' },
-      { status: 502 }
-    );
+
+    return await streamPreview(target, request.signal);
+  } catch (error) {
+    if (error instanceof NetworkPolicyError) {
+      return errorResponse(error.message, 400);
+    }
+    return errorResponse('The stream could not be reached for preview.', 502);
   }
 }
 
-async function streamPreview(target: string): Promise<Response> {
-  // Manual redirects: every hop is re-run through the SSRF guard, so a
-  // public manifest cannot bounce the proxy at localhost or the metadata
-  // service.
-  let url = await assertPublicUrl(target);
+async function streamPreview(
+  target: string,
+  signal: AbortSignal
+): Promise<Response> {
+  let url = await assertPublicSourceUrl(target);
   let redirects = 0;
   let response: Response;
+
+  // Manual redirects: every hop is re-validated through the full policy and
+  // dispatched on a freshly pinned connection — a public manifest cannot
+  // bounce the proxy at localhost, the metadata service, or a rebinding host.
   for (;;) {
-    response = await fetch(url, { redirect: 'manual' });
+    response = await fetchPublicSource(url, { signal });
     if (!isRedirect(response.status)) break;
-    await drainBody(response);
+    await cancelBody(response);
     if (redirects >= MAX_REDIRECTS) {
-      throw new PreviewProxyError(
+      throw new NetworkPolicyError(
         'This link redirects too many times to preview.'
       );
     }
     redirects += 1;
     const location = response.headers.get('location');
     if (!location) {
-      throw new PreviewProxyError(
+      throw new NetworkPolicyError(
         'This link redirects without a destination, so it cannot be previewed.'
       );
     }
-    url = await assertPublicUrl(new URL(location, url).href);
+    let next: string;
+    try {
+      next = new URL(location, url).href;
+    } catch {
+      throw new NetworkPolicyError(
+        'This link redirects to an invalid destination, so it cannot be previewed.'
+      );
+    }
+    url = await assertPublicSourceUrl(next);
   }
 
   if (!response.ok) {
-    await drainBody(response);
+    await cancelBody(response);
     throw new Error(`Upstream preview responded ${response.status}.`);
   }
-  const body = response.body;
-  if (!body) {
-    throw new Error('Upstream preview sent an empty body.');
-  }
+  if (!response.body) throw new Error('Upstream preview sent an empty body.');
 
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  const first = await reader.read();
-  if (first.done) {
-    throw new Error('Upstream preview sent an empty body.');
-  }
+  return classifyAndStream(response, url);
+}
 
-  // Sniff the first chunk: a manifest opens with #EXTM3U, anything else is
-  // segment bytes. TextDecoder strips the BOM, and replacement characters
-  // in binary chunks simply never match the tag.
-  const head = decoder.decode(first.value, { stream: true });
-  if (head.startsWith(PLAYLIST_TAG)) {
-    // Manifests are kilobytes of text, so collecting them fully is fine.
-    const text = await readAllText(reader, head, decoder);
-    return new Response(rewritePlaylist(text, url), {
-      headers: {
-        'content-type': 'application/vnd.apple.mpegurl',
-        'cache-control': 'no-store',
-      },
-    });
-  }
+/**
+ * Sniffs the bounded prefix of the upstream body. Playlists are collected
+ * (≤1 MiB), rewritten, and served as `application/vnd.apple.mpegurl`.
+ * Everything else streams through FORCED to `application/octet-stream` with
+ * the sandbox CSP and `nosniff` — an upstream response can never carry
+ * active content (HTML/SVG/JS) into this origin, whatever its declared
+ * content-type claims.
+ */
+async function classifyAndStream(
+  response: Response,
+  baseUrl: string
+): Promise<Response> {
+  const reader = response.body!.getReader();
+  const declaredType = response.headers.get('content-type') ?? '';
+  const declaredPlaylist = isPlaylistType(declaredType);
+  const buffered: Uint8Array[] = [];
+  let bufferedBytes = 0;
+  let playlist = false;
 
-  // Segment (or any other bytes): stream through verbatim — emit the
-  // sniffed chunk first, then pull the rest on demand. Nothing beyond the
-  // first chunk is buffered, no matter how large the segment is.
+  try {
+    if (looksActiveContentType(declaredType)) {
+      await reader.cancel();
+      throw new Error('Upstream preview returned active content.');
+    }
+
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk = next.value;
+      buffered.push(chunk);
+      bufferedBytes += chunk.byteLength;
+      const prefix = concatBytes(buffered, bufferedBytes);
+      if (looksActiveBody(decodeBytes(prefix))) {
+        await reader.cancel();
+        throw new Error('Upstream preview returned active content.');
+      }
+
+      if (isPlaylistText(decodeBytes(prefix))) playlist = true;
+      if (playlist && bufferedBytes > MAX_SNIFF_BYTES) {
+        await reader.cancel();
+        throw new Error('Upstream playlist is too large.');
+      }
+
+      // Keep collecting inside the bounded sniff window so active markup
+      // later in the prefix cannot leak; past the window, stream as binary.
+      if (playlist) continue;
+      if (bufferedBytes < MAX_SNIFF_BYTES) continue;
+      return binaryResponse(reader, buffered);
+    }
+
+    const bytes = concatBytes(buffered, bufferedBytes);
+    if (looksActiveBody(decodeBytes(bytes))) {
+      throw new Error('Upstream preview returned active content.');
+    }
+    if (isPlaylistText(decodeBytes(bytes))) {
+      return safeResponse(
+        rewritePlaylist(decodeBytes(bytes), baseUrl),
+        'application/vnd.apple.mpegurl'
+      );
+    }
+    if (declaredPlaylist) {
+      // A playlist MIME without the HLS marker is never reflected as text.
+      return safeResponse(
+        bytes.buffer as ArrayBuffer,
+        'application/octet-stream'
+      );
+    }
+    return safeResponse(bytes.buffer as ArrayBuffer, 'application/octet-stream');
+  } catch (error) {
+    try {
+      await reader.cancel(error);
+    } catch {
+      // The upstream body may already be closed.
+    }
+    throw error;
+  }
+}
+
+function binaryResponse(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  buffered: Uint8Array[]
+): Response {
+  let index = 0;
   const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(first.value);
-    },
     async pull(controller) {
+      if (index < buffered.length) {
+        controller.enqueue(buffered[index++]!);
+        return;
+      }
       try {
         const next = await reader.read();
         if (next.done) controller.close();
         else controller.enqueue(next.value);
-      } catch (cause) {
-        controller.error(cause);
+      } catch (error) {
+        controller.error(error);
       }
     },
-    cancel() {
-      // The player went away mid-segment; stop pulling upstream too.
-      void reader.cancel();
+    async cancel(reason) {
+      await reader.cancel(reason);
     },
   });
-  return new Response(stream, {
+  return safeResponse(stream, 'application/octet-stream');
+}
+
+function safeResponse(
+  body: BodyInit | ReadableStream<Uint8Array>,
+  contentType: string
+): Response {
+  return new Response(body, {
     headers: {
-      'content-type':
-        response.headers.get('content-type') ?? 'application/octet-stream',
-      'cache-control': 'no-store',
+      ...SECURITY_HEADERS,
+      'content-type': contentType,
     },
   });
 }
 
-async function readAllText(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  head: string,
-  decoder: TextDecoder
-): Promise<string> {
-  let text = head;
-  for (;;) {
-    const next = await reader.read();
-    if (next.done) return text + decoder.decode();
-    text += decoder.decode(next.value, { stream: true });
+function secureResponse(response: Response): Response {
+  const headers = new Headers(response.headers);
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
+    headers.set(name, value);
   }
+  if (!headers.has('content-type')) {
+    headers.set('content-type', 'application/json');
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+function errorResponse(message: string, status: number): Response {
+  const response = safeResponse(
+    JSON.stringify({ error: message }),
+    'application/json'
+  );
+  return new Response(response.body, { status, headers: response.headers });
+}
+
+function isPlaylistText(text: string): boolean {
+  return text
+    .replace(/^\uFEFF/, '')
+    .replace(/^\s+/, '')
+    .startsWith(PLAYLIST_TAG);
+}
+
+function isPlaylistType(contentType: string): boolean {
+  const type = contentType.split(';', 1)[0]!.trim().toLowerCase();
+  return (
+    type === 'application/vnd.apple.mpegurl' ||
+    type === 'application/x-mpegurl' ||
+    type === 'audio/mpegurl'
+  );
+}
+
+function looksActiveContentType(contentType: string): boolean {
+  const type = contentType.split(';', 1)[0]!.trim().toLowerCase();
+  return (
+    type === 'text/html' ||
+    type === 'application/xhtml+xml' ||
+    type === 'image/svg+xml' ||
+    type === 'text/xml' ||
+    type === 'application/xml' ||
+    type === 'application/javascript' ||
+    type === 'text/javascript' ||
+    type === 'application/ecmascript' ||
+    type === 'text/ecmascript' ||
+    type === 'application/x-javascript'
+  );
+}
+
+function looksActiveBody(text: string): boolean {
+  const normalized = text.replace(/^\uFEFF/, '').replace(/^\s+/, '');
+  return (
+    /(?:<!doctype\s+html|<html(?:\s|>)|<script(?:\s|>)|<svg(?:\s|>)|<\?xml(?:\s|>)|<iframe(?:\s|>)|<object(?:\s|>)|<embed(?:\s|>))/i.test(
+      normalized
+    ) ||
+    /(?:['"]use strict['"]|(?:const|let|var|function|class|import|export)\s|(?:window|document|globalThis|alert)\s*[.(])/i.test(
+      normalized
+    )
+  );
+}
+
+function concatBytes(chunks: Uint8Array[], total: number): Uint8Array {
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
+}
+
+function decodeBytes(bytes: Uint8Array): string {
+  return new TextDecoder().decode(bytes);
 }
 
 function isRedirect(status: number): boolean {
@@ -165,8 +290,7 @@ function isRedirect(status: number): boolean {
   );
 }
 
-/** Best-effort cancel of a body we are not forwarding (redirect hops). */
-async function drainBody(response: Response) {
+async function cancelBody(response: Response) {
   try {
     await response.body?.cancel();
   } catch {
