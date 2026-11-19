@@ -1,24 +1,24 @@
 import { EventEmitter } from 'node:events';
-import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { spawnMock, isolationMock } = vi.hoisted(() => ({
+const { spawnMock, spawnSyncMock, isolationMock, processKillMock } = vi.hoisted(() => ({
   spawnMock: vi.fn(),
+  spawnSyncMock: vi.fn(),
   isolationMock: vi.fn(),
+  processKillMock: vi.fn(),
 }));
 
-vi.mock('node:child_process', () => ({ spawn: spawnMock }));
+vi.mock('node:child_process', () => ({ spawn: spawnMock, spawnSync: spawnSyncMock }));
 vi.mock('./media-egress', () => ({
-  guardedSpawn: (...args: unknown[]) => spawnMock(...args),
-  assertMediaIsolationAvailable: isolationMock,
-  MediaIsolationError: class MediaIsolationError extends Error {
-    readonly code = 'media_isolation_unavailable';
-    constructor(message = 'isolation unavailable') {
-      super(message);
-      this.name = 'MediaIsolationError';
-    }
-  },
-  MEDIA_ISOLATION_ERROR_CODE: 'media_isolation_unavailable',
-  MEDIA_ISOLATION_UNAVAILABLE_MESSAGE: 'isolation unavailable',
+  // The resolver runs yt-dlp through the mocked guardedSpawn; the child
+  // fixtures keep working because it forwards to the same spawn spy.
+  guardedSpawn: async (...args: unknown[]) => spawnMock(...args),
+  // The timeout kill is observable via the process.kill spy (the real
+  // negative-pid group kill is covered by media-egress.test.ts).
+  signalProcessTree: (...args: unknown[]) => processKillMock(...args),
+}));
+vi.mock('./media-sandbox', () => ({
+  mediaSandboxAvailability: isolationMock,
 }));
 
 import { ResolveError, resolveVideoUrl } from './resolve';
@@ -117,17 +117,22 @@ const DASH_ONLY_FIXTURE = JSON.stringify({
 type FakeChild = EventEmitter & {
   stdout: EventEmitter;
   stderr: EventEmitter;
-  kill: Mock;
 };
 
 function makeChild(): FakeChild {
   const child = new EventEmitter() as FakeChild;
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
-  // SIGKILL closes the process; the resolver's timedOut flag maps that close
-  // to the `timeout` code.
-  child.kill = vi.fn(() => child.emit('close', null, 'SIGKILL'));
   return child;
+}
+
+/**
+ * The resolver awaits the (async) mocked guardedSpawn before attaching its
+ * child listeners — drain a few microtask hops first, then drive the child.
+ */
+async function childWired(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 function succeedWith(child: FakeChild, stdout: string, code = 0) {
@@ -151,12 +156,17 @@ async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
 
 beforeEach(() => {
   spawnMock.mockReset();
+  spawnSyncMock.mockReset();
+  // Every yt-dlp candidate probes successfully by default, so the first
+  // candidate in the lookup order is selected.
+  spawnSyncMock.mockReturnValue({ status: 0 });
   isolationMock.mockReset();
-  isolationMock.mockImplementation(() => {}); // verified runner present
+  isolationMock.mockImplementation(() => ({ available: true, reason: '' }));
 });
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.useRealTimers();
 });
 
 describe('resolveVideoUrl', () => {
@@ -167,23 +177,22 @@ describe('resolveVideoUrl', () => {
       expect(error).toBeInstanceOf(ResolveError);
       expect(error.code).toBe('invalid_url');
       expect(spawnMock).not.toHaveBeenCalled();
+      expect(spawnSyncMock).not.toHaveBeenCalled();
     }
   );
 
-  it('passes the URL as a single argv element to spawn with shell disabled', async () => {
+  it('passes the URL as a single argv element through guardedSpawn (escaping is media-egress\'s job)', async () => {
     const child = makeChild();
     spawnMock.mockReturnValue(child);
     const pending = resolveVideoUrl(VOD_URL);
+    await childWired();
     succeedWith(child, VOD_FIXTURE);
     await pending;
 
+    // Exactly one sandboxed run — the --version pre-flight goes through
+    // spawnSync, and shell escaping/wrapping happens inside media-egress.
     expect(spawnMock).toHaveBeenCalledOnce();
-    const [command, args, options] = spawnMock.mock.calls[0] as [
-      string,
-      string[],
-      Record<string, unknown>,
-    ];
-    expect(options.shell).toBe(false);
+    const [command, args] = spawnMock.mock.calls[0] as [string, string[]];
     expect(Array.isArray(args)).toBe(true);
     expect(args).toEqual(
       expect.arrayContaining(['-J', '--no-playlist', '--js-runtimes', 'node'])
@@ -193,10 +202,31 @@ describe('resolveVideoUrl', () => {
     expect(command).not.toContain(VOD_URL);
   });
 
+  it('probes candidates with a --version spawnSync pre-flight before any sandboxed run', async () => {
+    const child = makeChild();
+    spawnMock.mockReturnValue(child);
+    const pending = resolveVideoUrl(VOD_URL);
+    await childWired();
+    succeedWith(child, VOD_FIXTURE);
+    await pending;
+
+    expect(spawnSyncMock).toHaveBeenCalledOnce();
+    expect(spawnSyncMock).toHaveBeenCalledWith(
+      'yt-dlp',
+      ['-J', '--no-playlist', '--js-runtimes', 'node', '--version'],
+      { timeout: 15_000 }
+    );
+    // The pre-flight strictly precedes the sandboxed run.
+    expect(spawnSyncMock.mock.invocationCallOrder[0]).toBeLessThan(
+      spawnMock.mock.invocationCallOrder[0]
+    );
+  });
+
   it('parses a live yt-dlp JSON payload into { title, isLive: true, playableUrl: manifest, extractor }', async () => {
     const child = makeChild();
     spawnMock.mockReturnValue(child);
     const pending = resolveVideoUrl(LIVE_URL);
+    await childWired();
     succeedWith(child, LIVE_FIXTURE);
 
     await expect(pending).resolves.toEqual({
@@ -212,6 +242,7 @@ describe('resolveVideoUrl', () => {
     const child = makeChild();
     spawnMock.mockReturnValue(child);
     const pending = resolveVideoUrl(VOD_URL);
+    await childWired();
     succeedWith(child, VOD_FIXTURE);
 
     // The progressive mp4 beats the webm progressive file and the HLS manifest;
@@ -229,6 +260,7 @@ describe('resolveVideoUrl', () => {
     const child = makeChild();
     spawnMock.mockReturnValue(child);
     const pending = resolveVideoUrl(VOD_URL);
+    await childWired();
     succeedWith(child, DASH_ONLY_FIXTURE);
 
     await expect(pending).resolves.toEqual({
@@ -245,6 +277,7 @@ describe('resolveVideoUrl', () => {
     const child = makeChild();
     spawnMock.mockReturnValue(child);
     const pending = resolveVideoUrl(LIVE_URL);
+    await childWired();
     failWith(child, stderr);
 
     const error = (await rejectionOf(pending)) as ResolveError;
@@ -259,6 +292,7 @@ describe('resolveVideoUrl', () => {
     const child = makeChild();
     spawnMock.mockReturnValue(child);
     const pending = resolveVideoUrl(LIVE_URL);
+    await childWired();
     failWith(child, stderr);
 
     const error = (await rejectionOf(pending)) as ResolveError;
@@ -272,6 +306,7 @@ describe('resolveVideoUrl', () => {
     const child = makeChild();
     spawnMock.mockReturnValue(child);
     const pending = resolveVideoUrl(VOD_URL);
+    await childWired();
     failWith(child, stderr);
 
     const error = (await rejectionOf(pending)) as ResolveError;
@@ -283,6 +318,7 @@ describe('resolveVideoUrl', () => {
     const child = makeChild();
     spawnMock.mockReturnValue(child);
     const pending = resolveVideoUrl(VOD_URL);
+    await childWired();
     failWith(child, 'ERROR: something exploded internally');
 
     const error = (await rejectionOf(pending)) as ResolveError;
@@ -291,16 +327,21 @@ describe('resolveVideoUrl', () => {
     expect(error.message).not.toContain('exploded');
   });
 
-  it('maps a hung yt-dlp process to ResolveError timeout and kills the child', async () => {
+  it('maps a hung yt-dlp process to ResolveError timeout and signals the child tree', async () => {
     vi.useFakeTimers();
     try {
       const child = makeChild();
       spawnMock.mockReturnValue(child);
       const pending = resolveVideoUrl(LIVE_URL);
       const rejection = expect(pending).rejects.toMatchObject({ code: 'timeout' });
+      await childWired();
       await vi.advanceTimersByTimeAsync(20_000);
+      // The timeout signalled the whole (sandbox-wrapped) process tree…
+      expect(processKillMock).toHaveBeenCalledOnce();
+      expect(processKillMock).toHaveBeenCalledWith(child, 'SIGKILL');
+      // …and the child's close settles the run as a timeout.
+      child.emit('close', null, 'SIGKILL');
       await rejection;
-      expect(child.kill).toHaveBeenCalledWith('SIGKILL');
       expect(spawnMock).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
@@ -311,6 +352,7 @@ describe('resolveVideoUrl', () => {
     const child = makeChild();
     spawnMock.mockReturnValue(child);
     const pending = resolveVideoUrl(VOD_URL);
+    await childWired();
     succeedWith(child, JSON.stringify({ id: 'x', title: 'Empty', is_live: false }));
 
     await expect(pending).resolves.toEqual({
@@ -328,6 +370,7 @@ describe('resolveVideoUrl', () => {
       const child = makeChild();
       spawnMock.mockReturnValue(child);
       const pending = resolveVideoUrl(VOD_URL);
+      await childWired();
       succeedWith(child, VOD_FIXTURE);
       await pending;
 
@@ -340,6 +383,7 @@ describe('resolveVideoUrl', () => {
       const child = makeChild();
       spawnMock.mockReturnValue(child);
       const pending = resolveVideoUrl(VOD_URL);
+      await childWired();
       succeedWith(child, VOD_FIXTURE);
       await pending;
 
@@ -347,20 +391,22 @@ describe('resolveVideoUrl', () => {
       expect(spawnMock.mock.calls[0][0]).toBe('yt-dlp');
     });
 
-    it('falls back to the venv python -m yt_dlp when yt-dlp cannot be spawned', async () => {
+    it('falls back to the venv python -m yt_dlp when the yt-dlp probe fails', async () => {
       vi.stubEnv('YTDLP_PYTHON', '/venv/python');
-      const missing = makeChild();
-      const working = makeChild();
-      spawnMock.mockReturnValueOnce(missing).mockReturnValueOnce(working);
+      const child = makeChild();
+      // The pre-flight --version probe: yt-dlp on PATH fails, the venv
+      // interpreter succeeds — so the venv candidate is selected.
+      spawnSyncMock.mockImplementation((command: string) =>
+        command === 'yt-dlp' ? { status: 1 } : { status: 0 }
+      );
+      spawnMock.mockReturnValue(child);
       const pending = resolveVideoUrl(VOD_URL);
-      // The first candidate fails to start; the loop advances on the next tick.
-      missing.emit('error', Object.assign(new Error('spawn yt-dlp ENOENT'), { code: 'ENOENT' }));
-      await Promise.resolve();
-      succeedWith(working, VOD_FIXTURE);
+      await childWired();
+      succeedWith(child, VOD_FIXTURE);
       await pending;
 
-      expect(spawnMock).toHaveBeenCalledTimes(2);
-      const [command, args] = spawnMock.mock.calls[1] as [string, string[]];
+      expect(spawnMock).toHaveBeenCalledOnce();
+      const [command, args] = spawnMock.mock.calls[0] as [string, string[]];
       expect(command).toBe('/venv/python');
       expect(args.slice(0, 6)).toEqual([
         '-m',
@@ -372,19 +418,33 @@ describe('resolveVideoUrl', () => {
       ]);
       expect(args.at(-1)).toBe(VOD_URL);
     });
+
+    it('reports failed without any sandboxed run when every candidate fails the pre-flight probe', async () => {
+      spawnSyncMock.mockReturnValue({ status: 1 });
+
+      const error = (await rejectionOf(resolveVideoUrl(VOD_URL))) as ResolveError;
+      expect(error).toBeInstanceOf(ResolveError);
+      expect(error.code).toBe('failed');
+      expect(error.message).toContain('yt-dlp is not available');
+      // Both lookup candidates were probed, but yt-dlp never ran sandboxed.
+      expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+      expect(spawnMock).not.toHaveBeenCalled();
+    });
   });
 });
 
 describe('media isolation quarantine', () => {
   it('refuses to resolve and never spawns yt-dlp when the verified runner is absent', async () => {
-    isolationMock.mockImplementation(() => {
-      throw new Error('isolation unavailable'); // not MediaIsolationError:
-      // the resolver rethrows unknown errors untouched.
+    isolationMock.mockReturnValue({
+      available: false,
+      reason: 'The media sandbox has not been initialized.',
     });
 
-    const error = (await rejectionOf(resolveVideoUrl(VOD_URL))) as Error;
-    expect(error).toBeInstanceOf(Error);
-    expect(error.message).toBe('isolation unavailable');
+    const error = (await rejectionOf(resolveVideoUrl(VOD_URL))) as ResolveError;
+    expect(error).toBeInstanceOf(ResolveError);
+    expect(error.code).toBe('media_isolation_unavailable');
+    expect(error.message).toBe('The media sandbox has not been initialized.');
+    expect(spawnSyncMock).not.toHaveBeenCalled();
     expect(spawnMock).not.toHaveBeenCalled();
   });
 });

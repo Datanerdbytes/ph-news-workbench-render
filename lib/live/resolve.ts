@@ -1,10 +1,7 @@
-import { spawn } from 'node:child_process';
-import type { ChildProcess } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import os from 'node:os';
-import {
-  assertMediaIsolationAvailable,
-  MediaIsolationError,
-} from './media-egress';
+import { guardedSpawn, signalProcessTree } from './media-egress';
+import { mediaSandboxAvailability } from './media-sandbox';
 import path from 'node:path';
 
 /**
@@ -109,13 +106,16 @@ class SpawnUnavailableError extends Error {}
  * SpawnUnavailableError (caller tries the next candidate); a stall rejects
  * with ResolveError `timeout` after killing the child.
  */
-function runYtdlp(command: string, args: string[]): Promise<YtdlpRun> {
+async function runYtdlp(
+  command: string,
+  args: string[]
+): Promise<YtdlpRun> {
+  // The sandbox wraps the command line (shell-escaped) and enforces the
+  // egress policy on the process tree.
+  const child = await guardedSpawn(command, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
   return new Promise((resolve, reject) => {
-    // shell: false keeps the URL one argv element — never shell-interpolated.
-    const child: ChildProcess = spawn(command, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: false,
-    });
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -127,7 +127,9 @@ function runYtdlp(command: string, args: string[]): Promise<YtdlpRun> {
     });
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGKILL');
+      // The child is the sandbox's detached shell wrapper — a direct kill
+      // would strand the yt-dlp grandchild. Signal the whole tree instead.
+      signalProcessTree(child, 'SIGKILL');
     }, RESOLVE_TIMEOUT_MS);
     timer.unref();
     child.once('error', () => {
@@ -264,23 +266,34 @@ export async function resolveVideoUrl(url: string): Promise<ResolvedVideo> {
   // Fail closed before yt-dlp can run: without verified socket-level
   // isolation its extractor requests, redirects, and fragment fetches are
   // not constrained by the URL checks above.
-  try {
-    assertMediaIsolationAvailable();
-  } catch (error) {
-    if (!(error instanceof MediaIsolationError)) throw error;
-    throw new ResolveError(error.code, error.message);
+  const isolation = mediaSandboxAvailability();
+  if (!isolation.available) {
+    throw new ResolveError('media_isolation_unavailable', isolation.reason);
   }
 
-  let run: YtdlpRun | null = null;
-  for (const candidate of ytDlpCandidates(target)) {
-    try {
-      run = await runYtdlp(candidate.command, candidate.args);
+  // Pick the first yt-dlp candidate that can actually run — a pre-flight
+  // `--version` probe (fixed args, no user input, no sandbox needed).
+  let candidate = null;
+  for (const option of ytDlpCandidates(target)) {
+    const probe = spawnSync(
+      option.command,
+      [...option.args.slice(0, -1), '--version'],
+      { timeout: 15_000 }
+    );
+    if (probe.status === 0) {
+      candidate = option;
       break;
-    } catch (error) {
-      if (error instanceof ResolveError) throw error;
-      // This binary could not start — try the next one in the lookup order.
     }
   }
+  if (!candidate) {
+    throw new ResolveError(
+      'failed',
+      'yt-dlp is not available on the server, so the link cannot be resolved.'
+    );
+  }
+
+  // The sandbox wraps the candidate: shell-escaped, pinned egress policy.
+  const run = await runYtdlp(candidate.command, candidate.args);
   if (!run) {
     throw new ResolveError(
       'failed',
