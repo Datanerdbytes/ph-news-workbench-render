@@ -223,14 +223,6 @@ jobs:
         run: docker pull ${{ env.IMAGE }}:${{ env.IMAGE_SHA }}
 
       - name: Scan the image
-      # The verified isolation runner needs OS sandbox primitives
-      # (bubblewrap) inside the production image. Prove them on the exact
-      # image on every PR — the media paths fail closed when unavailable.
-      - name: Verify sandbox feasibility in the image
-        run: |
-          docker run --rm ${{ env.IMAGE }}:${{ env.IMAGE_SHA }} \
-            sh -c 'bwrap --version && bwrap --unshare-all --ro-bind / / echo sandbox-ok'
-
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.IMAGE }}:${{ env.IMAGE_SHA }}
@@ -246,6 +238,14 @@ jobs:
           # advisories live in that tree and none of it is the app — excluding
           # it leaves the gate scanning what actually ships.
           skip-dirs: "/usr/local/lib/node_modules/npm"
+
+      # The verified isolation runner needs OS sandbox primitives (bubblewrap)
+      # inside the production image. Prove them on the exact image on every
+      # PR — the media paths fail closed when unavailable.
+      - name: Verify sandbox feasibility in the image
+        run: |
+          docker run --rm ${{ env.IMAGE }}:${{ env.IMAGE_SHA }} \
+            sh -c 'bwrap --version && bwrap --unshare-all --ro-bind / / echo sandbox-ok'
 
       - name: Upload the scan results
         if: always() && hashFiles('trivy-results.sarif') != ''
