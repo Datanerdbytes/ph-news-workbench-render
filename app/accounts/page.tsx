@@ -157,10 +157,6 @@ export default function AccountsPage() {
               Channels
             </p>
             <h1 className="page-title mt-1.5">Accounts</h1>
-            <p className="mt-1.5 max-w-2xl text-[12.5px] leading-relaxed text-muted-foreground">
-              Connect where you publish. Facebook and Instagram are live today;
-              the other channels are designed and waiting on platform access.
-            </p>
           </div>
           <div className="flex items-center gap-2">
             <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-[10.5px] font-medium text-muted-foreground">
@@ -485,13 +481,6 @@ export default function AccountsPage() {
           </div>
         </section>
 
-        <div className="mt-6 flex items-center justify-between gap-3">
-          <h2 className="text-[13px] font-semibold">Designed and gated</h2>
-          <span className="text-[10.5px] text-muted-foreground">
-            No channel connects before its review clears
-          </span>
-        </div>
-
         {DESIGNED.map((channel) => (
           <section
             key={channel.platform}
@@ -646,36 +635,6 @@ export default function AccountsPage() {
               </tbody>
             </table>
           </div>
-        </section>
-
-        <section className="mt-4 grid gap-3 md:grid-cols-3">
-          {[
-            {
-              step: "01",
-              title: "Authorize per workspace",
-              body: "Each workspace stores its own encrypted tokens, so one customer's Page never leaks into another's queue.",
-            },
-            {
-              step: "02",
-              title: "Adapt, don't special-case",
-              body: "Every channel implements connect, publish, schedule, and insights behind the same adapter contract.",
-            },
-            {
-              step: "03",
-              title: "One queue, normalized metrics",
-              body: "Scheduled posts fan out to channel targets; insights return as comparable impressions, reach, and engagement.",
-            },
-          ].map((item) => (
-            <article key={item.step} className="panel p-4">
-              <span className="font-mono text-[10px] font-semibold text-brand">
-                {item.step}
-              </span>
-              <h3 className="mt-1.5 text-[12px] font-semibold">{item.title}</h3>
-              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                {item.body}
-              </p>
-            </article>
-          ))}
         </section>
 
         <div className="mt-5 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
