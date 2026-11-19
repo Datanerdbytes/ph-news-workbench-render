@@ -84,9 +84,11 @@ export async function ensureMediaSandbox(): Promise<void> {
         current.reason = null;
         current.initializing = null;
       },
-      (reason: string) => {
+      (error: unknown) => {
         current.state = 'unavailable';
-        current.reason = reason;
+        // The rejection carries an Error — store its MESSAGE, not the object.
+        current.reason =
+          error instanceof Error ? error.message : String(error ?? 'unknown');
         current.initializing = null;
       }
     );
