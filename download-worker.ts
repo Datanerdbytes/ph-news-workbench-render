@@ -304,7 +304,8 @@ export function blobJobPrefix(workspaceId: string, jobId: string): string {
  */
 export async function removeSupersededBlobs(
   prefix: string,
-  keepUrl: string | null
+  keepUrl: string | null,
+  attemptNumber: number
 ): Promise<void> {
   try {
     const doomed: string[] = [];
@@ -313,6 +314,10 @@ export async function removeSupersededBlobs(
       const page = await list({ prefix, limit: 100, cursor });
       for (const blob of page.blobs) {
         if (blob.url === keepUrl) continue;
+        // Never delete a newer attempt, even if ownership changes during listing.
+        const relative = blob.pathname.slice(prefix.length);
+        const attempt = /^attempt-(\d+)\//.exec(relative);
+        if (attempt && Number(attempt[1]) > attemptNumber) continue;
         doomed.push(blob.url);
       }
       cursor = page.hasMore ? page.cursor : undefined;
@@ -328,16 +333,17 @@ export async function removeSupersededBlobs(
 }
 
 /**
- * Upload the finished video into the job's folder and drop whatever an
- * earlier attempt left there.
+ * Upload into an attempt-specific folder so concurrent attempts cannot overwrite
+ * each other. Cleanup happens only after an ownership-fenced update.
  */
 export async function uploadJobVideo(
   prefix: string,
   filePath: string,
-  fileName: string
+  fileName: string,
+  attemptNumber: number
 ): Promise<{ url: string; pathname: string }> {
   const blob = await put(
-    `${prefix}${blobFileName(fileName)}`,
+    `${prefix}attempt-${attemptNumber}/${blobFileName(fileName)}`,
     createReadStream(filePath),
     {
       access: "public",
@@ -346,7 +352,6 @@ export async function uploadJobVideo(
       allowOverwrite: true,
     }
   );
-  await removeSupersededBlobs(prefix, blob.url);
   return blob;
 }
 
@@ -409,7 +414,7 @@ export async function attemptStillOwnsJob(
   attemptNumber: number
 ): Promise<boolean> {
   try {
-    const rows = await sql`SELECT attempts FROM download_jobs WHERE id = ${jobId}`;
+    const rows = await sql`SELECT attempts FROM download_jobs WHERE id = ${jobId} AND status IN ('fetching', 'downloading', 'finalizing')`;
     return Number(rows[0]?.attempts) === attemptNumber;
   } catch {
     return false;
@@ -418,7 +423,7 @@ export async function attemptStillOwnsJob(
 
 export type Sql = ReturnType<typeof neon<false, false>>;
 
-type ClaimedJob = {
+export type ClaimedJob = {
   id: string;
   workspace_id: string;
   platform: string;
@@ -426,6 +431,21 @@ type ClaimedJob = {
   quality: string;
   attemptNumber: number;
 };
+
+export async function claimNextJob(sql: Sql, workerId: string): Promise<ClaimedJob | undefined> {
+  const rows = await sql`
+    UPDATE download_jobs
+    SET status = 'fetching', worker_id = ${workerId}, claimed_at = now(),
+        updated_at = now(), attempts = attempts + 1,
+        status_message = 'Connecting to ' || platform || '…'
+    WHERE id = (
+      SELECT id FROM download_jobs WHERE status = 'queued'
+      ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
+    )
+    RETURNING id, workspace_id, platform, url, quality, attempts AS "attemptNumber"
+  `;
+  return rows[0] as ClaimedJob | undefined;
+}
 
 type ActiveJob = {
   child: ChildProcess | null;
@@ -445,7 +465,7 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>, isShuttingDown: () => boolean) {
+export async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>, isShuttingDown: () => boolean) {
   const format = QUALITY_FORMATS[job.quality] ?? QUALITY_FORMATS.best;
   const outputDirectory = path.join(downloadRoot(), job.platform, job.id);
   const state = {
@@ -473,7 +493,8 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
         UPDATE download_jobs
         SET status = ${state.status}, progress = ${state.progress},
             status_message = ${state.statusMessage}, updated_at = now()
-        WHERE id = ${job.id}
+        WHERE id = ${job.id} AND attempts = ${job.attemptNumber}
+          AND status IN ('fetching', 'downloading', 'finalizing')
       `;
     } catch (error) {
       console.error(`Could not update job ${job.id}:`, error);
@@ -503,24 +524,22 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
     settled = true;
     clearInterval(entry.heartbeat);
     try {
-      await sql`
+      const rows = await sql`
         UPDATE download_jobs
         SET status = 'failed', status_message = 'Download failed.',
             error = ${message}, updated_at = now()
-        WHERE id = ${job.id}
+        WHERE id = ${job.id} AND attempts = ${job.attemptNumber}
+          AND status IN ('fetching', 'downloading', 'finalizing')
+        RETURNING id
       `;
+      if (rows.length) {
+        await removeSupersededBlobs(blobJobPrefix(job.workspace_id, job.id), null, job.attemptNumber);
+      }
     } catch (error) {
       console.error(`Could not record failure for ${job.id}:`, error);
     }
-    // A failed job owns no file in the cloud library — an upload that landed
-    // before the failure would otherwise stay behind as an orphan. Only the
-    // attempt that still owns the job may clear its folder; a stale attempt
-    // must not delete blobs a newer attempt already uploaded.
-    if (await attemptStillOwnsJob(sql, job.id, job.attemptNumber)) {
-      await removeSupersededBlobs(blobJobPrefix(job.workspace_id, job.id), null);
-    }
     console.error(`Failed ${job.platform} job ${job.id}: ${message}`);
-    active.delete(job.id);
+    if (active.get(job.id) === entry) active.delete(job.id);
   }
 
   try {
@@ -553,7 +572,7 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
     child.once("close", async (code) => {
       if (settled || entry.cancelled || isShuttingDown()) {
         clearInterval(entry.heartbeat);
-        active.delete(job.id);
+        if (active.get(job.id) === entry) active.delete(job.id);
         return;
       }
       if (stdoutBuffer) recordChunk(Buffer.from("\n"), stdoutBuffer);
@@ -607,39 +626,42 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
         state.status = "finalizing";
         state.statusMessage = "Uploading to the cloud library…";
         await writeState(true);
-        // Only the attempt that still owns the job may upload to the cloud
-        // library or mark it done — a stale attempt must not delete a newer
-        // attempt's blobs (uploadJobVideo prunes the job folder) or overwrite
-        // the job's result.
+        // Upload into an isolated attempt folder; the conditional update below
+        // decides which attempt may publish its result and prune older blobs.
         if (!(await attemptStillOwnsJob(sql, job.id, job.attemptNumber))) {
           settled = true;
           clearInterval(entry.heartbeat);
-          active.delete(job.id);
+          if (active.get(job.id) === entry) active.delete(job.id);
           return;
         }
         const blob = await uploadJobVideo(
           blobJobPrefix(job.workspace_id, job.id),
           uploadPath,
-          uploadName
+          uploadName,
+          job.attemptNumber
         );
-        // The rendition is safely in the cloud library, so the pre-conversion
-        // source can go. Keeping it made one download look like two.
-        if (supersededSource) {
-          await removeSupersededSource(supersededSource, uploadPath);
-        }
+        const rows = await sql`
+          UPDATE download_jobs
+          SET status = 'done', progress = 100, status_message = 'Download complete.',
+              file_name = ${uploadName}, blob_url = ${blob.url}, file_size = ${uploadSize},
+              save_location = ${uploadPath}, error = NULL, updated_at = now()
+          WHERE id = ${job.id} AND attempts = ${job.attemptNumber}
+            AND status IN ('fetching', 'downloading', 'finalizing')
+          RETURNING id
+        `;
         settled = true;
         clearInterval(entry.heartbeat);
-        if (await attemptStillOwnsJob(sql, job.id, job.attemptNumber)) {
-          await sql`
-            UPDATE download_jobs
-            SET status = 'done', progress = 100, status_message = 'Download complete.',
-                file_name = ${uploadName}, blob_url = ${blob.url}, file_size = ${uploadSize},
-                save_location = ${uploadPath}, error = NULL, updated_at = now()
-            WHERE id = ${job.id}
-          `;
+        if (rows.length) {
+          await removeSupersededBlobs(blobJobPrefix(job.workspace_id, job.id), blob.url, job.attemptNumber);
+          if (supersededSource) await removeSupersededSource(supersededSource, uploadPath);
           console.log(`Done: ${uploadName} is in the cloud library.`);
+        } else {
+          // Only this attempt's unique upload can be removed safely.
+          try { await del(blob.url); } catch (error) {
+            console.error(`Could not remove stale upload for ${job.id}:`, error);
+          }
         }
-        active.delete(job.id);
+        if (active.get(job.id) === entry) active.delete(job.id);
       } catch (error) {
         await finishFailure(error instanceof Error ? error.message : "Download failed.");
       }
@@ -718,22 +740,9 @@ async function main() {
           AND updated_at < now() - ${STALE_MINUTES} * interval '1 minute'
       `;
       while (!shuttingDown && active.size < MAX_CONCURRENT) {
-        const rows = (await sql`
-          UPDATE download_jobs
-          SET status = 'fetching', worker_id = ${workerId}, claimed_at = now(),
-              updated_at = now(), attempts = attempts + 1,
-              status_message = 'Connecting to ' || platform || '…'
-          WHERE id = (
-            SELECT id FROM download_jobs
-            WHERE status = 'queued'
-            ORDER BY created_at
-            LIMIT 1
-            FOR UPDATE SKIP LOCKED
-          )
-          RETURNING id, workspace_id, platform, url, quality, attempts
-        `) as ClaimedJob[];
-        if (!rows.length) break;
-        void runJob(sql, rows[0], active, () => shuttingDown);
+        const job = await claimNextJob(sql, workerId);
+        if (!job) break;
+        void runJob(sql, job, active, () => shuttingDown);
       }
     } catch (error) {
       console.error("Queue poll failed:", error);

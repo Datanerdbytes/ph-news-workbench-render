@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type Sql,
   attemptStillOwnsJob,
+  claimNextJob,
   blobFileName,
   buildYtdlpArgs,
   contentTypeFor,
@@ -139,5 +140,22 @@ describe("attemptStillOwnsJob", () => {
       throw new Error("down");
     }) as unknown as Sql;
     expect(await attemptStillOwnsJob(sql, "job-1", 1)).toBe(false);
+  });
+});
+
+describe("claimNextJob", () => {
+  it("returns the claimed attempt under the name used by ownership checks", async () => {
+    const sql = ((strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("RETURNING")) {
+        // Model the column name returned by PostgreSQL, not the TypeScript assertion.
+        const field = /attempts AS "([^"]+)"/.exec(query)?.[1] ?? "attempts";
+        return Promise.resolve([{ id: "job-1", [field]: 2 }]);
+      }
+      return Promise.resolve([{ attempts: 2 }]);
+    }) as unknown as Sql;
+    const job = await claimNextJob(sql, "worker-1");
+    expect(job?.attemptNumber).toBe(2);
+    expect(await attemptStillOwnsJob(sql, job!.id, job!.attemptNumber)).toBe(true);
   });
 });

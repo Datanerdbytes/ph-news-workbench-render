@@ -75,8 +75,9 @@
 
   /* ---------- sidebar (chrome after the merge) ---------- */
   .sidebar { border-right: 1px solid var(--border); background: var(--surface-2); padding: 18px 12px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
   .nav-group { margin-bottom: 20px; }
-  .nav-title { font-size: 9.5px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--faint); padding: 0 8px 6px; }
+  .nav-title { font-size: 9.5px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--muted-foreground); padding: 0 8px 6px; }
   .nav-item {
     display: flex; align-items: center; gap: 9px; padding: 6px 8px; border-radius: 7px;
     font-size: 12.5px; color: var(--secondary-foreground); text-decoration: none;
@@ -369,8 +370,8 @@
 
 <script>
 const ICON = {
-  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
-  minus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg>',
+  check: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  minus: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg>',
   arrow: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>'
 };
 
@@ -517,12 +518,12 @@ function render(state) {
   document.getElementById('matrix').innerHTML = MATRIX.map(row => {
     const p = PLATFORMS.find(x => x.name === row.channel);
     const st = states[PLATFORMS.indexOf(p)];
-    const gate = st === 'live' ? 'Live' : row.gate;
+    const gate = st === 'live' ? 'Live' : row.gate === 'Live' ? 'Not connected' : row.gate;
     return `<tr>
       <td class="name">${row.channel}</td>
-      <td class="flag ${row.text ? 'on' : 'off'}">${row.text ? ICON.check : ICON.minus}</td>
-      <td class="flag ${row.photo ? 'on' : 'off'}">${row.photo ? ICON.check : ICON.minus}</td>
-      <td class="flag ${row.video ? 'on' : 'off'}">${row.video ? ICON.check : ICON.minus}</td>
+      <td class="flag ${row.text ? 'on' : 'off'}">${row.text ? ICON.check : ICON.minus}<span class="sr-only">${row.text ? 'Supported' : 'Not supported'}</span></td>
+      <td class="flag ${row.photo ? 'on' : 'off'}">${row.photo ? ICON.check : ICON.minus}<span class="sr-only">${row.photo ? 'Supported' : 'Not supported'}</span></td>
+      <td class="flag ${row.video ? 'on' : 'off'}">${row.video ? ICON.check : ICON.minus}<span class="sr-only">${row.video ? 'Supported' : 'Not supported'}</span></td>
       <td>${row.media ? 'Yes' : 'No'}</td>
       <td><span class="pill ${gate === 'Live' ? 'live' : 'gated'}">${gate}</span></td>
     </tr>`;

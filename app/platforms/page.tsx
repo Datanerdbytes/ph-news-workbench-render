@@ -205,12 +205,14 @@ export default function PlatformsPage() {
       ],
       state: youtube.loading
         ? "checking"
+        : youtube.unreachable
+          ? "unreachable"
         : youtube.connected
           ? "live"
           : youtube.configured
             ? "ready"
             : "setup",
-      account: youtube.connected
+      account: !youtube.unreachable && youtube.connected
         ? `${youtube.account?.name ?? "YouTube"} · ${youtube.account?.id ?? ""}`
         : null,
       note: youtube.unreachable

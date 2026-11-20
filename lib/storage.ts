@@ -377,7 +377,9 @@ export async function deleteStagedBlobsInFolder(urls: string[]): Promise<void> {
         if (!pathname) continue;
         const slash = pathname.lastIndexOf('/');
         if (slash < 0) continue;
-        prefixes.add(pathname.slice(0, slash + 1));
+        const folder = pathname.slice(0, slash + 1);
+        // Attempt folders are nested beneath the download job folder.
+        prefixes.add(folder.replace(/^(downloads\/[^/]+\/[^/]+\/)attempt-\d+\/$/, '$1'));
       }
       for (const prefix of prefixes) {
         for (const listed of await listBlobUrls(prefix)) doomed.add(listed);

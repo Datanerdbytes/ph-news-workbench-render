@@ -76,6 +76,14 @@ describe("deleteStagedBlobsInFolder", () => {
     expect(delMock).toHaveBeenCalledWith([RECORDED, SUPERSEDED]);
   });
 
+  it("deletes all attempt folders for a completed download", async () => {
+    const current = `${STORE}/downloads/ws-1/job-1/attempt-2/clip.mp4`;
+    listMock.mockResolvedValue({ blobs: [{ url: SUPERSEDED }, { url: current }], hasMore: false });
+    await deleteStagedBlobsInFolder([current]);
+    expect(listMock).toHaveBeenCalledWith(expect.objectContaining({ prefix: "downloads/ws-1/job-1/" }));
+    expect(delMock).toHaveBeenCalledWith([current, SUPERSEDED]);
+  });
+
   it("still deletes the recorded file when the folder cannot be listed", async () => {
     listMock.mockRejectedValue(new Error("the store is unreachable"));
 

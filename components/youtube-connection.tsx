@@ -115,6 +115,7 @@ export function YouTubeConnectionProvider({
         setUnreachable(false);
         return data;
       } catch {
+        setStatus(null);
         setUnreachable(true);
         return null;
       } finally {

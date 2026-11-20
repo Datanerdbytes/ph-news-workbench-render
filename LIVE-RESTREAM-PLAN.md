@@ -61,13 +61,21 @@ Both files carry the columns: fresh installs via `lib/schema.sql`, existing DBs 
 - `400` invalid URL · `502` upstream failure with a friendly message
 - Runs `yt-dlp -J --no-playlist <url>` with a ~20s timeout; auth/bot-check failures map to a clear error, never raw stderr.
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:417db73f62144df8ad2d7eb6839fa7a21c65b903d544a2116a650bd384d1a955 -->
+
 ### API 2 — pump
 
 - `POST /api/live/[id]/pump`, body `{ action: 'start' | 'stop' }`
-- `start` requires `source_url` on the row and a decryptable stream key; spawns the pump; `409` when already running. `source_url` must hold a playable URL — the resolve response's `playableUrl`, saved when the source is attached or re-resolved immediately before spawning the pump. The pump never resolves a URL itself; for staged sources the feeders read this same playable source.
+- `start` requires `source_url` on the row and a decryptable stream key; spawns the pump; `409` when already running. For direct mode, persist the resolve response's playable URL in `source_url` (or re-resolve before spawning); ffprobe and ffmpeg receive that playable URL. For staged mode, persist the original user-supplied source URL in `source_url` and pass it to the yt-dlp feeders to resolve DASH formats; `playableUrl` is null.
 - `stop` kills the process and records `stopped`.
 - Returns `{ pump: { status, startedAt } }`.
 - Existing `GET /api/live` responses gain `sourceUrl`, `pumpStatus`, `pumpStartedAt`, `pumpError`. A row marked `running` in the DB with no live process (e.g. after a server restart) reports `interrupted`.
+
+
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ### `lib/live/resolve.ts`
 
@@ -95,15 +103,21 @@ Isolated worktrees per agent, merged sequentially into the feature branch. Featu
 
 Every agent brief includes: read `node_modules/next/dist/docs` first (this Next.js version differs from older ones — repo `AGENTS.md`), colocated unit tests are mandatory deliverables, no real processes/network in unit tests, no pushes.
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:e3937efd9503cc9dea49756c3e70a734f7081cce8dcbc6f2c10c82178cfe87d7 -->
+
 | Stage | Agent | Files (disjoint unless noted) | Depends on |
 |---|---|---|---|
 | 1 · parallel | **A — resolver** | `lib/live/resolve.ts`, `lib/live/resolve.test.ts`, `app/api/live/resolve/route.ts`, Dockerfile (yt-dlp static binary) | — |
 | 1 · parallel | **B — pump core** | `lib/live/pump.ts`, `lib/live/pump.test.ts` (pure logic; fake child processes) | — |
 | 1 · parallel | **C — schema** | `migrate-live-restream.mjs`, `lib/schema.sql`, `scripts/prepare-e2e-db.mjs` (`requiredColumns`) | — |
-| 2 | **D — pump API** | `app/api/live/[id]/pump/route.ts`, extend `GET /api/live` (`toStream` + columns), `lib/live/pump-state.ts`, `lib/live/pump-state.test.ts` | A? no — B, C merged |
-| 3 | **E — UI** | `package.json` (+`hls.js`), `components/live/source-preview.tsx`, `components/live/source-preview.test.tsx`, `app/live/page.tsx`, `lib/live/preview-proxy.ts`, `lib/live/preview-proxy.test.ts`, `app/api/live/preview/route.ts`, `app/api/live/preview/route.test.ts` | A, D merged |
+| 2 | **D — pump API and preview proxy** | `app/api/live/[id]/pump/route.ts`, extend `GET /api/live` (`toStream` + columns), `lib/live/pump-state.ts`, `lib/live/pump-state.test.ts`, `lib/live/preview-proxy.ts`, `lib/live/preview-proxy.test.ts`, `app/api/live/preview/route.ts`, `app/api/live/preview/route.test.ts` | B, C merged |
+| 3 | **E — UI** | `package.json` (+`hls.js`), `components/live/source-preview.tsx`, `components/live/source-preview.test.tsx`, `app/live/page.tsx` | A, D merged |
 | 4 | **F — integration** | `e2e/live-restream.spec.ts`, README/docs, full gate run | all merged |
 
+
+<!-- /coderabbit-ai-generated:v1 -->
 Shared-file safety: only C touches schema files; only D touches `app/api/live/route.ts`; only E touches `app/live/page.tsx`.
 
 ## Per-agent deliverables and test matrix
@@ -230,15 +244,21 @@ Contracts changed (this file remains the single spec):
 - **lib/live/resolve.ts**: classifies staged when no progressive/HLS format
   AND no `manifest_url`/`url` exist. Also adds `--js-runtimes node` to every
   yt-dlp invocation (mirrors `download-worker.ts`; required for YouTube).
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:8c56d460e710ebc4d31a8c0587339b8c91f57081e976712cb5bd267a09afba46 -->
+
 - **Database**: `live_streams` gains `source_mode TEXT` — the migration is
   unshipped, so `migrate-live-restream.mjs` grows the column instead of
   spawning a new migration; `lib/schema.sql` and `requiredColumns` match.
 - **API 2 — pump**: `POST /api/live` persists `sourceMode` from the resolve
-  response (NULL = legacy/direct). Pump start reads the row: `direct` keeps
-  today's ffprobe → args path; `staged` skips ffprobe (pipes are
-  unprobeable) and builds the feeder argv.
+  response (NULL = legacy/direct), the playable URL for direct mode, and the
+  original submitted URL for staged mode in `source_url`. Pump start reads
+  the row: `direct` keeps today's ffprobe → args path; `staged` passes the
+  original URL to yt-dlp, skips ffprobe (pipes are unprobeable), and builds
+  the feeder argv.
 - **lib/live/pump.ts** staged mode: `mkfifo` pair under `os.tmpdir()`; two
-  yt-dlp feeders (`-f bv*[height<=1080][vcodec^=avc1]/bv*[height<=1080]/bv*`
+  yt-dlp feeders (`-f bv*[height<=1080][vcodec^=avc1]/bv*[vcodec^=avc1]`
   and `-f ba/b`, both with `--no-playlist --js-runtimes node -o -`) write the
   FIFOs; ffmpeg runs `-re -i <v.fifo> -i <a.fifo> -c:v copy -c:a aac -f flv
   <dest>`. Backpressure from `-re` paces the feeders. Feeder stderr joins the
@@ -250,6 +270,10 @@ Contracts changed (this file remains the single spec):
   before broadcasting and the UI shows the rejection instead of an
   unplayable stream. AV1-only and vp9-only video are documented v1
   limitations. Audio is always transcoded to aac (handles opus/mp3 sources).
+
+
+<!-- /coderabbit-ai-generated:v1 -->
+
 - **UI**: a staged resolve auto-fills the title and renders a neutral
   "Preview unavailable for this source — Go live streams it through the
   pump" card (no video element); create passes `mode` through with the URL.

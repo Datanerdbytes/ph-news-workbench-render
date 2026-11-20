@@ -141,6 +141,15 @@ describe("platform card actions", () => {
     expect(screen.getByRole("button", { name: "Checking…" })).toBeDisabled();
   });
 
+  it("shows an unavailable YouTube status and disables its action after refresh failure", () => {
+    mockConnections.youtube = connection({ unreachable: true, connected: true, account: null });
+    render(<PlatformsPage />);
+    expect(screen.getByText("Status unavailable")).toBeInTheDocument();
+    expect(screen.getByText(/Status unavailable —/)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Launch YouTube" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Connect YouTube" })).toBeDisabled();
+  });
+
   it("keeps LinkedIn gated without a launch destination", () => {
     render(<PlatformsPage />);
 
