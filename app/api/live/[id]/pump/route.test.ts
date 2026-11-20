@@ -1,4 +1,6 @@
 import { NextRequest } from 'next/server';
+import os from 'node:os';
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { sqlMock, requireWorkspaceMock, requirePublishingConnectionMock, managerMock } =
@@ -129,6 +131,17 @@ beforeEach(() => {
 });
 
 describe('POST /api/live/[id]/pump', () => {
+  it('allocates the output pipe inside the sandbox-approved OS temporary directory', async () => {
+    const tmpdir = vi.spyOn(os, 'tmpdir').mockReturnValue('/sandbox-approved-tmp');
+    try {
+      const response = await pumpRequest('start');
+      expect(response.status).toBe(200);
+      expect(path.dirname(managerMock.start.mock.calls[0][0].outFifo)).toBe('/sandbox-approved-tmp');
+    } finally {
+      tmpdir.mockRestore();
+    }
+  });
+
   it('allows an authenticated editor to stop without Facebook credentials or scopes', async () => {
     const response = await pumpRequest('stop');
 

@@ -53,9 +53,10 @@ export function SourcePreview({
     // HLS must load same-origin (no CORS headers upstream), so manifests go
     // through the preview proxy; direct files keep their original URL. The
     // local const keeps the narrowed non-null type in the closures below.
-    const source: string = isHlsUrl(playableUrl)
-      ? proxyUrl(playableUrl)
-      : playableUrl;
+    const isHls = isHlsUrl(playableUrl);
+    // HLS must load same-origin (no CORS headers upstream), so manifests go
+    // through the preview proxy; direct files keep their original URL.
+    const source: string = isHls ? proxyUrl(playableUrl) : playableUrl;
     const media: HTMLVideoElement = video;
 
     setPlayerError(null);
@@ -92,9 +93,13 @@ export function SourcePreview({
       }
     }
 
+    // Direct files play natively via <video src>. HLS manifests always go
+    // through hls.js — Chrome's canPlayType('application/vnd.apple.mpegurl')
+    // can return "maybe" and bypass hls.js, but native HLS support is
+    // inconsistent across versions and browsers.
     if (
       DIRECT_FILE_PATTERN.test(source) ||
-      video.canPlayType('application/vnd.apple.mpegurl')
+      (!isHls && video.canPlayType('application/vnd.apple.mpegurl'))
     ) {
       video.src = source;
     } else {

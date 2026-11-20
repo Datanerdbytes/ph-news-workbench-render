@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { request as httpRequest } from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import { encryptToken } from './lib/facebook-token';
 import {
   createRunnerServer,
@@ -276,6 +278,23 @@ describe('POST /resolve', () => {
 });
 
 describe('POST /pump/start', () => {
+  it('allocates the output pipe inside the sandbox-approved OS temporary directory', async () => {
+    vi.spyOn(os, 'tmpdir').mockReturnValue('/sandbox-approved-tmp');
+    startMock.mockResolvedValueOnce({ ok: true });
+    const { runner } = makeServer((text) => text.includes('FROM live_streams') ? STREAM_ROW() : []);
+    const port = await listen(runner);
+    try {
+      const result = await client(port, '/pump/start', {
+        token: TOKEN,
+        body: { workspaceId: 'ws-1', streamId: '7' },
+      });
+      expect(result.status).toBe(200);
+      expect(path.dirname(startMock.mock.calls[0][0].outFifo)).toBe('/sandbox-approved-tmp');
+    } finally {
+      await runner.close();
+    }
+  });
+
   const okOutcome: PumpStartResult = { ok: true };
 
   it('starts the pump, writes running, and returns the pump payload', async () => {

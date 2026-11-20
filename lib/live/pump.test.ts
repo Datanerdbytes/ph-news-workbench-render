@@ -361,6 +361,13 @@ describe('buildPumpArgs', () => {
   });
 });
 
+describe('FIFO output writing', () => {
+  it('allows both source modes to write their pre-created output pipe without prompting', () => {
+    expect(buildPumpArgs({ source: LIVE_HLS, outFifo: OUT_FIFO, needsTranscode: false })).toContain('-y');
+    expect(buildStagedPumpArgs({ videoFifo: '/tmp/v', audioFifo: '/tmp/a', outFifo: OUT_FIFO })).toContain('-y');
+  });
+});
+
 describe('buildPublisherArgs', () => {
   it('reads the flv fifo and copies it to the RTMPS ingest URL, dest last', () => {
     expect(buildPublisherArgs({ flvFifo: OUT_FIFO, dest: DEST })).toEqual([
@@ -617,6 +624,53 @@ describe('PumpManager state machine', () => {
 });
 
 describe('PumpManager publisher leg', () => {
+  it('does not publish when direct pipe creation fails', async () => {
+    stubGateOn();
+    const { ffmpegKids } = useSpawns({ mkfifoFails: true });
+    const result = await manager.start({ id: 44, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    expect(result).toMatchObject({ ok: false, reason: 'spawn_failed' });
+    expect(ffmpegKids).toHaveLength(0);
+    expect(manager.status(44).running).toBe(false);
+  });
+
+  it('honors a stop during direct pipe creation and cleans up without publishing', async () => {
+    stubGateOn();
+    const { ffmpegKids } = useSpawns();
+    const spawnImpl = spawnMock.getMockImplementation()!;
+    spawnMock.mockImplementation((command: string, args: string[], options: unknown) => {
+      const child = spawnImpl(command, args, options);
+      if (command === 'mkfifo') manager.stop(45);
+      return child;
+    });
+    await manager.start({ id: 45, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    expect(ffmpegKids).toHaveLength(0);
+    expect(fsMocks.unlink).toHaveBeenCalledWith(OUT_FIFO);
+    expect(manager.status(45).running).toBe(false);
+  });
+
+  it('creates the direct output pipe before publishing and removes it on exit', async () => {
+    stubGateOn();
+    const { ffmpegKids, mkfifoKids } = useSpawns();
+    let pipeCreated = false;
+    const spawnImpl = spawnMock.getMockImplementation()!;
+    spawnMock.mockImplementation((command: string, args: string[], options: unknown) => {
+      if (command === 'ffmpeg') expect(pipeCreated).toBe(true);
+      const child = spawnImpl(command, args, options);
+      if (command === 'mkfifo') {
+        child.once('close', (code: number) => { pipeCreated = code === 0; });
+      }
+      return child;
+    });
+
+    const result = await manager.start({ id: 43, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+
+    expect(result).toEqual({ ok: true });
+    expect(mkfifoKids).toHaveLength(1);
+    expect(spawnMock).toHaveBeenCalledWith('mkfifo', ['-m', '0600', OUT_FIFO], expect.anything());
+    closeChild(ffmpegKids[1], 0);
+    expect(fsMocks.unlink).toHaveBeenCalledWith(OUT_FIFO);
+  });
+
   it('spawns the unsandboxed publisher first (reading the out fifo, dest last) and the sandboxed source second', async () => {
     stubGateOn();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
@@ -666,6 +720,7 @@ describe('PumpManager publisher leg', () => {
     expect(processKillMock).toHaveBeenCalledWith(ffmpegKids[0], 'SIGKILL');
 
     await vi.advanceTimersByTimeAsync(RETRY_BACKOFF_MS[0]);
+    await flushChildEvents();
     // A fresh publisher + source pair for the retried attempt.
     expect(ffmpegKids).toHaveLength(4);
     const retry = ffmpegArgsOf(1);
@@ -714,6 +769,7 @@ describe('PumpManager retry policy', () => {
     await vi.advanceTimersByTimeAsync(RETRY_BACKOFF_MS[0] - 1);
     expect(ffmpegKids).toHaveLength(2);
     await vi.advanceTimersByTimeAsync(1);
+    await flushChildEvents();
     expect(ffmpegKids).toHaveLength(4);
 
     // Attempt 2 fails → 4s backoff.
@@ -721,6 +777,7 @@ describe('PumpManager retry policy', () => {
     await vi.advanceTimersByTimeAsync(RETRY_BACKOFF_MS[1] - 1);
     expect(ffmpegKids).toHaveLength(4);
     await vi.advanceTimersByTimeAsync(1);
+    await flushChildEvents();
     expect(ffmpegKids).toHaveLength(6);
 
     // Attempt 3 fails → 8s backoff.
@@ -728,6 +785,7 @@ describe('PumpManager retry policy', () => {
     await vi.advanceTimersByTimeAsync(RETRY_BACKOFF_MS[2] - 1);
     expect(ffmpegKids).toHaveLength(6);
     await vi.advanceTimersByTimeAsync(1);
+    await flushChildEvents();
     expect(ffmpegKids).toHaveLength(8);
 
     // Attempt 4 (the third retry) fails → give up.
@@ -749,6 +807,7 @@ describe('PumpManager retry policy', () => {
 
     closeChild(ffmpegKids[1], 1);
     await vi.advanceTimersByTimeAsync(RETRY_BACKOFF_MS[0]);
+    await flushChildEvents();
     expect(ffmpegKids).toHaveLength(4);
     closeChild(ffmpegKids[3], 0);
     await vi.advanceTimersByTimeAsync(60_000);
@@ -838,12 +897,15 @@ describe('PumpManager key secrecy', () => {
     );
     closeChild(ffmpegKids[1], 1);
     await vi.advanceTimersByTimeAsync(RETRY_BACKOFF_MS[0]);
+    await flushChildEvents();
     stderrLine(ffmpegKids[3], `retry also failed for ${STREAM_KEY}`);
     closeChild(ffmpegKids[3], 1);
     await vi.advanceTimersByTimeAsync(RETRY_BACKOFF_MS[1]);
+    await flushChildEvents();
     stderrLine(ffmpegKids[5], `third failure on ${STREAM_KEY}`);
     closeChild(ffmpegKids[5], 1);
     await vi.advanceTimersByTimeAsync(RETRY_BACKOFF_MS[2]);
+    await flushChildEvents();
     closeChild(ffmpegKids[7], 1);
     await vi.advanceTimersByTimeAsync(60_000);
 
@@ -931,6 +993,8 @@ describe('PumpManager ffprobe path', () => {
           kid.stdout.emit('data', Buffer.from('this is not json'));
           closeChild(kid, 0);
         }, 0);
+      } else if (command === 'mkfifo') {
+        setTimeout(() => closeChild(kid, 0), 0);
       } else {
         ffmpegKids.push(kid);
       }

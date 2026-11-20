@@ -238,6 +238,61 @@ describe('resolveVideoUrl', () => {
     });
   });
 
+  it('picks the highest-resolution live HLS manifest, not the first listed', async () => {
+    const child = makeChild();
+    spawnMock.mockReturnValue(child);
+    const pending = resolveVideoUrl(LIVE_URL);
+    await childWired();
+    succeedWith(
+      child,
+      JSON.stringify({
+        id: 'live1',
+        title: 'City Council — Live',
+        is_live: true,
+        extractor: 'youtube',
+        extractor_key: 'Youtube',
+        formats: [
+          {
+            format_id: 'hls-360',
+            url: 'https://manifest.example/live-360.m3u8',
+            protocol: 'm3u8_native',
+            vcodec: 'h264',
+            acodec: 'aac',
+            height: 360,
+            width: 640,
+            tbr: 800,
+          },
+          {
+            format_id: 'hls-1080',
+            url: 'https://manifest.example/live-1080.m3u8',
+            protocol: 'm3u8_native',
+            vcodec: 'h264',
+            acodec: 'aac',
+            height: 1080,
+            width: 1920,
+            tbr: 5000,
+          },
+          {
+            format_id: 'hls-720-no-height',
+            url: 'https://manifest.example/live-720.m3u8',
+            protocol: 'm3u8_native',
+            vcodec: 'h264',
+            acodec: 'aac',
+            width: 1280,
+          },
+        ],
+      })
+    );
+
+    await expect(pending).resolves.toMatchObject({
+      title: 'City Council — Live',
+      isLive: true,
+      mode: 'direct',
+      playableUrl: 'https://manifest.example/live-1080.m3u8',
+      extractor: 'Youtube',
+    });
+  });
+
   it('parses a VOD yt-dlp JSON payload into { isLive: false, playableUrl: progressive mp4 URL }', async () => {
     const child = makeChild();
     spawnMock.mockReturnValue(child);
@@ -335,7 +390,7 @@ describe('resolveVideoUrl', () => {
       const pending = resolveVideoUrl(LIVE_URL);
       const rejection = expect(pending).rejects.toMatchObject({ code: 'timeout' });
       await childWired();
-      await vi.advanceTimersByTimeAsync(20_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       // The timeout signalled the whole (sandbox-wrapped) process tree…
       expect(processKillMock).toHaveBeenCalledOnce();
       expect(processKillMock).toHaveBeenCalledWith(child, 'SIGKILL');

@@ -22,6 +22,7 @@ import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
  * host interface addresses). Render/runtime-specific internal services live
  * behind these too.
  */
+// IPv4 rules also cover mapped IPv6; ::ffff:0:0/96 would deny all IPv4.
 const DENIED_RESOLVED_ADDRESSES = [
   '10.0.0.0/8',
   '172.16.0.0/12',
@@ -30,7 +31,6 @@ const DENIED_RESOLVED_ADDRESSES = [
   '0.0.0.0/8',
   'fc00::/7',
   'fe80::/10',
-  '::ffff:0:0/96',
   'ff00::/8',
 ] as const;
 

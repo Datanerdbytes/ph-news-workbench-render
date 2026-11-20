@@ -100,7 +100,7 @@ export function buildPumpArgs({
   // The sandboxed side writes to the local fifo; the UNSANDBOXED publisher
   // (see buildPublisherArgs) owns the RTMPS connection — its destination is
   // the Graph-provided ingest URL, never user input.
-  args.push('-f', 'flv', outFifo);
+  args.push('-y', '-f', 'flv', outFifo);
   return args;
 }
 
@@ -145,6 +145,7 @@ export function buildStagedPumpArgs({
     'aac',
     '-b:a',
     '128k',
+    '-y',
     '-f',
     'flv',
     outFifo,
@@ -294,10 +295,10 @@ function stagedFifoPaths(): FifoPair {
  * argv element, never shell-interpolated.
  */
 async function makeFifo(fifoPath: string): Promise<void> {
-  return new Promise(async (resolve, reject) => {
-    const child = await guardedSpawn(MKFIFO_BIN, ['-m', '0600', fifoPath], {
-      stdio: ['ignore', 'ignore', 'pipe'],
-    });
+  const child = await guardedSpawn(MKFIFO_BIN, ['-m', '0600', fifoPath], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  return new Promise((resolve, reject) => {
     let stderr = '';
     child.stderr?.on('data', (chunk: Buffer) => {
       stderr += chunk.toString();
@@ -585,6 +586,7 @@ export class PumpManager {
     try {
       await this.spawnAttempt(proc);
     } catch (error) {
+      this.teardownStagedAttempt(proc);
       this.procs.delete(key);
       return {
         ok: false,
@@ -670,6 +672,15 @@ export class PumpManager {
       this.log(proc, 'started', { transcode: proc.params.needsTranscode });
     }
 
+    proc.starting = true;
+    await makeFifo(proc.params.outFifo);
+    proc.flvFifo = proc.params.outFifo;
+    if (proc.stopping) {
+      this.unlinkFlvFifo(proc);
+      proc.starting = false;
+      return;
+    }
+
     // The publisher is the unsandboxed tail of the chain: it owns the only
     // RTMPS connection, whose destination is Facebook's Graph response. It
     // spawns first so its pending read-end pairs with ffmpeg's output open.
@@ -693,8 +704,13 @@ export class PumpManager {
       { stdio: ['ignore', 'pipe', 'pipe'] }
     );
     proc.child = child;
-    proc.running = true;
     this.attachFfmpegHandlers(proc, child);
+    if (proc.stopping || proc.attemptSettled) {
+      this.teardownStagedAttempt(proc);
+      return;
+    }
+    proc.starting = false;
+    proc.running = true;
   }
 
   /**

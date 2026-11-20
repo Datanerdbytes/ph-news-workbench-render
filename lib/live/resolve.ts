@@ -41,8 +41,10 @@ export class ResolveError extends Error {
   }
 }
 
-/** yt-dlp -J on a busy site can stall; past this we kill it and report. */
-const RESOLVE_TIMEOUT_MS = 20_000;
+/** yt-dlp -J on a busy site can stall; past this we kill it and report.
+ * YouTube live streams need time to fetch the page, run JS challenges,
+ * and extract the HLS manifest — 20s is often too little. */
+const RESOLVE_TIMEOUT_MS = 60_000;
 
 /**
  * yt-dlp's `-J` payload. Only the fields the resolver needs are typed; the
@@ -61,8 +63,24 @@ type YtdlpInfo = {
     ext?: unknown;
     vcodec?: unknown;
     acodec?: unknown;
+    height?: unknown;
+    width?: unknown;
+    tbr?: unknown;
   }[];
 };
+
+type ManifestFormat = {
+  url: string;
+  height: number;
+  width: number;
+  tbr: number;
+};
+
+/** Parses a yt-dlp format field as a number; missing or unparseable is 0. */
+function formatNumber(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
 
 type YtdlpRun = { code: number | null; stdout: string; stderr: string };
 
@@ -182,9 +200,23 @@ function isManifestFormat(format: { url?: unknown; protocol?: unknown }): boolea
 function pickPlayableUrl(info: YtdlpInfo): string | null {
   const formats = Array.isArray(info.formats) ? info.formats : [];
   if (info.is_live === true) {
-    // Live sources only make sense through their manifest.
-    const manifest = formats.find(isManifestFormat);
-    if (manifest && isHttpUrl(manifest.url)) return manifest.url;
+    // Live sources only make sense through their manifest. yt-dlp often lists
+    // several HLS variants — pick the highest-resolution one so a YouTube live
+    // broadcast doesn't default to the first (often lowest) variant listed.
+    const manifests = formats
+      .filter(isManifestFormat)
+      .filter((format): format is ManifestFormat => isHttpUrl(format.url))
+      .map((format) => ({
+        format,
+        height: formatNumber(format.height),
+        width: formatNumber(format.width),
+        tbr: formatNumber(format.tbr),
+      }))
+      .sort(
+        (a, b) =>
+          b.height - a.height || b.width - a.width || b.tbr - a.tbr
+      );
+    if (manifests.length) return manifests[0].format.url;
     if (isHttpUrl(info.manifest_url)) return info.manifest_url;
   } else {
     // VOD: prefer a progressive mp4, then any progressive file, then a

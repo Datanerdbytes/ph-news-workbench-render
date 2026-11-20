@@ -3,7 +3,7 @@
 # ). The web app stays on Render — this is only the sandboxed native-media
 # service the web app proxies to (see lib/live/runner-config.ts).
 app = 'ph-news-media-runner'
-primary_region = 'sin1'
+primary_region = 'iad'
 
 [build]
   dockerfile = 'Dockerfile.worker'

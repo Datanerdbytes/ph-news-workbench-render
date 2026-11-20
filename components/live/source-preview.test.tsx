@@ -98,14 +98,15 @@ function renderPump(
 }
 
 describe('SourcePreview', () => {
-  it('sets the proxied src in a native-HLS browser and never loads hls.js', () => {
+  it('always routes an HLS manifest through hls.js even in a native-HLS browser', async () => {
     stubCanPlayType('probably');
     renderPreview({ isLive: true });
 
+    await waitFor(() => expect(hlsMock.Hls).toHaveBeenCalledTimes(1));
+    const [instance] = hlsMock.instances;
+    expect(instance.loadSource).toHaveBeenCalled();
     const video = document.querySelector('video') as HTMLVideoElement;
-    // Even Safari loads the manifest same-origin through the proxy.
-    expect(video.src).toBe(proxiedManifestUrl(MANIFEST_URL));
-    expect(hlsMock.Hls).not.toHaveBeenCalled();
+    expect(video.src).toBe('');
   });
 
   it('plays a direct mp4 file through src without hls.js', () => {
