@@ -1,6 +1,8 @@
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  type Sql,
+  attemptStillOwnsJob,
   blobFileName,
   buildYtdlpArgs,
   contentTypeFor,
@@ -114,5 +116,28 @@ describe("parseOutputLine", () => {
 
   it("ignores empty lines", () => {
     expect(parseOutputLine("", "YouTube", dir)).toEqual({});
+  });
+});
+
+describe("attemptStillOwnsJob", () => {
+  it("confirms the attempt that still owns the job", async () => {
+    const sql: Sql = ((_strings: TemplateStringsArray, ...values: unknown[]) => {
+      expect(values).toEqual(["job-1"]);
+      return Promise.resolve([{ attempts: 3 }]);
+    }) as unknown as Sql;
+    expect(await attemptStillOwnsJob(sql, "job-1", 3)).toBe(true);
+    expect(await attemptStillOwnsJob(sql, "job-1", 2)).toBe(false);
+  });
+
+  it("treats an unknown job as not owned", async () => {
+    const sql: Sql = (() => Promise.resolve([])) as unknown as Sql;
+    expect(await attemptStillOwnsJob(sql, "job-missing", 1)).toBe(false);
+  });
+
+  it("treats a query failure as not owned", async () => {
+    const sql: Sql = (() => {
+      throw new Error("down");
+    }) as unknown as Sql;
+    expect(await attemptStillOwnsJob(sql, "job-1", 1)).toBe(false);
   });
 });

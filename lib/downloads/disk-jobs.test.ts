@@ -80,6 +80,23 @@ describe("discoverDiskDownloads", () => {
     await rm(converted, { recursive: true, force: true });
   });
 
+  it("falls back to the source when the H.264 rendition is empty", async () => {
+    // A failed conversion can leave an empty rendition behind; it must not
+    // hide a valid source in the same folder.
+    const converted = await mkdtemp(path.join(tmpdir(), "disk-jobs-empty-rendition-"));
+    const jobDir = path.join(converted, "Facebook", "job-empty-rendition");
+    await mkdir(jobDir, { recursive: true });
+    await writeFile(path.join(jobDir, "clip.mp4"), "raw-av1");
+    await writeFile(path.join(jobDir, "clip (H.264).mp4"), "");
+
+    const files = await discoverDiskDownloads(converted);
+    const fromJob = files.filter((file) => file.filePath.includes("job-empty-rendition"));
+
+    expect(fromJob).toHaveLength(1);
+    expect(fromJob[0].fileName).toBe("clip.mp4");
+    await rm(converted, { recursive: true, force: true });
+  });
+
   it("falls back to the source file when a job folder has no rendition", async () => {
     const plain = await mkdtemp(path.join(tmpdir(), "disk-jobs-plain-"));
     const jobDir = path.join(plain, "Facebook", "job-plain");

@@ -398,7 +398,25 @@ export function parseOutputLine(
   return update;
 }
 
-type Sql = ReturnType<typeof neon<false, false>>;
+/**
+ * A claim is only valid while this attempt is still the latest one for the job.
+ * A stale attempt (reaped after going stale, then finishing late) must not
+ * delete blobs a newer attempt uploaded or overwrite the job's result.
+ */
+export async function attemptStillOwnsJob(
+  sql: Sql,
+  jobId: string,
+  attemptNumber: number
+): Promise<boolean> {
+  try {
+    const rows = await sql`SELECT attempts FROM download_jobs WHERE id = ${jobId}`;
+    return Number(rows[0]?.attempts) === attemptNumber;
+  } catch {
+    return false;
+  }
+}
+
+export type Sql = ReturnType<typeof neon<false, false>>;
 
 type ClaimedJob = {
   id: string;
@@ -406,6 +424,7 @@ type ClaimedJob = {
   platform: string;
   url: string;
   quality: string;
+  attemptNumber: number;
 };
 
 type ActiveJob = {
@@ -494,8 +513,12 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
       console.error(`Could not record failure for ${job.id}:`, error);
     }
     // A failed job owns no file in the cloud library — an upload that landed
-    // before the failure would otherwise stay behind as an orphan.
-    await removeSupersededBlobs(blobJobPrefix(job.workspace_id, job.id), null);
+    // before the failure would otherwise stay behind as an orphan. Only the
+    // attempt that still owns the job may clear its folder; a stale attempt
+    // must not delete blobs a newer attempt already uploaded.
+    if (await attemptStillOwnsJob(sql, job.id, job.attemptNumber)) {
+      await removeSupersededBlobs(blobJobPrefix(job.workspace_id, job.id), null);
+    }
     console.error(`Failed ${job.platform} job ${job.id}: ${message}`);
     active.delete(job.id);
   }
@@ -584,6 +607,16 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
         state.status = "finalizing";
         state.statusMessage = "Uploading to the cloud library…";
         await writeState(true);
+        // Only the attempt that still owns the job may upload to the cloud
+        // library or mark it done — a stale attempt must not delete a newer
+        // attempt's blobs (uploadJobVideo prunes the job folder) or overwrite
+        // the job's result.
+        if (!(await attemptStillOwnsJob(sql, job.id, job.attemptNumber))) {
+          settled = true;
+          clearInterval(entry.heartbeat);
+          active.delete(job.id);
+          return;
+        }
         const blob = await uploadJobVideo(
           blobJobPrefix(job.workspace_id, job.id),
           uploadPath,
@@ -596,14 +629,16 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
         }
         settled = true;
         clearInterval(entry.heartbeat);
-        await sql`
-          UPDATE download_jobs
-          SET status = 'done', progress = 100, status_message = 'Download complete.',
-              file_name = ${uploadName}, blob_url = ${blob.url}, file_size = ${uploadSize},
-              save_location = ${uploadPath}, error = NULL, updated_at = now()
-          WHERE id = ${job.id}
-        `;
-        console.log(`Done: ${uploadName} is in the cloud library.`);
+        if (await attemptStillOwnsJob(sql, job.id, job.attemptNumber)) {
+          await sql`
+            UPDATE download_jobs
+            SET status = 'done', progress = 100, status_message = 'Download complete.',
+                file_name = ${uploadName}, blob_url = ${blob.url}, file_size = ${uploadSize},
+                save_location = ${uploadPath}, error = NULL, updated_at = now()
+            WHERE id = ${job.id}
+          `;
+          console.log(`Done: ${uploadName} is in the cloud library.`);
+        }
         active.delete(job.id);
       } catch (error) {
         await finishFailure(error instanceof Error ? error.message : "Download failed.");
@@ -695,7 +730,7 @@ async function main() {
             LIMIT 1
             FOR UPDATE SKIP LOCKED
           )
-          RETURNING id, workspace_id, platform, url, quality
+          RETURNING id, workspace_id, platform, url, quality, attempts
         `) as ClaimedJob[];
         if (!rows.length) break;
         void runJob(sql, rows[0], active, () => shuttingDown);

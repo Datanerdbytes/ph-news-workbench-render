@@ -81,23 +81,37 @@ export async function discoverDiskDownloads(
       const videoNames = names.filter((name) =>
         VIDEO_EXTENSIONS.some((extension) => name.toLowerCase().endsWith(extension))
       );
-      // One folder is one download: surface a single file for it.
-      const name = preferredJobFile(videoNames);
-      if (!name) continue;
-      const filePath = path.join(root, platform, job, name);
-      try {
-        const info = await stat(filePath);
-        if (!info.isFile() || info.size === 0) continue;
-        files.push({
-          id: diskJobId(path.join(platform, job, name)),
-          platform,
-          filePath,
-          fileName: name,
-          createdAt: info.mtimeMs,
-        });
-      } catch {
-        // Removed between listing and stat; skip.
+      // One folder is one download: surface a single file for it. Try the
+      // preferred Safari rendition first, but fall back to the source if the
+      // rendition is missing, empty, or not a regular file — a failed
+      // conversion can leave an empty H.264 file behind that must not hide
+      // a valid download.
+      const preferred = preferredJobFile(videoNames);
+      const candidates = preferred
+        ? [preferred, ...videoNames.filter((name) => name !== preferred)]
+        : videoNames;
+      let file: { filePath: string; fileName: string; createdAt: number } | null = null;
+      for (const name of candidates) {
+        const filePath = path.join(root, platform, job, name);
+        let info;
+        try {
+          info = await stat(filePath);
+        } catch {
+          continue;
+        }
+        if (info.isFile() && info.size > 0) {
+          file = { filePath, fileName: name, createdAt: info.mtimeMs };
+          break;
+        }
       }
+      if (!file) continue;
+      files.push({
+        id: diskJobId(path.join(platform, job, file.fileName)),
+        platform,
+        filePath: file.filePath,
+        fileName: file.fileName,
+        createdAt: file.createdAt,
+      });
     }
   }
   return files.sort((a, b) => b.createdAt - a.createdAt);

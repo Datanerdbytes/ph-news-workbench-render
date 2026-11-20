@@ -64,7 +64,7 @@ Both files carry the columns: fresh installs via `lib/schema.sql`, existing DBs 
 ### API 2 — pump
 
 - `POST /api/live/[id]/pump`, body `{ action: 'start' | 'stop' }`
-- `start` requires `source_url` on the row and a decryptable stream key; spawns the pump; `409` when already running.
+- `start` requires `source_url` on the row and a decryptable stream key; spawns the pump; `409` when already running. `source_url` must hold a playable URL — the resolve response's `playableUrl`, saved when the source is attached or re-resolved immediately before spawning the pump. The pump never resolves a URL itself; for staged sources the feeders read this same playable source.
 - `stop` kills the process and records `stopped`.
 - Returns `{ pump: { status, startedAt } }`.
 - Existing `GET /api/live` responses gain `sourceUrl`, `pumpStatus`, `pumpStartedAt`, `pumpError`. A row marked `running` in the DB with no live process (e.g. after a server restart) reports `interrupted`.
@@ -101,7 +101,7 @@ Every agent brief includes: read `node_modules/next/dist/docs` first (this Next.
 | 1 · parallel | **B — pump core** | `lib/live/pump.ts`, `lib/live/pump.test.ts` (pure logic; fake child processes) | — |
 | 1 · parallel | **C — schema** | `migrate-live-restream.mjs`, `lib/schema.sql`, `scripts/prepare-e2e-db.mjs` (`requiredColumns`) | — |
 | 2 | **D — pump API** | `app/api/live/[id]/pump/route.ts`, extend `GET /api/live` (`toStream` + columns), `lib/live/pump-state.ts`, `lib/live/pump-state.test.ts` | A? no — B, C merged |
-| 3 | **E — UI** | `package.json` (+`hls.js`), `components/live/source-preview.tsx`, `components/live/source-preview.test.tsx`, `app/live/page.tsx` | A, D merged |
+| 3 | **E — UI** | `package.json` (+`hls.js`), `components/live/source-preview.tsx`, `components/live/source-preview.test.tsx`, `app/live/page.tsx`, `lib/live/preview-proxy.ts`, `lib/live/preview-proxy.test.ts`, `app/api/live/preview/route.ts`, `app/api/live/preview/route.test.ts` | A, D merged |
 | 4 | **F — integration** | `e2e/live-restream.spec.ts`, README/docs, full gate run | all merged |
 
 Shared-file safety: only C touches schema files; only D touches `app/api/live/route.ts`; only E touches `app/live/page.tsx`.
@@ -181,6 +181,7 @@ Files: `e2e/live-restream.spec.ts`, README/docs updates. Deterministic, network-
 | resolve rejects bad URL | POST `/api/live/resolve` `{url:'not-a-url'}` | 400, `invalid_url`, no yt-dlp invoked |
 | Live Page renders controls | visit `/live` | Source URL field, Preview button, rights hint visible |
 | pump start without source | seeded stream lacking `source_url` → POST pump start | 4xx guard error; UI shows no crash |
+| staged AV1-only source | resolve reports `staged`, no playable URL → POST pump start | pump start rejected; UI shows AV1-only video not supported for broadcast |
 | fresh DB provisioning | full `prepare-e2e-db.mjs` run | exits `prepared: true`, new columns present |
 
 Then runs the full gates: `lint`, `typecheck`, `vitest run`, image build — all green.
@@ -244,9 +245,11 @@ Contracts changed (this file remains the single spec):
   watchdog; any feeder death triggers the existing retry (a staged retry
   restarts the download from zero). FIFOs are unlinked on every exit path.
   A finished VOD EOFs into the existing clean-stop state machine (broadcasts
-  once through). Video is copied (Facebook DASH is avc1/H.264); audio is
-  always transcoded to aac (handles opus/mp3 sources). vp9-only video is a
-  documented v1 limitation.
+  once through). The feeders request H.264 video so it can be copied; if no H.264-compatible
+  video exists (AV1-only or vp9-only sources), the pump rejects the source
+  before broadcasting and the UI shows the rejection instead of an
+  unplayable stream. AV1-only and vp9-only video are documented v1
+  limitations. Audio is always transcoded to aac (handles opus/mp3 sources).
 - **UI**: a staged resolve auto-fills the title and renders a neutral
   "Preview unavailable for this source — Go live streams it through the
   pump" card (no video element); create passes `mode` through with the URL.
@@ -265,14 +268,17 @@ signed-in streaming proxy so hls.js loads same-origin.
   resolves every non-comment line and every `URI="…"` attribute
   (`EXT-X-KEY`/`EXT-X-MAP`/`EXT-X-MEDIA`/`EXT-X-I-FRAME-STREAM-INF`) against
   the playlist URL and rewrites it to `/api/live/preview?url=<encoded>`;
-  `assertPublicUrl(url)` SSRF guard — http(s) only, DNS-resolved, rejects
-  loopback/private/link-local/unique-local ranges.
+  `assertPublicUrl(url)` SSRF guard — http(s) only; resolves each hostname
+  once and rejects the request if any resolved address is loopback, private,
+  link-local, or unique-local. The connection uses a validated address while
+  the original hostname is preserved for TLS SNI and the Host header.
 - **app/api/live/preview/route.ts**: `GET /api/live/preview?url=…`, same
-  signed-in guard as resolve. Validates the SSRF guard, fetches with
-  `redirect: 'manual'` re-validating each hop (≤3), sniffs `#EXTM3U` →
-  returns the rewritten playlist as `application/vnd.apple.mpegurl`; anything
-  else streams the body through verbatim (never buffered to the heap).
-  `cache-control: no-store`.
+  signed-in guard as resolve. Validates the SSRF guard on the initial URL,
+  re-validates it on every redirect hop (≤3), and applies it to every
+  playlist or segment URL rewritten through the proxy; fetches with
+  `redirect: 'manual'`, sniffs `#EXTM3U` → returns the rewritten playlist as
+  `application/vnd.apple.mpegurl`; anything else streams the body through
+  verbatim (never buffered to the heap). `cache-control: no-store`.
 - **UI**: `SourcePreview` wraps HLS `playableUrl` with the proxy URL for both
   the native `src` and the hls.js `loadSource`; direct-file sources unchanged
   (cross-origin `<video>` playback needs no CORS).
