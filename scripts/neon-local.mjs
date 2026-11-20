@@ -16,6 +16,7 @@
 import { neonConfig, Pool } from "@neondatabase/serverless";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { connect } from "node:net";
 
 // The preload runs before Next has loaded .env.local, so fall back to
 // reading the file directly — but never let a missing file kill the host
@@ -114,4 +115,29 @@ if (isLocal) {
   // as a read-only getter, so it cannot be patched here either. CJS scripts
   // that rely on it (migrate-auth.js) must have their statements applied out
   // of band, e.g. via psql.
+
+  // The driver reports a stopped Docker stack as a bare "fetch failed", which
+  // names neither the cause nor the fix. Probe the proxy once and say so.
+  // Warn only: a missing container must not abort the host process.
+  try {
+    await new Promise((resolve, reject) => {
+      const socket = connect({ host: "127.0.0.1", port: 5434 });
+      socket.setTimeout(1000);
+      socket.once("connect", () => {
+        socket.destroy();
+        resolve();
+      });
+      socket.once("timeout", () => {
+        socket.destroy();
+        reject(new Error("timeout"));
+      });
+      socket.once("error", reject);
+    });
+  } catch {
+    console.warn(
+      "[neon-local] no local Postgres proxy on localhost:5434 — database " +
+        "queries will fail. Start the containers with: " +
+        "docker start phnews-pg phnews-wsproxy",
+    );
+  }
 }

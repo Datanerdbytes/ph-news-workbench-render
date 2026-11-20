@@ -163,6 +163,39 @@ pump + resolver on any runtime where the sandbox passes — local dev, for
 instance). With it set, production gets full Resolve and Go live through the
 worker while the web service itself stays sandbox-free.
 
+### Media runner on a Mac (Tailscale Funnel)
+
+The same `media-runner.ts` can run on a Mac instead of Fly.io. macOS passes
+the sandbox's namespace probes, so no container is needed; the only missing
+piece is a public URL, which Tailscale Funnel provides (free, no card, stable
+`https://<machine>.<tailnet>.ts.net` hostname).
+
+```bash
+brew install tailscale                # one-time
+cp .env.example .env.runner           # then fill with PRODUCTION values:
+                                      # DATABASE_URL (Neon), BETTER_AUTH_SECRET,
+                                      # MEDIA_RUNNER_TOKEN — not the local Docker ones
+./scripts/start-runner.sh             # tailscaled + funnel + runner under caffeinate
+./scripts/start-runner.sh stop        # tear everything down
+# Render env: MEDIA_RUNNER_URL=https://<machine>.<tailnet>.ts.net
+```
+
+One-time tailnet setup: `tailscale up` (browser login), enable **Funnel** for
+the node, and enable **HTTPS Certificates** under the admin DNS page — Funnel
+cannot issue its cert without that toggle.
+
+Operational notes:
+
+- The Mac must be awake and online for the whole broadcast. The script wraps
+  the runner in `caffeinate -s`; closing the lid still suspends it.
+- `tailscaled` runs in userspace mode (no root, no TUN device). It must be
+  started with `--statedir` or `tailscale cert` fails with `no
+  TailscaleVarRoot`.
+- The runner reads `.env.runner`, so local dev keeps using `.env.local` and
+  the Docker Postgres — the two never collide.
+- Funnel's first request after idle can take ~30s (DERP cold path); later
+  calls are sub-second.
+
 ## Local Docker test
 
 ```bash
