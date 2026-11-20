@@ -126,6 +126,43 @@ describe("GET /api/downloads", () => {
     await GET(new Request("http://localhost/api/downloads"));
     expect(discoverDiskDownloadsMock).not.toHaveBeenCalled();
   });
+
+  it("lists one row for a job whose folder holds both the source and its rendition", async () => {
+    // Regression: a converted job folder holds the yt-dlp source *and* the
+    // H.264 rendition. Both were surfaced, so one download appeared twice.
+    vi.stubEnv("NODE_ENV", "development");
+    sqlMock.mockResolvedValue([
+      row({
+        id: "cloud",
+        status: "done",
+        file_name: "clip (H.264).mp4",
+        blob_url: "https://blob/clip.mp4",
+        save_location: "/dl/VideoDownloader/Facebook/job-1/clip (H.264).mp4",
+      }),
+    ]);
+    discoverDiskDownloadsMock.mockResolvedValue([
+      {
+        id: "disk-1",
+        platform: "Facebook",
+        filePath: "/dl/VideoDownloader/Facebook/job-1/clip.mp4",
+        fileName: "clip.mp4",
+        createdAt: 1,
+      },
+      {
+        id: "disk-2",
+        platform: "Facebook",
+        filePath: "/dl/VideoDownloader/Facebook/job-1/clip (H.264).mp4",
+        fileName: "clip (H.264).mp4",
+        createdAt: 2,
+      },
+    ]);
+
+    const response = await GET(new Request("http://localhost/api/downloads"));
+    const body = await response.json();
+
+    expect(body.jobs).toHaveLength(1);
+    expect(body.jobs[0].id).toBe("cloud");
+  });
 });
 
 describe("POST /api/downloads", () => {

@@ -2,12 +2,12 @@ import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { neon } from "@neondatabase/serverless";
-import { put } from "@vercel/blob";
+import { del, list, put } from "@vercel/blob";
 
 // Local companion to the hosted app: claims queued download_jobs rows from the
 // shared database, runs yt-dlp on this machine, and uploads the finished file
@@ -221,6 +221,9 @@ export type PreparedRendition = {
  * Returns the file that should reach the cloud library. Sources Safari cannot
  * decode are re-encoded to H.264 first; sources that already play everywhere
  * are passed through untouched.
+ *
+ * The source file stays on disk until the rendition has been uploaded — see
+ * removeSupersededSource.
  */
 export async function prepareSafariFriendlyRendition(
   sourcePath: string,
@@ -244,6 +247,30 @@ export async function prepareSafariFriendlyRendition(
   return { filePath: target, fileName: path.basename(target), converted: true };
 }
 
+/**
+ * Deletes the pre-conversion source once the rendition has been uploaded.
+ *
+ * A converted job folder must end up holding exactly one video: the source is
+ * an intermediate artifact, and leaving it next to the rendition made a single
+ * download show up twice (once as the source, once as the rendition). This
+ * runs only after the upload succeeds, so a failed upload still has the
+ * original on disk to fall back on.
+ */
+export async function removeSupersededSource(
+  sourcePath: string,
+  renditionPath: string
+): Promise<void> {
+  if (path.resolve(sourcePath) === path.resolve(renditionPath)) return;
+  try {
+    await rm(sourcePath, { force: true });
+  } catch (error) {
+    console.error(
+      `Could not remove the superseded source ${sourcePath}:`,
+      error instanceof Error ? error.message : error
+    );
+  }
+}
+
 // Vercel Blob derives the ?download=1 attachment name from the stored path, so
 // spaces and brackets would otherwise reach the user percent-encoded.
 export function blobFileName(fileName: string): string {
@@ -251,6 +278,81 @@ export function blobFileName(fileName: string): string {
     .replace(/[^A-Za-z0-9._-]+/g, "_")
     .replace(/_+\.(\w+)$/, ".$1");
   return clean || "video.mp4";
+}
+
+/**
+ * Every blob of one download job lives in this folder of the store.
+ *
+ * The file name inside it is the video title, which changes between attempts
+ * (a Facebook title carries the live view count), so the folder — not the file
+ * name — is what identifies the job.
+ */
+export function blobJobPrefix(workspaceId: string, jobId: string): string {
+  return `downloads/${workspaceId}/${jobId}/`;
+}
+
+/**
+ * Delete the blobs a previous attempt left behind in a job folder.
+ *
+ * A retried download uploads under a new name, and `allowOverwrite` only
+ * replaces a file with the exact same path — so every attempt added another
+ * file to the job folder and the older copies piled up as orphans. Keeping one
+ * file per job (the one just uploaded, or none at all when the job failed)
+ * keeps the cloud library in step with the download list.
+ *
+ * Best-effort: a store that cannot be listed must never fail a download.
+ */
+export async function removeSupersededBlobs(
+  prefix: string,
+  keepUrl: string | null,
+  attemptNumber: number
+): Promise<void> {
+  try {
+    const doomed: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await list({ prefix, limit: 100, cursor });
+      for (const blob of page.blobs) {
+        if (blob.url === keepUrl) continue;
+        // Never delete a newer attempt, even if ownership changes during listing.
+        const relative = blob.pathname.slice(prefix.length);
+        const attempt = /^attempt-(\d+)\//.exec(relative);
+        if (attempt && Number(attempt[1]) > attemptNumber) continue;
+        doomed.push(blob.url);
+      }
+      cursor = page.hasMore ? page.cursor : undefined;
+    } while (cursor);
+    if (!doomed.length) return;
+    await del(doomed);
+  } catch (error) {
+    console.error(
+      `Could not remove the superseded blobs under ${prefix}:`,
+      error instanceof Error ? error.message : error
+    );
+  }
+}
+
+/**
+ * Upload into an attempt-specific folder so concurrent attempts cannot overwrite
+ * each other. Cleanup happens only after an ownership-fenced update.
+ */
+export async function uploadJobVideo(
+  prefix: string,
+  filePath: string,
+  fileName: string,
+  attemptNumber: number
+): Promise<{ url: string; pathname: string }> {
+  const blob = await put(
+    `${prefix}attempt-${attemptNumber}/${blobFileName(fileName)}`,
+    createReadStream(filePath),
+    {
+      access: "public",
+      contentType: contentTypeFor(fileName),
+      addRandomSuffix: false,
+      allowOverwrite: true,
+    }
+  );
+  return blob;
 }
 
 export type OutputUpdate = {
@@ -301,15 +403,49 @@ export function parseOutputLine(
   return update;
 }
 
-type Sql = ReturnType<typeof neon<false, false>>;
+/**
+ * A claim is only valid while this attempt is still the latest one for the job.
+ * A stale attempt (reaped after going stale, then finishing late) must not
+ * delete blobs a newer attempt uploaded or overwrite the job's result.
+ */
+export async function attemptStillOwnsJob(
+  sql: Sql,
+  jobId: string,
+  attemptNumber: number
+): Promise<boolean> {
+  try {
+    const rows = await sql`SELECT attempts FROM download_jobs WHERE id = ${jobId} AND status IN ('fetching', 'downloading', 'finalizing')`;
+    return Number(rows[0]?.attempts) === attemptNumber;
+  } catch {
+    return false;
+  }
+}
 
-type ClaimedJob = {
+export type Sql = ReturnType<typeof neon<false, false>>;
+
+export type ClaimedJob = {
   id: string;
   workspace_id: string;
   platform: string;
   url: string;
   quality: string;
+  attemptNumber: number;
 };
+
+export async function claimNextJob(sql: Sql, workerId: string): Promise<ClaimedJob | undefined> {
+  const rows = await sql`
+    UPDATE download_jobs
+    SET status = 'fetching', worker_id = ${workerId}, claimed_at = now(),
+        updated_at = now(), attempts = attempts + 1,
+        status_message = 'Connecting to ' || platform || '…'
+    WHERE id = (
+      SELECT id FROM download_jobs WHERE status = 'queued'
+      ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
+    )
+    RETURNING id, workspace_id, platform, url, quality, attempts AS "attemptNumber"
+  `;
+  return rows[0] as ClaimedJob | undefined;
+}
 
 type ActiveJob = {
   child: ChildProcess | null;
@@ -329,7 +465,7 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>, isShuttingDown: () => boolean) {
+export async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>, isShuttingDown: () => boolean) {
   const format = QUALITY_FORMATS[job.quality] ?? QUALITY_FORMATS.best;
   const outputDirectory = path.join(downloadRoot(), job.platform, job.id);
   const state = {
@@ -357,7 +493,8 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
         UPDATE download_jobs
         SET status = ${state.status}, progress = ${state.progress},
             status_message = ${state.statusMessage}, updated_at = now()
-        WHERE id = ${job.id}
+        WHERE id = ${job.id} AND attempts = ${job.attemptNumber}
+          AND status IN ('fetching', 'downloading', 'finalizing')
       `;
     } catch (error) {
       console.error(`Could not update job ${job.id}:`, error);
@@ -387,17 +524,22 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
     settled = true;
     clearInterval(entry.heartbeat);
     try {
-      await sql`
+      const rows = await sql`
         UPDATE download_jobs
         SET status = 'failed', status_message = 'Download failed.',
             error = ${message}, updated_at = now()
-        WHERE id = ${job.id}
+        WHERE id = ${job.id} AND attempts = ${job.attemptNumber}
+          AND status IN ('fetching', 'downloading', 'finalizing')
+        RETURNING id
       `;
+      if (rows.length) {
+        await removeSupersededBlobs(blobJobPrefix(job.workspace_id, job.id), null, job.attemptNumber);
+      }
     } catch (error) {
       console.error(`Could not record failure for ${job.id}:`, error);
     }
     console.error(`Failed ${job.platform} job ${job.id}: ${message}`);
-    active.delete(job.id);
+    if (active.get(job.id) === entry) active.delete(job.id);
   }
 
   try {
@@ -430,7 +572,7 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
     child.once("close", async (code) => {
       if (settled || entry.cancelled || isShuttingDown()) {
         clearInterval(entry.heartbeat);
-        active.delete(job.id);
+        if (active.get(job.id) === entry) active.delete(job.id);
         return;
       }
       if (stdoutBuffer) recordChunk(Buffer.from("\n"), stdoutBuffer);
@@ -453,6 +595,8 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
         let uploadPath = state.filePath;
         let uploadName = path.basename(state.filePath);
         let uploadSize = fileInfo.size;
+        // Set when the upload uses a converted rendition instead of the source.
+        let supersededSource: string | null = null;
         state.status = "finalizing";
         try {
           state.statusMessage = "Checking playback compatibility…";
@@ -470,6 +614,7 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
             uploadPath = rendition.filePath;
             uploadName = rendition.fileName;
             uploadSize = convertedInfo.size;
+            supersededSource = state.filePath;
           }
         } catch (error) {
           console.error(
@@ -481,27 +626,42 @@ async function runJob(sql: Sql, job: ClaimedJob, active: Map<string, ActiveJob>,
         state.status = "finalizing";
         state.statusMessage = "Uploading to the cloud library…";
         await writeState(true);
-        const blob = await put(
-          `downloads/${job.workspace_id}/${job.id}/${blobFileName(uploadName)}`,
-          createReadStream(uploadPath),
-          {
-            access: "public",
-            contentType: contentTypeFor(uploadName),
-            addRandomSuffix: false,
-            allowOverwrite: true,
-          }
+        // Upload into an isolated attempt folder; the conditional update below
+        // decides which attempt may publish its result and prune older blobs.
+        if (!(await attemptStillOwnsJob(sql, job.id, job.attemptNumber))) {
+          settled = true;
+          clearInterval(entry.heartbeat);
+          if (active.get(job.id) === entry) active.delete(job.id);
+          return;
+        }
+        const blob = await uploadJobVideo(
+          blobJobPrefix(job.workspace_id, job.id),
+          uploadPath,
+          uploadName,
+          job.attemptNumber
         );
-        settled = true;
-        clearInterval(entry.heartbeat);
-        await sql`
+        const rows = await sql`
           UPDATE download_jobs
           SET status = 'done', progress = 100, status_message = 'Download complete.',
               file_name = ${uploadName}, blob_url = ${blob.url}, file_size = ${uploadSize},
               save_location = ${uploadPath}, error = NULL, updated_at = now()
-          WHERE id = ${job.id}
+          WHERE id = ${job.id} AND attempts = ${job.attemptNumber}
+            AND status IN ('fetching', 'downloading', 'finalizing')
+          RETURNING id
         `;
-        console.log(`Done: ${uploadName} is in the cloud library.`);
-        active.delete(job.id);
+        settled = true;
+        clearInterval(entry.heartbeat);
+        if (rows.length) {
+          await removeSupersededBlobs(blobJobPrefix(job.workspace_id, job.id), blob.url, job.attemptNumber);
+          if (supersededSource) await removeSupersededSource(supersededSource, uploadPath);
+          console.log(`Done: ${uploadName} is in the cloud library.`);
+        } else {
+          // Only this attempt's unique upload can be removed safely.
+          try { await del(blob.url); } catch (error) {
+            console.error(`Could not remove stale upload for ${job.id}:`, error);
+          }
+        }
+        if (active.get(job.id) === entry) active.delete(job.id);
       } catch (error) {
         await finishFailure(error instanceof Error ? error.message : "Download failed.");
       }
@@ -580,22 +740,9 @@ async function main() {
           AND updated_at < now() - ${STALE_MINUTES} * interval '1 minute'
       `;
       while (!shuttingDown && active.size < MAX_CONCURRENT) {
-        const rows = (await sql`
-          UPDATE download_jobs
-          SET status = 'fetching', worker_id = ${workerId}, claimed_at = now(),
-              updated_at = now(), attempts = attempts + 1,
-              status_message = 'Connecting to ' || platform || '…'
-          WHERE id = (
-            SELECT id FROM download_jobs
-            WHERE status = 'queued'
-            ORDER BY created_at
-            LIMIT 1
-            FOR UPDATE SKIP LOCKED
-          )
-          RETURNING id, workspace_id, platform, url, quality
-        `) as ClaimedJob[];
-        if (!rows.length) break;
-        void runJob(sql, rows[0], active, () => shuttingDown);
+        const job = await claimNextJob(sql, workerId);
+        if (!job) break;
+        void runJob(sql, job, active, () => shuttingDown);
       }
     } catch (error) {
       console.error("Queue poll failed:", error);

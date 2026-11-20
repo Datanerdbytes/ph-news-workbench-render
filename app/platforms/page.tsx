@@ -205,12 +205,14 @@ export default function PlatformsPage() {
       ],
       state: youtube.loading
         ? "checking"
+        : youtube.unreachable
+          ? "unreachable"
         : youtube.connected
           ? "live"
           : youtube.configured
             ? "ready"
             : "setup",
-      account: youtube.connected
+      account: !youtube.unreachable && youtube.connected
         ? `${youtube.account?.name ?? "YouTube"} · ${youtube.account?.id ?? ""}`
         : null,
       note: youtube.unreachable
@@ -290,10 +292,6 @@ export default function PlatformsPage() {
               Channels
             </p>
             <h1 className="page-title mt-1.5">Platforms</h1>
-            <p className="mt-1.5 max-w-2xl text-[12.5px] leading-relaxed text-muted-foreground">
-              Every network the workbench can publish to. Sign in once per
-              platform and the desk keeps the connection for this workspace.
-            </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-[10.5px] font-medium text-muted-foreground">
@@ -349,14 +347,9 @@ export default function PlatformsPage() {
           <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-surface-2 text-faint">
             <Lock className="size-4" aria-hidden />
           </span>
-          <p className="min-w-0 flex-1 text-[11.5px] leading-relaxed text-muted-foreground">
-            Each sign-in opens that network&apos;s own OAuth screen and returns
-            here. The workbench only stores the returned tokens, scoped to this
-            workspace.
-          </p>
           <Link
             href="/accounts"
-            className="inline-flex items-center gap-1 text-[11.5px] font-semibold text-brand hover:text-brand-strong"
+            className="ml-auto inline-flex items-center gap-1 text-[11.5px] font-semibold text-brand hover:text-brand-strong"
           >
             Per-channel capability matrix
             <ArrowRight className="size-3.5" aria-hidden />

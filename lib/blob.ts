@@ -7,6 +7,7 @@
 export {
   assertStagedBlob,
   deleteStagedBlobs,
+  deleteStagedBlobsInFolder,
   stagedFileExtension,
   stagedFileToBuffer,
   stagedFileToTempFile,

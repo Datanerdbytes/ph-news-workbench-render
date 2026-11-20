@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { discoverDiskDownloads, publicDiskDownload } from "@/lib/downloads/disk-jobs";
@@ -47,6 +48,15 @@ function platformForUrl(value: unknown) {
   }
 }
 
+/**
+ * The job folder a saved file belongs to, or null when the location is not a
+ * local path (a cloud-only job reports "Cloud library" instead).
+ */
+export function jobFolderFor(saveLocation: string | null | undefined): string | null {
+  if (!saveLocation || !path.isAbsolute(saveLocation)) return null;
+  return path.dirname(saveLocation);
+}
+
 export async function GET(request: Request) {
   const access = await requireWorkspace(request);
   if (!access) return unauthorized();
@@ -65,8 +75,16 @@ export async function GET(request: Request) {
   // Files downloaded before the queue existed still live on the dev machine's
   // disk; surface them there only.
   if (process.env.NODE_ENV === "development") {
+    // A job folder is one download. A cloud job and a file on disk that share
+    // a folder are the same download, so the disk copy must not be listed a
+    // second time.
+    const claimedFolders = new Set(
+      jobs
+        .map((job) => jobFolderFor(job.saveLocation))
+        .filter((folder): folder is string => folder !== null)
+    );
     const diskJobs = (await discoverDiskDownloads())
-      .filter((disk) => !jobs.some((job) => job.saveLocation === disk.filePath))
+      .filter((disk) => !claimedFolders.has(jobFolderFor(disk.filePath) ?? ""))
       .map(publicDiskDownload);
     jobs = [...jobs, ...diskJobs]
       .sort((a, b) => b.createdAt - a.createdAt)

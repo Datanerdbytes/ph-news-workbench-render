@@ -13,6 +13,13 @@ export type DiskDownload = {
 
 const VIDEO_EXTENSIONS = [".mp4", ".webm", ".mkv", ".mov", ".m4v"];
 
+/**
+ * The worker's Safari conversion writes the H.264 rendition next to the
+ * yt-dlp source. The rendition is the one that reached the cloud library, so
+ * it is the one that represents the download.
+ */
+const SAFARI_RENDITION_SUFFIX = " (H.264)";
+
 export function downloadRoot() {
   if (process.env.VIDEO_DOWNLOADER_ROOT) {
     return path.resolve(process.env.VIDEO_DOWNLOADER_ROOT);
@@ -22,6 +29,23 @@ export function downloadRoot() {
 
 export function diskJobId(relativePath: string) {
   return `disk-${createHash("sha1").update(relativePath).digest("hex").slice(0, 24)}`;
+}
+
+function isSafariRendition(fileName: string): boolean {
+  return fileName.toLowerCase().endsWith(`${SAFARI_RENDITION_SUFFIX.toLowerCase()}.mp4`);
+}
+
+/**
+ * Picks the one file that represents a job folder. A folder holds one
+ * download, so returning several files for it would list that download more
+ * than once.
+ */
+export function preferredJobFile(fileNames: string[]): string | null {
+  if (fileNames.length === 0) return null;
+  const rendition = fileNames.find(isSafariRendition);
+  if (rendition) return rendition;
+  // No rendition: the folder holds a single plain download.
+  return fileNames[0];
 }
 
 /** Recovers finished downloads from ~/Downloads/VideoDownloader/{platform}/{job}/{file}. */
@@ -54,25 +78,40 @@ export async function discoverDiskDownloads(
       } catch {
         continue;
       }
-      for (const name of names) {
-        if (!VIDEO_EXTENSIONS.some((extension) => name.toLowerCase().endsWith(extension))) {
+      const videoNames = names.filter((name) =>
+        VIDEO_EXTENSIONS.some((extension) => name.toLowerCase().endsWith(extension))
+      );
+      // One folder is one download: surface a single file for it. Try the
+      // preferred Safari rendition first, but fall back to the source if the
+      // rendition is missing, empty, or not a regular file — a failed
+      // conversion can leave an empty H.264 file behind that must not hide
+      // a valid download.
+      const preferred = preferredJobFile(videoNames);
+      const candidates = preferred
+        ? [preferred, ...videoNames.filter((name) => name !== preferred)]
+        : videoNames;
+      let file: { filePath: string; fileName: string; createdAt: number } | null = null;
+      for (const name of candidates) {
+        const filePath = path.join(root, platform, job, name);
+        let info;
+        try {
+          info = await stat(filePath);
+        } catch {
           continue;
         }
-        const filePath = path.join(root, platform, job, name);
-        try {
-          const info = await stat(filePath);
-          if (!info.isFile() || info.size === 0) continue;
-          files.push({
-            id: diskJobId(path.join(platform, job, name)),
-            platform,
-            filePath,
-            fileName: name,
-            createdAt: info.mtimeMs,
-          });
-        } catch {
-          // Removed between listing and stat; skip.
+        if (info.isFile() && info.size > 0) {
+          file = { filePath, fileName: name, createdAt: info.mtimeMs };
+          break;
         }
       }
+      if (!file) continue;
+      files.push({
+        id: diskJobId(path.join(platform, job, file.fileName)),
+        platform,
+        filePath: file.filePath,
+        fileName: file.fileName,
+        createdAt: file.createdAt,
+      });
     }
   }
   return files.sort((a, b) => b.createdAt - a.createdAt);

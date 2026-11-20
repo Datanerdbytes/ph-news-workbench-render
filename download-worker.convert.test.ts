@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,6 +16,7 @@ import {
   isSafariFriendly,
   parseVideoStreams,
   prepareSafariFriendlyRendition,
+  removeSupersededSource,
   safariFriendlyFileName,
 } from "./download-worker";
 
@@ -188,6 +189,8 @@ describe("prepareSafariFriendlyRendition", () => {
       converted: false,
     });
     expect(calls.map((call) => call.command)).toEqual(["ffprobe"]);
+    // The source is the only copy — it must survive.
+    await expect(access(source)).resolves.toBeUndefined();
   });
 
   it("converts a codec Safari cannot decode and reports the new file", async () => {
@@ -217,7 +220,30 @@ describe("prepareSafariFriendlyRendition", () => {
     expect(ffmpeg?.args.at(-1)).toBe(path.join(dir, "clip (H.264).mp4"));
   });
 
-  it("throws when the conversion fails so the caller can keep the original", async () => {
+  it("removes the source file once the Safari rendition exists", async () => {
+    spawnMock.mockImplementation((command: string, args: string[]) => {
+      calls.push({ command, args });
+      if (command === "ffprobe") {
+        return fakeChild({ stdout: probePayload("av1", "yuv420p", "aac") });
+      }
+      const output = args.at(-1) as string;
+      return fakeChild({
+        beforeClose: async () => {
+          await writeFile(output, "converted");
+        },
+      });
+    });
+
+    const rendition = await prepareSafariFriendlyRendition(source, dir);
+    await removeSupersededSource(source, rendition.filePath);
+
+    // The job folder must hold exactly one video: the rendition. A leftover
+    // source file is what made one download look like two.
+    expect(await readdir(dir)).toEqual(["clip (H.264).mp4"]);
+    await expect(access(source)).rejects.toThrow();
+  });
+
+  it("keeps the source file when the conversion fails", async () => {
     spawnMock.mockImplementation((command: string) => {
       if (command === "ffprobe") {
         return fakeChild({ stdout: probePayload("av1", "yuv420p", "aac") });
@@ -231,5 +257,73 @@ describe("prepareSafariFriendlyRendition", () => {
     await expect(prepareSafariFriendlyRendition(source, dir)).rejects.toThrow(
       /Could not convert the video to H\.264/
     );
+
+    // The caller falls back to the original, so it must still be there.
+    await expect(access(source)).resolves.toBeUndefined();
+    expect(await readdir(dir)).toEqual(["clip.mp4"]);
+  });
+
+  it("leaves the source in place so a failed upload can fall back to it", async () => {
+    spawnMock.mockImplementation((command: string, args: string[]) => {
+      calls.push({ command, args });
+      if (command === "ffprobe") {
+        return fakeChild({ stdout: probePayload("av1", "yuv420p", "aac") });
+      }
+      const output = args.at(-1) as string;
+      return fakeChild({
+        beforeClose: async () => {
+          await writeFile(output, "converted");
+        },
+      });
+    });
+
+    await prepareSafariFriendlyRendition(source, dir);
+
+    // The source is only removed once the rendition is safely uploaded, so it
+    // must survive the conversion itself.
+    expect(await readdir(dir)).toEqual(["clip (H.264).mp4", "clip.mp4"]);
+  });
+});
+
+describe("removeSupersededSource", () => {
+  let dir = "";
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), "download-worker-"));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("deletes the pre-conversion source", async () => {
+    const source = path.join(dir, "clip.mp4");
+    const rendition = path.join(dir, "clip (H.264).mp4");
+    await writeFile(source, "raw-av1");
+    await writeFile(rendition, "converted-h264");
+
+    await removeSupersededSource(source, rendition);
+
+    expect(await readdir(dir)).toEqual(["clip (H.264).mp4"]);
+  });
+
+  it("never deletes the file it was given as the rendition", async () => {
+    const only = path.join(dir, "clip.mp4");
+    await writeFile(only, "same-file");
+
+    await removeSupersededSource(only, only);
+
+    expect(await readdir(dir)).toEqual(["clip.mp4"]);
+  });
+
+  it("does not throw when the source is already gone", async () => {
+    const source = path.join(dir, "missing.mp4");
+    const rendition = path.join(dir, "clip (H.264).mp4");
+    await writeFile(rendition, "converted-h264");
+
+    await expect(
+      removeSupersededSource(source, rendition)
+    ).resolves.toBeUndefined();
+    expect(await readdir(dir)).toEqual(["clip (H.264).mp4"]);
   });
 });
