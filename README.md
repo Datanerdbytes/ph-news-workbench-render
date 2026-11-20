@@ -132,6 +132,11 @@ Requirements and caveats:
 
 ### Media runner worker (Fly.io)
 
+> Not currently in use. The live app's runner runs on a Mac (next section);
+> the Fly app was destroyed. This path remains as the alternative for a host
+> that has to be cloud-side — note that Fly's trial plan stops machines every
+> 5 minutes, so it needs a payment method to hold a broadcast.
+
 The verified isolation runner needs OS namespaces to sandbox yt-dlp/ffmpeg.
 Render refuses them, so the sandboxed work can live on a small companion
 service instead: `media-runner.ts` (deployed via `Dockerfile.worker` +
