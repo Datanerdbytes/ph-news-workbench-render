@@ -49,20 +49,23 @@ export function decideTranscode(probe: VideoStreams): boolean {
 
 export type PumpArgsOptions = {
   source: string;
-  /** Local flv fifo the sandboxed side writes; the publisher reads it. */
-  outFifo: string;
   needsTranscode: boolean;
 };
 
 /**
  * Builds the ffmpeg command line for one pump attempt. `dest` is the fully
  * reassembled RTMPS ingest URL (see `assembleRtmpsUrl`) and is always the
- * last argv element, so every loggable rendering of the command can be
- * redacted with `redactStreamKey`.
+ * last argv element of the PUBLISHER's command — this source-side command
+ * never touches it.
+ *
+ * The sandboxed source side writes FLV to stdout (`pipe:1`). The caller pairs
+ * fd 1 with an already-open FIFO write-end (opened unsandboxed, since
+ * Seatbelt denies a sandboxed process opening a named pipe — see `makeFifo`).
+ * ffmpeg writes to the inherited fd and never opens the fifo path itself, so
+ * the media sandbox's filesystem policy never blocks the broadcast.
  */
 export function buildPumpArgs({
   source,
-  outFifo,
   needsTranscode,
 }: PumpArgsOptions): string[] {
   const args: string[] = [];
@@ -97,10 +100,11 @@ export function buildPumpArgs({
   } else {
     args.push('-c', 'copy');
   }
-  // The sandboxed side writes to the local fifo; the UNSANDBOXED publisher
-  // (see buildPublisherArgs) owns the RTMPS connection — its destination is
-  // the Graph-provided ingest URL, never user input.
-  args.push('-f', 'flv', outFifo);
+  // The sandboxed side writes FLV to stdout (`pipe:1`); the caller pairs fd 1
+  // with an already-open FIFO write-end. The UNSANDBOXED publisher (see
+  // buildPublisherArgs) owns the RTMPS connection — its destination is the
+  // Graph-provided ingest URL, never user input.
+  args.push('-y', '-f', 'flv', 'pipe:1');
   return args;
 }
 
@@ -115,7 +119,6 @@ export function buildPumpArgs({
 export type StagedPumpArgsOptions = {
   videoFifo: string;
   audioFifo: string;
-  outFifo: string;
 };
 
 /**
@@ -126,12 +129,15 @@ export type StagedPumpArgsOptions = {
  * throttles the feeders: the download cannot outrun the broadcast. Video is
  * copied (Facebook DASH is avc1/H.264; vp9-only video is a documented v1
  * limitation); audio is always transcoded to AAC, which handles opus/mp3 DASH
- * sources. `dest` stays the last argv element for `redactStreamKey`.
+ * sources.
+ *
+ * The sandboxed side writes FLV to stdout (`pipe:1`); the caller pairs fd 1
+ * with an already-open FIFO write-end (opened unsandboxed — see `makeFifo`).
+ * ffmpeg never opens the output fifo path itself, so Seatbelt can't deny it.
  */
 export function buildStagedPumpArgs({
   videoFifo,
   audioFifo,
-  outFifo,
 }: StagedPumpArgsOptions): string[] {
   return [
     '-re',
@@ -145,9 +151,10 @@ export function buildStagedPumpArgs({
     'aac',
     '-b:a',
     '128k',
+    '-y',
     '-f',
     'flv',
-    outFifo,
+    'pipe:1',
   ];
 }
 
@@ -256,7 +263,6 @@ const FEEDER_FATAL_STDERR_SIGNATURES = [
   'no longer available',
 ] as const;
 
-const MKFIFO_BIN = 'mkfifo';
 
 /**
  * Per-phase deadline for one fifo write-end open (see `openFifoWriteEnd`).
@@ -290,14 +296,17 @@ function stagedFifoPaths(): FifoPair {
 
 /**
  * Creates one fifo with owner-only permissions (`-m 0600` keeps other users
- * from reading the stream). `mkfifo` is spawned directly — the path is an
- * argv element, never shell-interpolated.
+ * from reading the stream). Spawned directly via `spawn` (not `guardedSpawn`)
+ * because spawning `mkfifo` through the sandboxed `guardedSpawn` fails on
+ * macOS: Seatbelt denies the `mkfifo()` syscall even inside allowed-write
+ * directories. The parent process is not sandboxed, so the plain spawn works.
+ * Both ffmpeg children open the pre-existing pipe.
  */
 async function makeFifo(fifoPath: string): Promise<void> {
-  return new Promise(async (resolve, reject) => {
-    const child = await guardedSpawn(MKFIFO_BIN, ['-m', '0600', fifoPath], {
-      stdio: ['ignore', 'ignore', 'pipe'],
-    });
+  const child = spawn(MKFIFO_BIN, ['-m', '0600', fifoPath], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  return new Promise((resolve, reject) => {
     let stderr = '';
     child.stderr?.on('data', (chunk: Buffer) => {
       stderr += chunk.toString();
@@ -357,6 +366,7 @@ export function redactStreamKey(
 
 const FFMPEG_BIN = 'ffmpeg';
 const FFPROBE_BIN = 'ffprobe';
+const MKFIFO_BIN = 'mkfifo';
 
 /** Upper bound for the stderr tail kept per pump — recorded errors quote it. */
 const STDERR_TAIL_CHARS = 8_000;
@@ -382,8 +392,6 @@ const FATAL_STDERR_SIGNATURES = [
 export type PumpStartRequest = {
   id: number | string;
   source: string;
-  /** Local flv fifo the sandboxed side writes; the publisher reads it. */
-  outFifo: string;
   dest: string;
   /**
    * How the pump consumes `source`: 'direct' opens the playable URL with
@@ -408,14 +416,18 @@ export type PumpStatus = {
   running: boolean;
   startedAt: Date | null;
   error: string | null;
+  /**
+   * True while a retry backoff timer is pending: the current attempt is dead
+   * but the pump is not terminal — the next spawn is already scheduled.
+   * External reconcilers must treat this as still running, never as an exit.
+   */
+  retrying: boolean;
 };
 
 export type PumpStopResult = { ok: true; wasRunning: boolean };
 
 type PumpParams = {
   source: string;
-  /** Local flv fifo written by the sandboxed side. */
-  outFifo: string;
   /** The RTMPS destination, used only for key redaction in logs. */
   dest: string;
   needsTranscode: boolean;
@@ -475,7 +487,6 @@ export class PumpManager {
   async start({
     id,
     source,
-    outFifo,
     dest,
     mode = 'direct',
   }: PumpStartRequest): Promise<PumpStartResult> {
@@ -517,7 +528,6 @@ export class PumpManager {
       id: key,
       params: {
         source,
-        outFifo,
         dest,
         needsTranscode: true,
         mode: mode === 'staged' ? 'staged' : 'direct',
@@ -525,7 +535,7 @@ export class PumpManager {
       child: null,
       feeders: [],
       fifos: null,
-      flvFifo: null,
+      flvFifo: path.join(os.tmpdir(), `live-pump-out-${randomUUID()}.flv`),
       publisher: null,
       pendingOpens: [],
       startedAt: new Date(),
@@ -579,6 +589,7 @@ export class PumpManager {
     try {
       await this.spawnAttempt(proc);
     } catch (error) {
+      this.teardownStagedAttempt(proc);
       this.procs.delete(key);
       return {
         ok: false,
@@ -635,11 +646,14 @@ export class PumpManager {
    */
   status(id: number | string): PumpStatus {
     const proc = this.procs.get(String(id));
-    if (!proc) return { running: false, startedAt: null, error: null };
+    if (!proc) {
+      return { running: false, startedAt: null, error: null, retrying: false };
+    }
     return {
       running: proc.running,
       startedAt: proc.startedAt,
       error: proc.lastError,
+      retrying: proc.retryTimer !== null,
     };
   }
 
@@ -661,31 +675,74 @@ export class PumpManager {
       this.log(proc, 'started', { transcode: proc.params.needsTranscode });
     }
 
+    proc.starting = true;
+    const flvFifo = proc.flvFifo!;
+    await makeFifo(flvFifo);
+    if (proc.stopping) {
+      this.unlinkFlvFifo(proc);
+      proc.starting = false;
+      return;
+    }
+
     // The publisher is the unsandboxed tail of the chain: it owns the only
     // RTMPS connection, whose destination is Facebook's Graph response. It
     // spawns first so its pending read-end pairs with ffmpeg's output open.
     proc.publisher = spawn(
       FFMPEG_BIN,
       buildPublisherArgs({
-        flvFifo: proc.params.outFifo,
+        flvFifo,
         dest: proc.params.dest,
       }),
       { stdio: ['ignore', 'pipe', 'pipe'], detached: true }
     );
     this.attachPublisherHandlers(proc, proc.publisher);
 
-    const child = await guardedSpawn(
-      FFMPEG_BIN,
-      buildPumpArgs({
-        source: proc.params.source,
-        outFifo: proc.params.outFifo,
-        needsTranscode: proc.params.needsTranscode,
-      }),
-      { stdio: ['ignore', 'pipe', 'pipe'] }
-    );
-    proc.child = child;
-    proc.running = true;
-    this.attachFfmpegHandlers(proc, child);
+    // Seatbelt denies the sandboxed side opening the named pipe itself —
+    // that's why `makeFifo` runs unsandboxed. ffmpeg writes FLV to stdout
+    // (`pipe:1`) instead, and fd 1 is paired with this write-end, opened
+    // unsandboxed *after* the publisher is already waiting on the read-end:
+    // the pair forms immediately and the sandboxed ffmpeg never opens the
+    // fifo path.
+    let flvWriteEnd: FileHandle | null = null;
+    try {
+      const opening = fsOpen(flvFifo, fsConstants.O_WRONLY);
+      proc.pendingOpens = [opening];
+      flvWriteEnd = await Promise.race([
+        opening,
+        new Promise<never>((_, reject) => {
+          const publisher = proc.publisher!;
+          publisher.once('error', (error: Error) =>
+            reject(new Error(`could not start the RTMPS publisher: ${error.message}`))
+          );
+          publisher.once('close', () =>
+            reject(new Error('the RTMPS publisher exited before the output pipe was ready'))
+          );
+        }),
+      ]);
+      proc.pendingOpens = [];
+
+      const child = await guardedSpawn(
+        FFMPEG_BIN,
+        buildPumpArgs({
+          source: proc.params.source,
+          needsTranscode: proc.params.needsTranscode,
+        }),
+        { stdio: ['ignore', flvWriteEnd.fd, 'pipe'] }
+      );
+      proc.child = child;
+      this.attachFfmpegHandlers(proc, child);
+      if (proc.stopping || proc.attemptSettled) {
+        this.teardownStagedAttempt(proc);
+        return;
+      }
+      proc.starting = false;
+      proc.running = true;
+    } finally {
+      // ffmpeg holds its own dup of the write-end from spawn; the parent's
+      // copy was only the handshake token — close it so nothing keeps the
+      // fifo open past the broadcast.
+      if (flvWriteEnd) void flvWriteEnd.close().catch(() => {});
+    }
   }
 
   /**
@@ -821,11 +878,12 @@ export class PumpManager {
     }
     proc.fifos = fifos;
 
+    let flvWriteEnd: FileHandle | null = null;
     let videoHandle: FileHandle | null = null;
     let audioHandle: FileHandle | null = null;
     try {
       // (2) The unsandboxed publisher spawns first (its pending flv read-end
-      // pairs when ffmpeg opens the output below)…
+      // pairs with the write-end opened below)…
       proc.publisher = spawn(
         FFMPEG_BIN,
         buildPublisherArgs({
@@ -836,15 +894,19 @@ export class PumpManager {
       );
       this.attachPublisherHandlers(proc, proc.publisher);
 
-      // (3) …then the sandboxed ffmpeg spawns, writing FLV to the flv fifo.
+      // (3) …then the write-end of the flv fifo is opened unsandboxed — it
+      // pairs with the publisher immediately — and only then does the
+      // sandboxed ffmpeg spawn, writing FLV to stdout (`pipe:1`). ffmpeg never
+      // opens the fifo path itself.
+      flvWriteEnd = await this.openFifoWriteEnd(proc, proc.publisher!, fifos.flv);
+
       const child = await guardedSpawn(
         FFMPEG_BIN,
         buildStagedPumpArgs({
           videoFifo: fifos.video,
           audioFifo: fifos.audio,
-          outFifo: fifos.flv,
         }),
-        { stdio: ['ignore', 'pipe', 'pipe'] }
+        { stdio: ['ignore', flvWriteEnd.fd, 'pipe'] }
       );
       proc.child = child;
       proc.running = true;
@@ -888,6 +950,7 @@ export class PumpManager {
       // The parent's copies of the write-end fds are always closed: after a
       // successful spawn the child holds its own dup; on failure a leaked
       // write-end would keep ffmpeg from ever seeing EOF.
+      if (flvWriteEnd) void flvWriteEnd.close().catch(() => {});
       if (videoHandle) void videoHandle.close().catch(() => {});
       if (audioHandle) void audioHandle.close().catch(() => {});
     }
@@ -1141,8 +1204,15 @@ export class PumpManager {
     proc.running = false;
     const pending = proc.pendingOpens;
     proc.pendingOpens = [];
-    if (pending.length && proc.fifos) {
-      void this.unblockPendingOpens(proc.fifos, pending);
+    // Every fifo a pending write-end open could be blocking on: the flv
+    // output (direct mode) plus the staged trio's video/audio pipes.
+    const paths = [
+      proc.flvFifo,
+      proc.fifos ? proc.fifos.video : null,
+      proc.fifos ? proc.fifos.audio : null,
+    ].filter((path): path is string => Boolean(path));
+    if (pending.length && paths.length) {
+      void this.unblockPendingOpens(paths, pending);
     }
     this.killAttemptProcs(proc);
     this.unlinkFifos(proc);
@@ -1157,20 +1227,17 @@ export class PumpManager {
    * waking both sides, then close everything.
    */
   private async unblockPendingOpens(
-    fifos: FifoPair,
+    fifoPaths: string[],
     pending: Promise<FileHandle>[]
   ): Promise<void> {
     await Promise.allSettled([
-      fsOpen(fifos.video, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK)
-        .then((handle) => handle.close())
-        .catch(() => {
-          // best-effort — ignore
-        }),
-      fsOpen(fifos.audio, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK)
-        .then((handle) => handle.close())
-        .catch(() => {
-          // best-effort — ignore
-        }),
+      ...fifoPaths.map((fifoPath) =>
+        fsOpen(fifoPath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK)
+          .then((handle) => handle.close())
+          .catch(() => {
+            // best-effort — ignore
+          })
+      ),
       ...pending.map((opening) =>
         opening
           .then((handle) => handle.close())
@@ -1189,10 +1256,11 @@ export class PumpManager {
     this.unlinkFlvFifo(proc);
   }
 
-  /** Unlinks the flv output fifo (best-effort, errors ignored). */
+  /** Unlinks the flv output fifo (best-effort, errors ignored). The path is
+   * kept: retries re-create the pipe at the same path, and the proc is deleted
+   * (not reused) once the pump is done for good, so nothing else nulls it. */
   private unlinkFlvFifo(proc: PumpProc): void {
     const flvFifo = proc.flvFifo;
-    proc.flvFifo = null;
     if (flvFifo) void fsUnlink(flvFifo).catch(() => {});
   }
 

@@ -13,6 +13,7 @@
     "test:e2e": "playwright test",
     "worker": "node --env-file=.env.local download-worker.ts",
     "worker:install": "bash scripts/install-download-worker.sh",
+    "media-runner": "tsx --env-file=.env.local media-runner.ts",
     "scheduler:sweep": "node --env-file=.env.local scripts/scheduler-sweep.mjs",
     "scheduler:install": "bash scripts/install-scheduler.sh",
     "prepare": "husky"
@@ -67,6 +68,7 @@
     "lint-staged": "^17.6.0",
     "postcss": "^8",
     "tailwindcss": "^4.3.4",
+    "tsx": "^4.23.15",
     "typescript": "^5",
     "vite": "^8.3.6",
     "vitest": "^5.1.0"

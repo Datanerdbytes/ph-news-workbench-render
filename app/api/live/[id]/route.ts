@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { getPumpManager } from '@/lib/live/pump';
+import { runnerMode, runnerRequest } from '@/lib/live/runner-config';
 import { withWorkspaceLiveLock } from '@/lib/live/workspace-lock';
 import { requirePublishingConnection } from '@/lib/publishing/connection';
 import { requireWorkspace, unauthorized } from '@/lib/session';
@@ -111,7 +112,17 @@ export async function DELETE(
           accessToken: connection.accessToken,
         });
 
-        getPumpManager().stop(stream.id);
+        // Media runner mode: the pump lives in the worker — relay the stop
+        // (best-effort; the worker's reconcile loop will surface reality on
+        // the next tick either way).
+        if (runnerMode()) {
+          await runnerRequest('/pump/stop', {
+            workspaceId: access.workspace.id,
+            streamId: String(stream.id),
+          });
+        } else {
+          getPumpManager().stop(stream.id);
+        }
         await sql`
           UPDATE live_streams
           SET status = 'ENDED', pump_status = 'stopped', updated_at = now()

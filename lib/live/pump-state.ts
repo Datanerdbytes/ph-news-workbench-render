@@ -102,6 +102,8 @@ export type PumpManagerStatus = {
   running: boolean;
   startedAt: Date | null;
   error: string | null;
+  /** Pending retry backoff — the pump is not terminal yet. */
+  retrying: boolean;
 };
 
 /**

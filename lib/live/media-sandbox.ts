@@ -22,6 +22,7 @@ import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
  * host interface addresses). Render/runtime-specific internal services live
  * behind these too.
  */
+// IPv4 rules also cover mapped IPv6; ::ffff:0:0/96 would deny all IPv4.
 const DENIED_RESOLVED_ADDRESSES = [
   '10.0.0.0/8',
   '172.16.0.0/12',
@@ -30,7 +31,6 @@ const DENIED_RESOLVED_ADDRESSES = [
   '0.0.0.0/8',
   'fc00::/7',
   'fe80::/10',
-  '::ffff:0:0/96',
   'ff00::/8',
 ] as const;
 
@@ -133,17 +133,28 @@ async function initialize(): Promise<void> {
 function verifyPlatformDependencies(): void {
   const missing: string[] = [];
   if (process.platform === 'darwin') {
-    if (!commandWorks('/usr/bin/sandbox-exec', ['h'])) {
+    // The binary probe cannot demand exit 0: sandbox-exec answers a usage
+    // probe with EX_USAGE (64) even when perfectly healthy.
+    if (!binaryRuns('/usr/bin/sandbox-exec', ['h'])) {
       missing.push('sandbox-exec');
     }
     if (!commandWorks('rg', ['--version'])) missing.push('ripgrep (rg)');
     // FUNCTIONAL probe: a tiny Seatbelt run — `--version` alone can lie.
-    if (!commandWorks('sandbox-exec', ['-p', '(allow default)', '/bin/echo', 'ok'])) {
+    // The profile carries the standard `(version 1)` header, which macOS 27
+    // requires and older releases accept.
+    if (
+      !commandWorks(
+        'sandbox-exec',
+        ['-p', '(version 1)(allow default)', '/bin/echo', 'ok']
+      )
+    ) {
       missing.push('a working sandbox-exec profile run');
     }
   } else if (process.platform === 'linux') {
     if (!commandWorks('bwrap', ['--version'])) missing.push('bubblewrap (bwrap)');
-    if (!commandWorks('socat', ['-u'])) missing.push('socat');
+    // `-h` prints the help and exits 0 — bare `-u` needs operands and exits 1
+    // even on a perfectly healthy binary.
+    if (!commandWorks('socat', ['-h'])) missing.push('socat');
     if (!commandWorks('rg', ['--version'])) missing.push('ripgrep (rg)');
     // FUNCTIONAL probe: bwrap must actually unshare namespaces. CI on
     // Ubuntu 24.04 runners (and Render-like runtimes) refuses unprivileged
@@ -167,6 +178,16 @@ function verifyPlatformDependencies(): void {
     throw new Error(
       `The media sandbox cannot run on this runtime: ${missing.join(', ')}.`
     );
+  }
+}
+
+/** The command spawned, ran, and exited — whatever its exit code. */
+function binaryRuns(command: string, args: string[]): boolean {
+  try {
+    const probe = spawnSync(command, args, { timeout: 15_000 });
+    return !probe.error;
+  } catch {
+    return false;
   }
 }
 

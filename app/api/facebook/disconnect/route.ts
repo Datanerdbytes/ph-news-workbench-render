@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { sql } from '@/lib/db';
 import { getPumpManager } from '@/lib/live/pump';
+import { runnerMode, runnerRequest } from '@/lib/live/runner-config';
 import { withWorkspaceLiveLock } from '@/lib/live/workspace-lock';
 import { requireWorkspace, unauthorized } from '@/lib/session';
 
@@ -19,8 +20,27 @@ export async function POST(request: NextRequest) {
       WHERE workspace_id = ${access.workspace.id}
     `) as unknown as { id: number }[];
 
-    const manager = getPumpManager();
-    for (const stream of streams) manager.stop(stream.id);
+    // Media runner mode: the pumps live in the worker — its stop-all clears
+    // everything this worker started for the workspace. Disconnecting must
+    // never fail because the runner is unreachable, so a transport failure
+    // only logs; the worker's reconcile loop reports the pumps' real state.
+    if (runnerMode()) {
+      const outcome = await runnerRequest('/pump/stop', {
+        workspaceId: access.workspace.id,
+      });
+      if (outcome.kind === 'unreachable') {
+        console.error(
+          JSON.stringify({
+            area: 'facebook-disconnect',
+            event: 'runner_stop_all_unreachable',
+            error: outcome.error,
+          })
+        );
+      }
+    } else {
+      const manager = getPumpManager();
+      for (const stream of streams) manager.stop(stream.id);
+    }
 
     // Keep pump_started_at and pump_error as history while making every owned
     // row terminal. The workspace predicate prevents cross-tenant changes.

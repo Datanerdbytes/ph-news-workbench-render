@@ -121,6 +121,56 @@ export default function LivePage() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    if (!streams.some((stream) => stream.pumpStatus === 'running')) return;
+
+    let stopped = false;
+    let inFlight = false;
+    const controller = new AbortController();
+    const timer = setInterval(async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        // Read runner state only; Facebook refresh remains a manual action.
+        const res = await fetch('/api/live', {
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+        const data = await res.json().catch(() => null);
+        if (stopped || !res.ok || !Array.isArray(data?.streams)) return;
+        const latest = new Map<number, Stream>(
+          data.streams.map((stream: Stream) => [stream.id, stream])
+        );
+        // Keep cards mounted and their editable fields unchanged. Only the
+        // pump status/error needs to follow the runner in the background.
+        setStreams((current) =>
+          current.map((stream) => {
+            const updated = latest.get(stream.id);
+            return updated
+              ? {
+                  ...stream,
+                  pumpStatus: updated.pumpStatus,
+                  pumpStartedAt: updated.pumpStartedAt,
+                  pumpError: updated.pumpError,
+                }
+              : stream;
+          })
+        );
+      } catch {
+        // Transient read failures leave the card intact; retry next tick.
+      } finally {
+        inFlight = false;
+      }
+    }, 5_000);
+
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+      controller.abort();
+    };
+    // Restart after a stream update so an older read cannot undo an action.
+  }, [streams]);
+
   async function previewSource() {
     const url = sourceUrl.trim();
     if (!url) return;
@@ -258,7 +308,9 @@ export default function LivePage() {
       }
     >
       <MediaPreviewMedia className="aspect-video">
-        {hasTitle ? (
+        {resolvedSource ? (
+          <SourcePreview {...resolvedSource} />
+        ) : hasTitle ? (
           <>
             <span className="absolute left-2.5 top-2.5 inline-flex items-center gap-1 rounded bg-black/50 px-1.5 py-0.5 font-mono text-[8px] font-bold tracking-[0.12em] text-white/85">
               <span
@@ -304,7 +356,7 @@ export default function LivePage() {
 
   return (
     <PublishPage eyebrow="Publishing" title="Live video">
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px] xl:items-start">
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_480px] xl:items-start">
         <div className="min-w-0 space-y-5">
           <ComposerCard icon={<Radio className="size-4" />} title="Create live stream">
             <div>
@@ -368,11 +420,6 @@ export default function LivePage() {
                 <p role="alert" className="mt-1 text-[11px] text-destructive">
                   {resolveError}
                 </p>
-              )}
-              {resolvedSource && (
-                <div className="mt-2">
-                  <SourcePreview {...resolvedSource} />
-                </div>
               )}
             </div>
             <ScheduleField

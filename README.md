@@ -130,6 +130,39 @@ Requirements and caveats:
   stream whose pump died that way reports **interrupted** on its card with a
   one-click restart; a dedicated background worker is the follow-up.
 
+### Media runner worker (Fly.io)
+
+The verified isolation runner needs OS namespaces to sandbox yt-dlp/ffmpeg.
+Render refuses them, so the sandboxed work can live on a small companion
+service instead: `media-runner.ts` (deployed via `Dockerfile.worker` +
+`fly.worker.toml` on Fly.io, whose Firecracker VMs permit the namespaces).
+The web app proxies to it over HTTPS with a shared bearer token whenever
+`MEDIA_RUNNER_URL` is set:
+
+- `POST /resolve` — the sandboxed yt-dlp link resolution (the Preview step).
+- `POST /pump/start` / `POST /pump/stop` — the live pump, including the
+  stream-key decryption and the Facebook ingest allowlist.
+- The worker owns every `live_streams.pump_status` write in this mode and
+  reconciles crashed pumps back into the DB within ~3s; a worker restart
+  marks orphaned `running` rows `failed` at boot.
+
+Setup:
+
+```bash
+# Secrets on the worker (DATABASE_URL + BETTER_AUTH_SECRET are the same
+# values the web app uses; MEDIA_RUNNER_TOKEN is shared with the web app):
+fly secrets set -a ph-news-media-runner DATABASE_URL=... BETTER_AUTH_SECRET=... MEDIA_RUNNER_TOKEN=...
+# Deploy:
+fly deploy -c fly.worker.toml -a ph-news-media-runner
+# Web app env (Render): MEDIA_RUNNER_URL=https://ph-news-media-runner.fly.dev
+#                       MEDIA_RUNNER_TOKEN=<same token>
+```
+
+Without `MEDIA_RUNNER_URL` the web app behaves exactly as before (in-process
+pump + resolver on any runtime where the sandbox passes — local dev, for
+instance). With it set, production gets full Resolve and Go live through the
+worker while the web service itself stays sandbox-free.
+
 ## Local Docker test
 
 ```bash

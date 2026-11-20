@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
+import { createResolvedAddressGuard } from '@anthropic-ai/sandbox-runtime/dist/sandbox/resolved-address-guard.js';
 
 const { spawnSyncMock } = vi.hoisted(() => ({ spawnSyncMock: vi.fn() }));
 
@@ -72,6 +74,47 @@ describe('ensureMediaSandbox', () => {
     expect(state()?.reason).toContain('user namespaces');
     expect(mediaSandboxAvailability().available).toBe(false);
     platformSpy.mockRestore();
+  });
+
+  it.each([
+    ['146.75.22.132', true],
+    ['::ffff:146.75.22.132', true],
+    ['2606:4700:4700::1111', true],
+    ['127.0.0.1', false],
+    ['::1', false],
+    ['::ffff:127.0.0.1', false],
+    ['10.0.0.1', false],
+    ['::ffff:10.0.0.1', false],
+    ['172.16.0.1', false],
+    ['192.168.0.1', false],
+    ['100.64.0.1', false],
+    ['169.254.169.254', false],
+    ['::ffff:169.254.169.254', false],
+    ['168.63.129.16', false],
+    ['0.0.0.0', false],
+    ['fc00::1', false],
+    ['fe80::1', false],
+    ['224.0.0.1', false],
+    ['ff02::1', false],
+  ])('configured runtime policy permits %s: %s', async (address, permitted) => {
+    spawnSyncMock.mockReturnValue({ status: 0 });
+    (globalThis as unknown as { __phMediaSandbox?: unknown }).__phMediaSandbox = {
+      state: 'uninitialized',
+      reason: null,
+      initializing: null,
+    };
+
+    await ensureMediaSandbox();
+
+    const config = vi.mocked(SandboxManager.initialize).mock.calls.at(-1)?.[0];
+    expect(config?.network.deniedResolvedAddresses).toBeDefined();
+    const guard = createResolvedAddressGuard({
+      allowedDomains: config?.network.allowedDomains,
+      deniedDomains: config?.network.deniedDomains,
+      deniedResolvedAddresses: config?.network.deniedResolvedAddresses,
+      localAddresses: () => [],
+    });
+    expect(guard.permits('video.example', address, 443)).toBe(permitted);
   });
 
   it('fails closed when an operator disables the sandbox', async () => {
