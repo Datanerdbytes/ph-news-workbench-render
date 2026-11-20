@@ -308,7 +308,9 @@ export default function LivePage() {
       }
     >
       <MediaPreviewMedia className="aspect-video">
-        {hasTitle ? (
+        {resolvedSource ? (
+          <SourcePreview {...resolvedSource} />
+        ) : hasTitle ? (
           <>
             <span className="absolute left-2.5 top-2.5 inline-flex items-center gap-1 rounded bg-black/50 px-1.5 py-0.5 font-mono text-[8px] font-bold tracking-[0.12em] text-white/85">
               <span
@@ -418,11 +420,6 @@ export default function LivePage() {
                 <p role="alert" className="mt-1 text-[11px] text-destructive">
                   {resolveError}
                 </p>
-              )}
-              {resolvedSource && (
-                <div className="mt-2">
-                  <SourcePreview {...resolvedSource} />
-                </div>
               )}
             </div>
             <ScheduleField

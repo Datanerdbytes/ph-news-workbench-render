@@ -1,9 +1,6 @@
 import { NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { decryptToken } from '@/lib/facebook-token';
-import { randomUUID } from 'node:crypto';
-import os from 'node:os';
-import path from 'node:path';
 import {
   getPumpManager,
   isFacebookIngestUrl,
@@ -126,9 +123,6 @@ async function startPump(workspaceId: string, stream: PumpRow) {
     // no playable URL) are piped through yt-dlp feeders, everything else —
     // including legacy rows predating the column — takes the ffprobe path.
     mode: parseSourceMode(stream.source_mode) ?? 'direct',
-    // The local flv fifo: the sandboxed side writes it, the publisher reads
-    // it. Fresh per start; the manager unlinks it on every exit path.
-    outFifo: path.join(os.tmpdir(), `live-pump-out-${randomUUID()}.flv`),
     // Never logged or returned — the manager redacts it everywhere it lands.
     dest: ingestUrl,
   });

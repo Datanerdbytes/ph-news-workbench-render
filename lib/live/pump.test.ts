@@ -18,6 +18,7 @@ const { spawnMock, fsMocks, isolationMock, processKillMock } = vi.hoisted(() => 
     close: vi.fn(async () => {}),
   }));
   const unlink = vi.fn(async () => {});
+  const mkfifo = vi.fn(async () => {});
   return {
     spawnMock,
     isolationMock,
@@ -25,6 +26,7 @@ const { spawnMock, fsMocks, isolationMock, processKillMock } = vi.hoisted(() => 
     fsMocks: {
       open,
       unlink,
+      mkfifo,
       constants: { O_WRONLY: 1, O_RDONLY: 0, O_NONBLOCK: 4 },
     },
   };
@@ -47,6 +49,7 @@ vi.mock('node:fs/promises', () => ({
   constants: fsMocks.constants,
   open: fsMocks.open,
   unlink: fsMocks.unlink,
+  mkfifo: fsMocks.mkfifo,
 }));
 
 import {
@@ -267,6 +270,7 @@ beforeEach(() => {
   spawnMock.mockReset();
   fsMocks.open.mockReset();
   fsMocks.unlink.mockReset();
+  fsMocks.mkfifo.mockReset();
   processKillMock.mockReset();
   // Verified runner present by default; the quarantine test overrides this.
   isolationMock.mockImplementation(() => ({
@@ -317,7 +321,7 @@ describe('decideTranscode', () => {
 
 describe('buildPumpArgs', () => {
   it('copy path over live HLS adds reconnect flags, -re, -c copy, -f flv and puts the flv output fifo last', () => {
-    const args = buildPumpArgs({ source: LIVE_HLS, outFifo: OUT_FIFO, needsTranscode: false });
+    const args = buildPumpArgs({ source: LIVE_HLS, needsTranscode: false });
     expect(args.slice(0, 6)).toEqual([
       '-reconnect',
       '1',
@@ -331,23 +335,23 @@ describe('buildPumpArgs', () => {
     expect(args).toContain('copy');
     expect(args).toContain('-f');
     expect(args).toContain('flv');
-    expect(args[args.length - 1]).toBe(OUT_FIFO);
+    expect(args[args.length - 1]).toBe('pipe:1');
     // The RTMPS destination moved to the unsandboxed publisher.
     expect(args).not.toContain(DEST);
     expect(args).not.toContain('libx264');
   });
 
   it('copy path over a plain file source omits the reconnect flags', () => {
-    const args = buildPumpArgs({ source: VOD_MP4, outFifo: OUT_FIFO, needsTranscode: false });
+    const args = buildPumpArgs({ source: VOD_MP4, needsTranscode: false });
     expect(args).not.toContain('-reconnect');
     expect(args).toContain('-re');
-    expect(args[args.length - 1]).toBe(OUT_FIFO);
+    expect(args[args.length - 1]).toBe('pipe:1');
     // The RTMPS destination moved to the unsandboxed publisher.
     expect(args).not.toContain(DEST);
   });
 
   it('transcode path swaps -c copy for libx264 + aac + yuv420p and puts the flv output fifo last', () => {
-    const args = buildPumpArgs({ source: LIVE_HLS, outFifo: OUT_FIFO, needsTranscode: true });
+    const args = buildPumpArgs({ source: LIVE_HLS, needsTranscode: true });
     expect(args).toContain('libx264');
     expect(args).toContain('veryfast');
     expect(args).toContain('23');
@@ -355,7 +359,7 @@ describe('buildPumpArgs', () => {
     expect(args).toContain('aac');
     expect(args).toContain('128k');
     expect(args).not.toContain('copy');
-    expect(args[args.length - 1]).toBe(OUT_FIFO);
+    expect(args[args.length - 1]).toBe('pipe:1');
     // The RTMPS destination moved to the unsandboxed publisher.
     expect(args).not.toContain(DEST);
   });
@@ -363,8 +367,8 @@ describe('buildPumpArgs', () => {
 
 describe('FIFO output writing', () => {
   it('allows both source modes to write their pre-created output pipe without prompting', () => {
-    expect(buildPumpArgs({ source: LIVE_HLS, outFifo: OUT_FIFO, needsTranscode: false })).toContain('-y');
-    expect(buildStagedPumpArgs({ videoFifo: '/tmp/v', audioFifo: '/tmp/a', outFifo: OUT_FIFO })).toContain('-y');
+    expect(buildPumpArgs({ source: LIVE_HLS, needsTranscode: false })).toContain('-y');
+    expect(buildStagedPumpArgs({ videoFifo: '/tmp/v', audioFifo: '/tmp/a' })).toContain('-y');
   });
 });
 
@@ -403,7 +407,6 @@ describe('buildStagedPumpArgs', () => {
     const args = buildStagedPumpArgs({
       videoFifo: '/tmp/pump-video',
       audioFifo: '/tmp/pump-audio',
-      outFifo: '/tmp/pump-out.flv',
     });
     expect(args.slice(0, 5)).toEqual([
       '-re',
@@ -416,7 +419,7 @@ describe('buildStagedPumpArgs', () => {
     expect(args[args.indexOf('-c:a') + 1]).toBe('aac');
     expect(args).toContain('128k');
     expect(args[args.indexOf('-f') + 1]).toBe('flv');
-    expect(args[args.length - 1]).toBe('/tmp/pump-out.flv');
+    expect(args[args.length - 1]).toBe('pipe:1');
     // The RTMPS destination moved to the unsandboxed publisher.
     expect(args).not.toContain(DEST);
     expect(args).not.toContain('libx264');
@@ -511,7 +514,7 @@ describe('PumpManager gate', () => {
     vi.stubEnv('HYPERFRAMES_ENABLE_RENDER', '');
     spawnMock.mockImplementation(() => makeFakeChild());
 
-    const result = await manager.start({ id: 9, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    const result = await manager.start({ id: 9, source: LIVE_HLS,dest: DEST });
 
     expect(result).toEqual({
       ok: false,
@@ -528,7 +531,7 @@ describe('PumpManager state machine', () => {
     stubGateOn();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
 
-    const result = await manager.start({ id: 7, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    const result = await manager.start({ id: 7, source: LIVE_HLS,dest: DEST });
 
     expect(result).toEqual({ ok: true });
     // Two ffmpeg kids per attempt: the publisher and the sandboxed source.
@@ -542,9 +545,9 @@ describe('PumpManager state machine', () => {
   it('a second start for a live pump is rejected without spawning again', async () => {
     stubGateOn();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
-    await manager.start({ id: 7, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await manager.start({ id: 7, source: LIVE_HLS,dest: DEST });
 
-    const second = await manager.start({ id: 7, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    const second = await manager.start({ id: 7, source: LIVE_HLS,dest: DEST });
 
     expect(second).toEqual({
       ok: false,
@@ -567,7 +570,7 @@ describe('PumpManager state machine', () => {
     stubGateOn();
     vi.useFakeTimers();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
-    await startPump({ id: 7, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await startPump({ id: 7, source: LIVE_HLS,dest: DEST });
 
     expect(manager.stop(7)).toEqual({ ok: true, wasRunning: true });
     // No feeders (direct mode): the source ffmpeg is signalled first, then
@@ -603,7 +606,7 @@ describe('PumpManager state machine', () => {
     stubGateOn();
     vi.useFakeTimers();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
-    await startPump({ id: 7, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await startPump({ id: 7, source: LIVE_HLS,dest: DEST });
 
     manager.stop(7);
     // The source side EOFs and exits 0 within the grace period.
@@ -627,7 +630,7 @@ describe('PumpManager publisher leg', () => {
   it('does not publish when direct pipe creation fails', async () => {
     stubGateOn();
     const { ffmpegKids } = useSpawns({ mkfifoFails: true });
-    const result = await manager.start({ id: 44, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    const result = await manager.start({ id: 44, source: LIVE_HLS,dest: DEST });
     expect(result).toMatchObject({ ok: false, reason: 'spawn_failed' });
     expect(ffmpegKids).toHaveLength(0);
     expect(manager.status(44).running).toBe(false);
@@ -642,9 +645,11 @@ describe('PumpManager publisher leg', () => {
       if (command === 'mkfifo') manager.stop(45);
       return child;
     });
-    await manager.start({ id: 45, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await manager.start({ id: 45, source: LIVE_HLS, dest: DEST });
     expect(ffmpegKids).toHaveLength(0);
-    expect(fsMocks.unlink).toHaveBeenCalledWith(OUT_FIFO);
+    expect(fsMocks.unlink).toHaveBeenCalledWith(
+      expect.stringMatching(/live-pump-out-.+\.flv$/)
+    );
     expect(manager.status(45).running).toBe(false);
   });
 
@@ -662,25 +667,36 @@ describe('PumpManager publisher leg', () => {
       return child;
     });
 
-    const result = await manager.start({ id: 43, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    const result = await manager.start({ id: 43, source: LIVE_HLS,dest: DEST });
 
     expect(result).toEqual({ ok: true });
     expect(mkfifoKids).toHaveLength(1);
-    expect(spawnMock).toHaveBeenCalledWith('mkfifo', ['-m', '0600', OUT_FIFO], expect.anything());
+    expect(spawnMock).toHaveBeenCalledWith(
+      'mkfifo',
+      ['-m', '0600', expect.stringMatching(/live-pump-out-.+\.flv$/)],
+      expect.anything()
+    );
     closeChild(ffmpegKids[1], 0);
-    expect(fsMocks.unlink).toHaveBeenCalledWith(OUT_FIFO);
+    expect(fsMocks.unlink).toHaveBeenCalledWith(
+      expect.stringMatching(/live-pump-out-.+\.flv$/)
+    );
   });
 
   it('spawns the unsandboxed publisher first (reading the out fifo, dest last) and the sandboxed source second', async () => {
     stubGateOn();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
 
-    await manager.start({ id: 40, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await manager.start({ id: 40, source: LIVE_HLS,dest: DEST });
 
     expect(ffmpegKids).toHaveLength(2);
     const { publisher, source } = ffmpegArgsOf();
     // The publisher reads the pump's out fifo and copies to the ingest URL.
-    expect(publisher).toEqual(buildPublisherArgs({ flvFifo: OUT_FIFO, dest: DEST }));
+    expect(publisher).toEqual(
+      buildPublisherArgs({
+        flvFifo: expect.stringMatching(/live-pump-out-.+\.flv$/),
+        dest: DEST,
+      })
+    );
     // It is the one child spawned detached outside the sandbox.
     const publisherCall = spawnMock.mock.calls.find(
       ([command, args]) => command === 'ffmpeg' && (args as string[]).at(-1) === DEST
@@ -688,7 +704,7 @@ describe('PumpManager publisher leg', () => {
     expect(publisherCall?.[2]).toMatchObject({ detached: true });
     // The source never sees the dest — it writes the local fifo instead.
     expect(source).toEqual(
-      buildPumpArgs({ source: LIVE_HLS, outFifo: OUT_FIFO, needsTranscode: false })
+      buildPumpArgs({ source: LIVE_HLS, needsTranscode: false })
     );
     expect(source).not.toContain(DEST);
 
@@ -701,7 +717,7 @@ describe('PumpManager publisher leg', () => {
     ];
     const sourceSpawn = spawnMock.mock.invocationCallOrder[
       spawnMock.mock.calls.findIndex(
-        ([command, args]) => command === 'ffmpeg' && (args as string[]).at(-1) === OUT_FIFO
+        ([command, args]) => command === 'ffmpeg' && (args as string[]).at(-1) === 'pipe:1'
       )
     ];
     expect(publisherSpawn).toBeLessThan(sourceSpawn);
@@ -711,7 +727,7 @@ describe('PumpManager publisher leg', () => {
     stubGateOn();
     vi.useFakeTimers();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
-    await startPump({ id: 41, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await startPump({ id: 41, source: LIVE_HLS,dest: DEST });
 
     closeChild(ffmpegKids[0], 1);
 
@@ -725,7 +741,7 @@ describe('PumpManager publisher leg', () => {
     expect(ffmpegKids).toHaveLength(4);
     const retry = ffmpegArgsOf(1);
     expect(retry.publisher.at(-1)).toBe(DEST);
-    expect(retry.source.at(-1)).toBe(OUT_FIFO);
+    expect(retry.source.at(-1)).toBe('pipe:1');
 
     // The retried attempt ends cleanly when the new source EOFs.
     closeChild(ffmpegKids[3], 0);
@@ -740,7 +756,7 @@ describe('PumpManager publisher leg', () => {
     stubGateOn();
     vi.useFakeTimers();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
-    await startPump({ id: 42, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await startPump({ id: 42, source: LIVE_HLS,dest: DEST });
 
     // Facebook closed cleanly — the attempt keeps running until the source
     // side EOFs.
@@ -761,7 +777,7 @@ describe('PumpManager retry policy', () => {
     stubGateOn();
     vi.useFakeTimers();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
-    await startPump({ id: 7, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await startPump({ id: 7, source: LIVE_HLS,dest: DEST });
     expect(ffmpegKids).toHaveLength(2);
 
     // Attempt 1 fails → 2s backoff.
@@ -803,7 +819,7 @@ describe('PumpManager retry policy', () => {
     stubGateOn();
     vi.useFakeTimers();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
-    await startPump({ id: 7, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await startPump({ id: 7, source: LIVE_HLS,dest: DEST });
 
     closeChild(ffmpegKids[1], 1);
     await vi.advanceTimersByTimeAsync(RETRY_BACKOFF_MS[0]);
@@ -822,7 +838,7 @@ describe('PumpManager retry policy', () => {
     stubGateOn();
     vi.useFakeTimers();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
-    await startPump({ id: 7, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await startPump({ id: 7, source: LIVE_HLS,dest: DEST });
 
     closeChild(ffmpegKids[1], 0);
     await vi.advanceTimersByTimeAsync(60_000);
@@ -837,10 +853,10 @@ describe('PumpManager retry policy', () => {
     stubGateOn();
     vi.useFakeTimers();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
-    await startPump({ id: 7, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await startPump({ id: 7, source: LIVE_HLS,dest: DEST });
 
     closeChild(ffmpegKids[1], 1);
-    const second = await manager.start({ id: 7, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    const second = await manager.start({ id: 7, source: LIVE_HLS,dest: DEST });
 
     expect(second).toEqual({
       ok: false,
@@ -855,7 +871,7 @@ describe('PumpManager stderr watchdog', () => {
     stubGateOn();
     vi.useFakeTimers();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
-    await startPump({ id: 7, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await startPump({ id: 7, source: LIVE_HLS,dest: DEST });
 
     stderrLine(ffmpegKids[1], 'rtmp://ingest: command "publish" failed: Already publishing');
     expect(processKillMock).toHaveBeenCalledWith(ffmpegKids[1], 'SIGKILL');
@@ -873,7 +889,7 @@ describe('PumpManager stderr watchdog', () => {
     stubGateOn();
     vi.useFakeTimers();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
-    await startPump({ id: 7, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await startPump({ id: 7, source: LIVE_HLS,dest: DEST });
 
     stderrLine(ffmpegKids[1], 'tcp://live-api-s.facebook.com:443: Connection refused');
     closeChild(ffmpegKids[1], 1);
@@ -889,7 +905,7 @@ describe('PumpManager key secrecy', () => {
     stubGateOn();
     vi.useFakeTimers();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
-    await startPump({ id: 11, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await startPump({ id: 11, source: LIVE_HLS,dest: DEST });
 
     stderrLine(
       ffmpegKids[1],
@@ -920,7 +936,7 @@ describe('PumpManager key secrecy', () => {
     stubGateOn();
     vi.useFakeTimers();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
-    await startPump({ id: 11, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await startPump({ id: 11, source: LIVE_HLS,dest: DEST });
 
     stderrLine(ffmpegKids[1], `publish rejected for ${STREAM_KEY}: Already publishing`);
     closeChild(ffmpegKids[1], 1);
@@ -937,7 +953,7 @@ describe('PumpManager ffprobe path', () => {
     stubGateOn();
     const { ffprobeKids } = useSpawns({ probe: PROBE_COPY });
 
-    await manager.start({ id: 3, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await manager.start({ id: 3, source: LIVE_HLS,dest: DEST });
 
     expect(ffprobeKids).toHaveLength(1);
     expect(spawnMock).toHaveBeenCalledWith(
@@ -950,7 +966,7 @@ describe('PumpManager ffprobe path', () => {
     const cIndex = source.indexOf('-c');
     expect(source[cIndex + 1]).toBe('copy');
     expect(source).not.toContain('libx264');
-    expect(source[source.length - 1]).toBe(OUT_FIFO);
+    expect(source[source.length - 1]).toBe('pipe:1');
     // The RTMPS destination moved to the unsandboxed publisher.
     expect(source).not.toContain(DEST);
   });
@@ -959,7 +975,7 @@ describe('PumpManager ffprobe path', () => {
     stubGateOn();
     const { ffmpegKids } = useSpawns({ probe: PROBE_AV1 });
 
-    await manager.start({ id: 3, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await manager.start({ id: 3, source: LIVE_HLS,dest: DEST });
 
     const { source } = ffmpegArgsOf();
     expect(source).toContain('libx264');
@@ -973,7 +989,7 @@ describe('PumpManager ffprobe path', () => {
     stubGateOn();
     const { ffprobeKids } = useSpawns({ probeFails: true });
 
-    await manager.start({ id: 3, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await manager.start({ id: 3, source: LIVE_HLS,dest: DEST });
 
     expect(ffprobeKids).toHaveLength(1);
     const { source } = ffmpegArgsOf();
@@ -1001,7 +1017,7 @@ describe('PumpManager ffprobe path', () => {
       return kid;
     });
 
-    await manager.start({ id: 3, source: LIVE_HLS, outFifo: OUT_FIFO, dest: DEST });
+    await manager.start({ id: 3, source: LIVE_HLS,dest: DEST });
 
     const { source } = ffmpegArgsOf();
     expect(source).toContain('libx264');
@@ -1017,8 +1033,7 @@ describe('PumpManager staged mode', () => {
     const result = await manager.start({
       id: 21,
       source: FB_REPLAY,
-      outFifo: OUT_FIFO,
-      mode: 'staged',
+        mode: 'staged',
       dest: DEST,
     });
 
@@ -1061,7 +1076,8 @@ describe('PumpManager staged mode', () => {
       'flv',
       DEST,
     ]);
-    // The sandboxed source: paced copy of both input fifos into the flv fifo.
+    // The sandboxed source: paced copy of both input fifos into stdout
+    // (`pipe:1` — its fd is paired with the flv fifo's write-end).
     const sourceArgs = ffmpegArgsOf().source;
     expect(sourceArgs.slice(0, 5)).toEqual([
       '-re',
@@ -1070,7 +1086,7 @@ describe('PumpManager staged mode', () => {
       '-i',
       fifos.audio,
     ]);
-    expect(sourceArgs[sourceArgs.length - 1]).toBe(fifos.flv);
+    expect(sourceArgs[sourceArgs.length - 1]).toBe('pipe:1');
     expect(sourceArgs).not.toContain(DEST);
 
     expect(feederKids).toHaveLength(2);
@@ -1119,40 +1135,44 @@ describe('PumpManager staged mode', () => {
       ([command, args]) => command === 'ffmpeg' && (args as string[]).at(-1) === DEST
     );
     const sourceCallIndex = callIndexOf(
-      ([command, args]) => command === 'ffmpeg' && (args as string[]).at(-1) === fifos.flv
+      ([command, args]) => command === 'ffmpeg' && (args as string[]).at(-1) === 'pipe:1'
     );
     // The publisher spawns before the sandboxed side so its pending read-end
-    // pairs with ffmpeg's output open.
+    // pairs with the write-end opened below.
     expect(spawnOrder(publisherCallIndex)).toBeLessThan(spawnOrder(sourceCallIndex));
-    // ffmpeg's open(v.fifo, O_RDONLY) pends before the parent's writer arrives.
-    expect(spawnOrder(sourceCallIndex)).toBeLessThan(
-      fsMocks.open.mock.invocationCallOrder[0]
+    // The flv write-end open pairs with the publisher's pending read-end and
+    // must complete before the sandboxed ffmpeg spawns with that fd.
+    expect(fsMocks.open.mock.invocationCallOrder[0]).toBeLessThan(
+      spawnOrder(sourceCallIndex)
     );
-    // The video feeder spawns right after the video open resolves — it must
-    // already be writing while ffmpeg probes v.fifo.
+    // The video feeder spawns right after the video open resolves — its bytes
+    // are what lets ffmpeg's probe of v.fifo complete.
     const feederCallIndexes = spawnMock.mock.calls.reduce<number[]>(
       (acc, call, index) => (call[0] === 'yt-dlp' ? [...acc, index] : acc),
       []
     );
-    expect(fsMocks.open.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(fsMocks.open.mock.invocationCallOrder[1]).toBeLessThan(
       spawnOrder(feederCallIndexes[0])
     );
     // a.fifo is only opened once the video feeder exists.
     expect(spawnOrder(feederCallIndexes[0])).toBeLessThan(
-      fsMocks.open.mock.invocationCallOrder[1]
+      fsMocks.open.mock.invocationCallOrder[2]
     );
     // The audio feeder spawns right after the audio open resolves.
-    expect(fsMocks.open.mock.invocationCallOrder[1]).toBeLessThan(
+    expect(fsMocks.open.mock.invocationCallOrder[2]).toBeLessThan(
       spawnOrder(feederCallIndexes[1])
     );
-    // The opens interleave per-fifo: video first, audio second.
+    // The opens interleave per-fifo: flv (paired with the publisher) first,
+    // then video, then audio.
     expect(fsMocks.open.mock.calls.map((call) => call[0])).toEqual([
+      fifos.flv,
       fifos.video,
       fifos.audio,
     ]);
 
     // The parent closed its copies of the write-end fds after spawning.
-    expect(fsMocks.open).toHaveBeenCalledTimes(2);
+    expect(fsMocks.open).toHaveBeenCalledTimes(3);
+    expect(fsMocks.open).toHaveBeenCalledWith(fifos.flv, 1);
     expect(fsMocks.open).toHaveBeenCalledWith(fifos.video, 1);
     expect(fsMocks.open).toHaveBeenCalledWith(fifos.audio, 1);
 
@@ -1167,8 +1187,7 @@ describe('PumpManager staged mode', () => {
     const result = await manager.start({
       id: 21,
       source: FB_REPLAY,
-      outFifo: OUT_FIFO,
-      mode: 'staged',
+        mode: 'staged',
       dest: DEST,
     });
 
@@ -1192,8 +1211,7 @@ describe('PumpManager staged mode', () => {
     await startPump({
       id: 22,
       source: FB_REPLAY,
-      outFifo: OUT_FIFO,
-      mode: 'staged',
+        mode: 'staged',
       dest: DEST,
     });
     expect(mkfifoKids).toHaveLength(3);
@@ -1233,8 +1251,7 @@ describe('PumpManager staged mode', () => {
     await startPump({
       id: 23,
       source: FB_REPLAY,
-      outFifo: OUT_FIFO,
-      mode: 'staged',
+        mode: 'staged',
       dest: DEST,
     });
 
@@ -1274,8 +1291,7 @@ describe('PumpManager staged mode', () => {
     await startPump({
       id: 24,
       source: FB_REPLAY,
-      outFifo: OUT_FIFO,
-      mode: 'staged',
+        mode: 'staged',
       dest: DEST,
     });
 
@@ -1321,8 +1337,7 @@ describe('PumpManager staged mode', () => {
     await manager.start({
       id: 25,
       source: FB_REPLAY,
-      outFifo: OUT_FIFO,
-      mode: 'staged',
+        mode: 'staged',
       dest: DEST,
     });
 
@@ -1348,8 +1363,7 @@ describe('PumpManager staged mode', () => {
     const result = await manager.start({
       id: 26,
       source: LIVE_HLS,
-      outFifo: OUT_FIFO,
-      mode: 'direct',
+        mode: 'direct',
       dest: DEST,
     });
 
@@ -1359,7 +1373,7 @@ describe('PumpManager staged mode', () => {
     expect(source).toContain('-re');
     expect(source[source.indexOf('-c') + 1]).toBe('copy');
     expect(source).not.toContain('libx264');
-    expect(source[source.length - 1]).toBe(OUT_FIFO);
+    expect(source[source.length - 1]).toBe('pipe:1');
     // The RTMPS destination moved to the unsandboxed publisher.
     expect(source).not.toContain(DEST);
   });
@@ -1368,15 +1382,14 @@ describe('PumpManager staged mode', () => {
     stubGateOn();
     vi.useFakeTimers();
     const { ffmpegKids, feederKids, mkfifoKids } = useSpawns();
-    // The video write-end never pairs in attempt 1: the mocked open hangs
-    // (a slow-CDN first burst starving ffmpeg's probe past the deadline).
+    // The flv write-end never pairs — the publisher never opens its read-end,
+    // simulating wedged publisher startup past the per-phase deadline.
     fsMocks.open.mockImplementationOnce(() => new Promise(() => {}));
 
     const pendingStart = manager.start({
       id: 28,
       source: FB_REPLAY,
-      outFifo: OUT_FIFO,
-      mode: 'staged',
+        mode: 'staged',
       dest: DEST,
     });
     await vi.advanceTimersByTimeAsync(FIFO_OPEN_TIMEOUT_MS);
@@ -1385,7 +1398,8 @@ describe('PumpManager staged mode', () => {
     const result = await pendingStart;
     expect(result).toEqual({ ok: true });
     expect(mkfifoKids).toHaveLength(3);
-    expect(ffmpegKids).toHaveLength(2);
+    // Only the publisher was spawned before the write-end open hung.
+    expect(ffmpegKids).toHaveLength(1);
     expect(manager.status(28).running).toBe(false);
 
     // The timed-out attempt was fully torn down: pending write-end open
@@ -1395,7 +1409,6 @@ describe('PumpManager staged mode', () => {
     expect(fsMocks.unlink).toHaveBeenCalledWith(firstFifos.audio);
     expect(fsMocks.unlink).toHaveBeenCalledWith(firstFifos.flv);
     expect(fsMocks.open).toHaveBeenCalledWith(firstFifos.video, 4); // O_RDONLY | O_NONBLOCK
-    expect(processKillMock).toHaveBeenCalledWith(ffmpegKids[1], 'SIGKILL');
     expect(processKillMock).toHaveBeenCalledWith(ffmpegKids[0], 'SIGKILL');
 
     await vi.advanceTimersByTimeAsync(RETRY_BACKOFF_MS[0]);
@@ -1406,7 +1419,7 @@ describe('PumpManager staged mode', () => {
     expect(mkfifoKids).toHaveLength(6);
     const secondFifos = latestFifoPaths();
     expect(secondFifos.video).not.toBe(firstFifos.video);
-    expect(ffmpegKids).toHaveLength(4);
+    expect(ffmpegKids).toHaveLength(3);
     expect(feederKids).toHaveLength(2);
     expect(manager.status(28).running).toBe(true);
   });
@@ -1422,8 +1435,7 @@ describe('PumpManager staged mode', () => {
     const result = await startPump({
       id: 29,
       source: FB_REPLAY,
-      outFifo: OUT_FIFO,
-      mode: 'staged',
+        mode: 'staged',
       dest: DEST,
     });
 
@@ -1451,8 +1463,7 @@ describe('PumpManager staged mode', () => {
     const result = await startPump({
       id: 30,
       source: FB_REPLAY,
-      outFifo: OUT_FIFO,
-      mode: 'staged',
+        mode: 'staged',
       dest: DEST,
     });
 
@@ -1484,8 +1495,7 @@ describe('media isolation quarantine', () => {
     const result = await getPumpManager().start({
       id: 9001,
       source: LIVE_HLS,
-      outFifo: OUT_FIFO,
-      mode: 'direct',
+        mode: 'direct',
       dest: DEST,
     });
 
