@@ -42,13 +42,10 @@ test("resolve rejects a non-URL before yt-dlp can run", async ({ page }) => {
 test("the Live Page renders the source composer controls", async ({ page }) => {
   await page.goto("/live");
 
-  // The composer card: Source URL field + Preview button, and the rights
-  // hint that must stay visible wherever a restream source can be pasted.
+  // The composer card: Source URL field + Preview button. The rights hint
+  // that used to sit here was removed from the UI by design review.
   await expect(page.locator("#live-source-url")).toBeVisible();
   await expect(page.getByRole("button", { name: "Preview" })).toBeVisible();
-  await expect(
-    page.getByText("Only stream content you own or have licensed.")
-  ).toBeVisible();
 });
 
 test("pump start without a source is guarded and the Live Page still renders", async ({

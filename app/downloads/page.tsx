@@ -7,7 +7,6 @@ import {
   ArrowRight,
   Check,
   ChevronDown,
-  CircleHelp,
   Clapperboard,
   Clipboard,
   Clock3,
@@ -20,7 +19,6 @@ import {
   Play,
   RefreshCw,
   ShieldCheck,
-  Sparkles,
   Trash2,
   TriangleAlert,
   Video,
@@ -143,38 +141,6 @@ function PlatformMark({ platform }: { platform: Platform }) {
     >
       {platform.mark}
     </span>
-  );
-}
-
-function Step({
-  number,
-  title,
-  description,
-  last = false,
-}: {
-  number: string;
-  title: string;
-  description: string;
-  last?: boolean;
-}) {
-  return (
-    <div className="relative flex gap-3.5">
-      {!last && (
-        <span
-          aria-hidden="true"
-          className="absolute left-[15px] top-8 h-[calc(100%-12px)] w-px bg-white/10"
-        />
-      )}
-      <span className="relative z-10 grid size-8 shrink-0 place-items-center rounded-full border border-white/10 bg-white/[0.07] font-mono text-[11px] text-white/65">
-        {number}
-      </span>
-      <div className="pb-5">
-        <p className="text-[13px] font-semibold text-white/90">{title}</p>
-        <p className="mt-1 text-[11.5px] leading-relaxed text-white/60">
-          {description}
-        </p>
-      </div>
-    </div>
   );
 }
 
@@ -409,29 +375,16 @@ export default function DownloadsPage() {
   return (
     <AppFrame>
       <main className="mx-auto w-full max-w-[1240px] px-4 pb-10 pt-6 sm:px-6 lg:pb-12 lg:pt-8">
-        <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.17em] text-brand">
-              <span className="grid size-6 place-items-center rounded-lg bg-brand-soft">
-                <WandSparkles className="size-3.5" aria-hidden="true" />
-              </span>
-              Creator tools
-            </div>
-            <h1 className="page-title text-[2rem] sm:text-[2.25rem]">
-              Video downloads
-            </h1>
-            <p className="mt-2 max-w-xl text-[13px] leading-relaxed text-muted-foreground">
-              Keep the videos you love close by. Paste a link, choose a quality,
-              and save it to your library.
-            </p>
+        <header className="mb-6">
+          <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.17em] text-brand">
+            <span className="grid size-6 place-items-center rounded-lg bg-brand-soft">
+              <WandSparkles className="size-3.5" aria-hidden="true" />
+            </span>
+            Creator tools
           </div>
-          <a
-            href="#how-it-works"
-            className="mb-0.5 inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-card px-3 text-[11.5px] font-semibold text-secondary-foreground shadow-sm transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-          >
-            <CircleHelp className="size-3.5 text-faint" aria-hidden="true" />
-            How it works
-          </a>
+          <h1 className="page-title text-[2rem] sm:text-[2.25rem]">
+            Video downloads
+          </h1>
         </header>
 
         <section className="grid items-stretch gap-4 xl:grid-cols-[minmax(0,1.42fr)_minmax(330px,0.78fr)]">
@@ -445,25 +398,9 @@ export default function DownloadsPage() {
                 aria-hidden="true"
                 className="pointer-events-none absolute -right-1 top-[-54px] -z-10 size-44 rounded-full border border-brand/10"
               />
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="inline-flex items-center gap-1.5 rounded-full border border-brand/15 bg-white/80 px-2.5 py-1 text-[9px] font-bold uppercase tracking-[0.14em] text-brand-strong">
-                    <Sparkles className="size-3" aria-hidden="true" />
-                    Simple by design
-                  </div>
-                  <h2 className="mt-3 max-w-lg font-heading text-[1.65rem] font-medium leading-[1.08] tracking-[-0.025em] text-ink sm:text-[1.95rem]">
-                    A link is all
-                    <br className="hidden sm:block" /> you need.
-                  </h2>
-                </div>
-                <div className="hidden size-[76px] rotate-[-8deg] place-items-center rounded-[22px] border border-white bg-white/75 text-brand shadow-[0_12px_30px_-18px_rgba(27,30,39,.32)] sm:grid">
-                  <ArrowDownToLine className="size-8 stroke-[1.5]" aria-hidden="true" />
-                </div>
+              <div className="ml-auto hidden size-[76px] rotate-[-8deg] place-items-center rounded-[22px] border border-white bg-white/75 text-brand shadow-[0_12px_30px_-18px_rgba(27,30,39,.32)] sm:grid">
+                <ArrowDownToLine className="size-8 stroke-[1.5]" aria-hidden="true" />
               </div>
-              <p className="mt-2 max-w-[440px] text-[12px] leading-relaxed text-muted-foreground">
-                We’ll recognize the source automatically and prepare a clean
-                video file for your library.
-              </p>
             </div>
 
             <form onSubmit={requestDownload} className="space-y-5 px-5 py-5 sm:px-7 sm:py-6">
@@ -484,11 +421,7 @@ export default function DownloadsPage() {
                     <span className="text-[10px] font-medium text-warning">
                       Unsupported source
                     </span>
-                  ) : (
-                    <span className="text-[10px] text-muted-foreground">
-                      Public video links
-                    </span>
-                  )}
+                  ) : null}
                 </div>
                 <div className="group flex min-h-[58px] items-center gap-2 rounded-xl border border-input bg-card p-1.5 transition-all focus-within:border-brand/60 focus-within:ring-4 focus-within:ring-brand/10">
                   <Link2
@@ -582,10 +515,6 @@ export default function DownloadsPage() {
                   : activeDownload?.statusMessage ?? "Download video"}
                 <ArrowRight className="ml-auto size-4 opacity-75" aria-hidden="true" />
               </Button>
-
-              <p className="text-center text-[10px] leading-relaxed text-muted-foreground">
-                Download videos only when you have permission to save or reuse them.
-              </p>
             </form>
 
             {activeDownload && (
@@ -652,7 +581,6 @@ export default function DownloadsPage() {
           </div>
 
           <aside
-            id="how-it-works"
             className="relative isolate flex min-h-[380px] flex-col overflow-hidden rounded-xl bg-ink p-5 text-white shadow-[0_12px_34px_-22px_rgba(16,24,40,.5)] sm:p-6"
           >
             <div
@@ -774,45 +702,6 @@ export default function DownloadsPage() {
               <span className="absolute right-[23%] top-1/2 grid size-8 -translate-y-1/2 place-items-center rounded-full border border-white/25 bg-white/10 text-white/85">
                 <ArrowDown className="size-3.5" aria-hidden="true" />
               </span>
-            </div>
-
-            <div className="mb-5">
-              <p className="font-heading text-[1.6rem] font-medium leading-tight tracking-[-0.02em]">
-                From scroll
-                <br />
-                to saved.
-              </p>
-              <p className="mt-2 max-w-[310px] text-[11px] leading-relaxed text-white/60">
-                The downloader on your Mac does the heavy lifting, then syncs
-                the file to your workspace’s cloud library.
-              </p>
-            </div>
-
-            <div className="mt-auto rounded-xl border border-white/10 bg-white/[0.045] p-3.5">
-              <div className="mb-3 flex items-center justify-between gap-2">
-                <p className="text-[10px] font-semibold text-white/80">
-                  Your download flow
-                </p>
-                <span className="rounded-full bg-success/10 px-2 py-1 text-[8px] font-bold uppercase tracking-[0.1em] text-success-bright">
-                  yt-dlp ready
-                </span>
-              </div>
-              <Step
-                number="01"
-                title="Paste a video link"
-                description="We identify which platform it came from."
-              />
-              <Step
-                number="02"
-                title="Choose your quality"
-                description="Pick the resolution that works for you."
-              />
-              <Step
-                number="03"
-                title="Save and sync"
-                description="yt-dlp saves the MP4 on your Mac; the worker uploads it to your cloud library."
-                last
-              />
             </div>
               </>
             )}
@@ -1018,15 +907,6 @@ export default function DownloadsPage() {
             </div>
           )}
         </section>
-
-        <footer className="mt-4 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[9.5px] text-muted-foreground/80">
-          <span className="inline-flex items-center gap-1.5">
-            <LockKeyhole className="size-3" aria-hidden="true" />
-            Local downloader, cloud library
-          </span>
-          <span aria-hidden="true" className="text-border">•</span>
-          <span>Only download content you have permission to save.</span>
-        </footer>
       </main>
     </AppFrame>
   );

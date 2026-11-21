@@ -437,7 +437,6 @@ export function PageSelector({
   disabled?: boolean;
 }) {
   const selectedId = selected[0] ?? null;
-  const activePage = pages.find((page) => page.id === selectedId);
   const radioRefs = useRef<(HTMLButtonElement | null)[]>([]);
   // Roving tabindex: the selected radio (or the first one) is tabbable.
   const tabIndexId = selectedId ?? pages[0]?.id ?? null;
@@ -479,7 +478,7 @@ export function PageSelector({
   }
   return (
     <div>
-      <FieldLabel hint="One page per post">Pages</FieldLabel>
+      <FieldLabel>Pages</FieldLabel>
       {loading ? (
         <p className="mt-1.5 text-[11px] text-muted-foreground">
           Loading managed Pages…
@@ -534,10 +533,6 @@ export function PageSelector({
               );
             })}
           </div>
-          <p className="mt-1.5 text-[10px] text-muted-foreground">
-            Posts to {activePage?.name ?? '…'} only. The Default badge marks the
-            page every composer starts on — change it in Settings → Publishing.
-          </p>
         </>
       )}
     </div>

@@ -455,9 +455,6 @@ export default function LivePage() {
                   {resolving ? 'Resolving…' : resolveError ? 'Retry preview' : 'Preview'}
                 </Button>
               </div>
-              <p className="mt-1 text-[10px] text-muted-foreground">
-                Only stream content you own or have licensed.
-              </p>
               {resolveError && (
                 <p role="alert" className="mt-1 text-[11px] text-destructive">
                   {resolveError}

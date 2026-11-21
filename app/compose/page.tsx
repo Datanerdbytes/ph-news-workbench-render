@@ -867,15 +867,31 @@ function ComposeWorkspace() {
     ? 'Checking Facebook connection…'
     : !facebook.configured
       ? 'Add Facebook app credentials to enable publishing'
-      : !facebook.connected
-        ? 'Connect your Facebook Page to publish'
-        : selected?.status === 'published'
-          ? 'This story is already published'
-          : !canPublish
-            ? 'Reconnect the Page to grant publishing permission'
-            : !draft
-              ? 'Write or generate a draft to publish'
-              : 'Posts to your Page immediately';
+      : 'Connect your Facebook Page to publish';
+
+  let publishUnavailableReason: string | undefined;
+  if (!facebook.connected) publishUnavailableReason = publishHint;
+  else if (selected?.status === 'published')
+    publishUnavailableReason = 'This story is already published';
+  else if (publishing) publishUnavailableReason = 'Publishing is in progress';
+  else if (scheduling) publishUnavailableReason = 'Scheduling is in progress';
+  else if (drafting)
+    publishUnavailableReason = 'Wait for the draft to finish generating';
+  else if (deleting)
+    publishUnavailableReason = 'Wait for the draft to finish deleting';
+  else if (!draft)
+    publishUnavailableReason = 'Write or generate a draft to publish';
+  else if (!pages.selected.length)
+    publishUnavailableReason = 'Select a Facebook Page to publish';
+  else if (baking)
+    publishUnavailableReason = 'Wait for the video animation to finish';
+  else if (imagesBusy)
+    publishUnavailableReason = 'Wait for the images to finish uploading';
+  else if (videoStaging || (videoFile && !videoUrl)) {
+    publishUnavailableReason = videoStagingFailed
+      ? 'Remove or replace the video that failed to upload'
+      : 'Wait for the video to finish uploading';
+  }
 
   return (
     <AppFrame fill>
@@ -1191,9 +1207,7 @@ function ComposeWorkspace() {
                             ~{formatCost(stats.estimatedCost)}
                           </span>
                         </>
-                      ) : (
-                        <span>No generation yet</span>
-                      )}
+                      ) : null}
                     </div>
 
                     <div className="flex flex-col items-end gap-1">
@@ -1250,22 +1264,16 @@ function ComposeWorkspace() {
                           variant="brand"
                           size="sm"
                           onClick={publish}
-                          disabled={
-                            !draft ||
-                            !facebook.connected ||
-                            !pages.selected.length ||
-                            publishing ||
-                            scheduling ||
-                            drafting ||
-                            deleting ||
-                            baking ||
-                            imagesBusy ||
-                            videoStaging ||
-                            Boolean(videoFile && !videoUrl) ||
-                            selected?.status === 'published'
+                          disabled={Boolean(publishUnavailableReason)}
+                          title={
+                            publishUnavailableReason ??
+                            (canPublish
+                              ? 'Posts to your Page immediately'
+                              : 'Reconnect the Page to grant publishing permission')
                           }
-                          title={publishHint}
-                          aria-describedby="publish-hint"
+                          aria-describedby={
+                            publishUnavailableReason ? 'publish-hint' : undefined
+                          }
                         >
                           <FacebookMark className="size-4" />
                           {publishButtonLabel(baking, bakePct, publishing)}
@@ -1429,9 +1437,10 @@ function ComposeWorkspace() {
                       )}
                       <p
                         id="publish-hint"
-                        className="text-[10px] text-muted-foreground"
+                        role="status"
+                        className="text-right text-[11px] text-muted-foreground empty:sr-only"
                       >
-                        {publishHint}
+                        {publishUnavailableReason}
                       </p>
                     </div>
                   </div>

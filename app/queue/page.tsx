@@ -290,11 +290,6 @@ export default function QueuePage() {
                   <h1 className="font-heading text-2xl font-semibold tracking-tight">
                     Story Queue
                   </h1>
-                  <p className="text-sm text-muted-foreground">
-                    {loadError ? '—' : activeCounts.pending} pending ·{' '}
-                    {loadError ? '—' : activeCounts.drafted} drafted ·{' '}
-                    {loadError ? '—' : activeCounts.total} total
-                  </p>
                 </div>
               </div>
 

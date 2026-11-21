@@ -101,8 +101,8 @@ describe("AnalyticsPage activity chart", () => {
     await waitFor(() => expect(analyticsCalls()).toEqual(["/api/analytics?days=14"]));
 
     expect(
-      screen.getByText(/Publishing activity from the last 14 days/)
-    ).toBeInTheDocument();
+      screen.queryByText(/Publishing activity from the last 14 days/)
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "14d" })).toHaveAttribute(
       "aria-pressed",
       "true"
@@ -131,7 +131,7 @@ describe("AnalyticsPage activity chart", () => {
       "true"
     );
     expect(
-      screen.getByText(/Publishing activity from the last 30 days/)
-    ).toBeInTheDocument();
+      screen.queryByText(/Publishing activity from the last 30 days/)
+    ).not.toBeInTheDocument();
   });
 });

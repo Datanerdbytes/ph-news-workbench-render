@@ -415,7 +415,6 @@ export default function DashboardPage() {
   }
 
   const ready = drafts.filter((draft) => draft.status === "drafted").length;
-  const pending = stories.filter((story) => story.status === "pending").length;
   const published = stories.filter(
     (story) => story.status === "published"
   ).length;
@@ -474,21 +473,6 @@ export default function DashboardPage() {
               {greeting()}
               {firstName ? `, ${firstName}` : ""}
             </h1>
-            <p className="mt-1.5 max-w-2xl text-[12.5px] leading-relaxed text-muted-foreground">
-              {loading
-                ? "Loading your workspace…"
-                : loadError
-                  ? "Couldn't load the workspace just now — try refreshing."
-                  : `${ready} draft${ready === 1 ? "" : "s"} waiting for review, ${pending} stor${
-                    pending === 1 ? "y" : "ies"
-                  } in the story queue. ${
-                    connection.loading
-                      ? "Checking the Facebook Page connection."
-                      : connection.connected
-                        ? `Facebook is connected to ${connection.page?.name ?? "your Page"}.`
-                        : "Connect a Facebook Page to start publishing."
-                  }`}
-            </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -523,9 +507,6 @@ export default function DashboardPage() {
           role="group"
           aria-label="Publishing platform"
         >
-          <span className="mr-1 text-[10px] font-bold uppercase tracking-[0.13em] text-muted-foreground">
-            Platform
-          </span>
           {PLATFORM_PILLS.map((pill) => {
             const active = platform === pill.platform;
             return (
@@ -861,11 +842,6 @@ export default function DashboardPage() {
             </section>
           </div>
         </div>
-
-        <p className="mt-6 text-[10.5px] text-muted-foreground">
-          Figures update from your workspace records. Analytics arrive once
-          channel insights are connected.
-        </p>
       </div>
     </AppFrame>
   );

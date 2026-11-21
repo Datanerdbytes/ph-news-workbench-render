@@ -139,10 +139,6 @@ export default function StatusPage() {
           <div>
             <p className="eyebrow text-brand">Publishing</p>
             <h1 className="page-title mt-2">Drafts &amp; activity</h1>
-            <p className="mt-2 max-w-xl text-sm leading-relaxed text-muted-foreground">
-              Every generated draft, its status, and the correlation trail for
-              auditing.
-            </p>
           </div>
           <Button
             variant="outline"

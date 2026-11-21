@@ -6,7 +6,6 @@ import {
   Check,
   Minus,
   RefreshCw,
-  ShieldCheck,
 } from "lucide-react";
 import { AppFrame } from "@/components/app-frame";
 import { PlatformMark, type PlatformKind } from "@/components/platform-mark";
@@ -26,7 +25,6 @@ type Channel = {
   summary: string;
   requirements: string[];
   capabilities: CapabilityFlag[];
-  note: string;
 };
 
 const DESIGNED: Channel[] = [
@@ -49,7 +47,6 @@ const DESIGNED: Channel[] = [
       { label: "Carousel" },
       { label: "Scheduled publishing", on: true },
     ],
-    note: "Every upload needs a video file, so the composer blocks text-only drafts before they reach Google.",
   },
   {
     platform: "tiktok",
@@ -70,7 +67,6 @@ const DESIGNED: Channel[] = [
       { label: "Carousel" },
       { label: "Draft review", on: true },
     ],
-    note: "Posts arrive as drafts inside TikTok, so the composer shows the draft step rather than promising an instant publish.",
   },
   {
     platform: "linkedin",
@@ -91,7 +87,6 @@ const DESIGNED: Channel[] = [
       { label: "Carousel" },
       { label: "Scheduled publishing" },
     ],
-    note: "Rights come from the company Page admin role, so drafts inherit the Page's audience and permissions.",
   },
 ];
 
@@ -157,12 +152,6 @@ export default function AccountsPage() {
               Channels
             </p>
             <h1 className="page-title mt-1.5">Accounts</h1>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-[10.5px] font-medium text-muted-foreground">
-              <ShieldCheck className="size-3.5 text-success" aria-hidden />
-              Tokens stored server-side
-            </span>
           </div>
         </div>
 
@@ -316,10 +305,6 @@ export default function AccountsPage() {
                 <Capability label="Video" />
                 <Capability label="Scheduled publishing" />
               </div>
-              <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
-                Composer fields follow these capabilities, so the app never
-                offers a control the network cannot honour.
-              </p>
             </div>
           </div>
         </section>
@@ -473,10 +458,6 @@ export default function AccountsPage() {
                 <Capability label="Text-only post" />
                 <Capability label="Scheduled publishing" />
               </div>
-              <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
-                Every post needs at least one image or video, so the composer
-                blocks text-only drafts before they reach Meta.
-              </p>
             </div>
           </div>
         </section>
@@ -558,9 +539,6 @@ export default function AccountsPage() {
                     />
                   ))}
                 </div>
-                <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
-                  {channel.note}
-                </p>
               </div>
             </div>
           </section>

@@ -136,12 +136,6 @@ if (isLocal) {
   cjsConfig.fetchFunction = fetchFunction;
   neonConfig.fetchFunction = fetchFunction;
 
-  // NOTE: bare `await sql.unsafe(stmt)` never executes on the HTTP driver —
-  // it returns an inert composable fragment — and this build exposes `neon`
-  // as a read-only getter, so it cannot be patched here either. CJS scripts
-  // that rely on it (migrate-auth.js) must have their statements applied out
-  // of band, e.g. via psql.
-
   // The driver reports a stopped Docker stack as a bare "fetch failed", which
   // names neither the cause nor the fix. Probe the proxy once and say so.
   // Warn only: a missing container must not abort the host process.

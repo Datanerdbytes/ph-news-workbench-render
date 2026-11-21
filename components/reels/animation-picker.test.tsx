@@ -189,7 +189,6 @@ describe("AnimationPicker", () => {
       screen.getByRole("button", { name: "Remove Kinetic Headline from the start slot" })
     );
     expect(screen.queryByLabelText("Headline text")).toBeNull();
-    // Removing selection reveals the slot's empty hint again.
-    expect(screen.getByText("Pick an animation that opens the reel.")).toBeTruthy();
+    expect(screen.queryByText("Pick an animation that opens the reel.")).toBeNull();
   });
 });
