@@ -126,6 +126,122 @@ describe('fetchPublicSource', () => {
     expect(dialedOptions.servername).toBe('manifest.example');
   });
 
+  it('dials IPv4 before IPv6 even when DNS answers IPv6-first', async () => {
+    // CDN edge hosts answer DNS per region; a runtime without IPv6 egress
+    // (Render) must not be handed a dead family as the first dial target.
+    resolveTo('2001:4860:4860::8888', '93.184.216.34');
+    const connector = vi.fn(
+      (_options: object, callback: (error: Error | null) => void) =>
+        callback(null)
+    );
+    buildConnectorMock.mockReturnValue(connector);
+    undiciFetchMock.mockResolvedValueOnce(
+      new Response('x', { status: 200 })
+    );
+
+    await fetchPublicSource(URL_UNDER_TEST);
+
+    const agentOptions = MockAgent.lastOptions as {
+      connect: (
+        options: { hostname: string; servername?: string },
+        callback: (error: Error | null) => void
+      ) => void;
+    };
+    agentOptions.connect(
+      { hostname: 'manifest.example', servername: 'manifest.example' },
+      () => {}
+    );
+    expect(connector).toHaveBeenCalledTimes(1);
+    const [dialedOptions] = connector.mock.calls[0] as unknown as [
+      { hostname: string; servername?: string },
+    ];
+    expect(dialedOptions.hostname).toBe('93.184.216.34');
+    expect(dialedOptions.servername).toBe('manifest.example');
+  });
+
+  it('falls back to the next validated address when a dial fails', async () => {
+    resolveTo('93.184.216.34', '2001:4860:4860::8888');
+    const socket = {} as object;
+    const connector = vi.fn()
+      .mockImplementationOnce(
+        (_options: object, callback: (error: Error | null) => void) =>
+          callback(new Error('connect ENETUNREACH 2001:4860:4860::8888'))
+      )
+      .mockImplementationOnce(
+        (
+          _options: object,
+          callback: (error: Error | null, socket: unknown) => void
+        ) => callback(null, socket)
+      );
+    buildConnectorMock.mockReturnValue(connector);
+    undiciFetchMock.mockResolvedValueOnce(
+      new Response('x', { status: 200 })
+    );
+
+    await fetchPublicSource(URL_UNDER_TEST);
+
+    const agentOptions = MockAgent.lastOptions as {
+      connect: (
+        options: { hostname: string; servername?: string },
+        callback: (error: Error | null, socket: unknown) => void
+      ) => void;
+    };
+    const done = vi.fn();
+    agentOptions.connect(
+      { hostname: 'manifest.example', servername: 'manifest.example' },
+      done
+    );
+
+    // The dial walked the whole validated list in order, then succeeded.
+    expect(connector).toHaveBeenCalledTimes(2);
+    const dialedHosts = connector.mock.calls.map(
+      (call) =>
+        (call[0] as unknown as { hostname: string }).hostname
+    );
+    expect(dialedHosts).toEqual(['93.184.216.34', '2001:4860:4860::8888']);
+    // TLS SNI keeps the requested hostname on every attempt.
+    for (const call of connector.mock.calls) {
+      expect(
+        (call[0] as unknown as { servername?: string }).servername
+      ).toBe('manifest.example');
+    }
+    // Exactly one callback: success with the connected socket.
+    expect(done).toHaveBeenCalledTimes(1);
+    expect(done).toHaveBeenCalledWith(null, socket);
+  });
+
+  it('reports the last dial error after every validated address fails', async () => {
+    resolveTo('93.184.216.34', '2001:4860:4860::8888');
+    const connector = vi.fn(
+      (_options: object, callback: (error: Error | null) => void) =>
+        callback(new Error('connect ECONNREFUSED'))
+    );
+    buildConnectorMock.mockReturnValue(connector);
+    undiciFetchMock.mockResolvedValueOnce(
+      new Response('x', { status: 200 })
+    );
+
+    await fetchPublicSource(URL_UNDER_TEST);
+
+    const agentOptions = MockAgent.lastOptions as {
+      connect: (
+        options: { hostname: string; servername?: string },
+        callback: (error: Error | null, socket: unknown) => void
+      ) => void;
+    };
+    const done = vi.fn();
+    agentOptions.connect(
+      { hostname: 'manifest.example', servername: 'manifest.example' },
+      done
+    );
+
+    expect(connector).toHaveBeenCalledTimes(2);
+    expect(done).toHaveBeenCalledTimes(1);
+    const [error] = done.mock.calls[0] as [Error | null];
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe('connect ECONNREFUSED');
+  });
+
   it('fetches the ORIGINAL url (host preserved for Host header + SNI)', async () => {
     undiciFetchMock.mockResolvedValueOnce(
       new Response('x', { status: 200 })
