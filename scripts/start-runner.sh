@@ -21,6 +21,8 @@ cd "$(dirname "$0")/.."
 
 TS_DIR="${TS_DIR:-$HOME/.local/share/tailscale-local}"
 TS_SOCK="$TS_DIR/tailscaled.sock"
+RUNNER_PID_FILE="$TS_DIR/runner.pid"
+CAFFEINATE_PID_FILE="$TS_DIR/caffeinate.pid"
 TS_BIN="$(command -v tailscale || echo /opt/homebrew/bin/tailscale)"
 TAILSCALED="$(command -v tailscaled || echo /opt/homebrew/opt/tailscale/bin/tailscaled)"
 RUNNER_PORT="${RUNNER_PORT:-8080}"
@@ -31,9 +33,34 @@ is_up() {
   curl -fsS -m 5 "http://127.0.0.1:$RUNNER_PORT/healthz" >/dev/null 2>&1
 }
 
+# Stops the runner and its caffeinate, using the PID files written at start.
+# The pattern fallback names `.env.runner`, so it can never touch a local-dev
+# runner started with `npm run media-runner` (which uses .env.local).
+stop_runner() {
+  pid="$(cat "$RUNNER_PID_FILE" 2>/dev/null || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 1
+    done
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  pkill -f "tsx --env-file=.env.runner media-runner.ts" 2>/dev/null || true
+  rm -f "$RUNNER_PID_FILE"
+
+  # caffeinate is its own process, so the runner's death does not leave the
+  # Mac pinned awake.
+  cpid="$(cat "$CAFFEINATE_PID_FILE" 2>/dev/null || true)"
+  if [ -n "$cpid" ] && kill -0 "$cpid" 2>/dev/null; then
+    kill "$cpid" 2>/dev/null || true
+  fi
+  rm -f "$CAFFEINATE_PID_FILE"
+}
+
 stop_all() {
   echo "stopping runner…"
-  pkill -f "media-runner.ts" 2>/dev/null || true
+  stop_runner
   echo "stopping funnel…"
   "$TS_BIN" --socket="$TS_SOCK" funnel --https=443 off 2>/dev/null || true
   echo "stopping tailscaled…"
@@ -67,29 +94,56 @@ if ! "$TS_BIN" --socket="$TS_SOCK" status >/dev/null 2>&1; then
   fi
 fi
 
-# 2. The runner itself. caffeinate -s keeps the Mac from idle-sleeping, which
-#    would freeze the ffmpeg pump mid-broadcast.
+# 2. The runner itself, plus a separate caffeinate that keeps the Mac from
+#    idle-sleeping (which would freeze the ffmpeg pump mid-broadcast). They are
+#    separate processes so `stop` can end both cleanly, and caffeinate waits on
+#    the runner's PID (-w) so a crash never leaves the Mac pinned awake.
 if is_up; then
   echo "runner already healthy on :$RUNNER_PORT"
 else
   echo "starting runner on :${RUNNER_PORT}…"
-  nohup caffeinate -s ./node_modules/.bin/tsx --env-file=.env.runner media-runner.ts \
+  nohup ./node_modules/.bin/tsx --env-file=.env.runner media-runner.ts \
     >>"$TS_DIR/runner.log" 2>&1 &
+  RUNNER_PID=$!
+  echo "$RUNNER_PID" >"$RUNNER_PID_FILE"
+  nohup caffeinate -s -w "$RUNNER_PID" >/dev/null 2>&1 &
+  echo $! >"$CAFFEINATE_PID_FILE"
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 3
     is_up && break
   done
-  is_up || { echo "runner did not become healthy — see $TS_DIR/runner.log" >&2; exit 1; }
+  if ! is_up; then
+    echo "runner did not become healthy — see $TS_DIR/runner.log" >&2
+    stop_runner
+    exit 1
+  fi
 fi
 
-# 3. Funnel: the public HTTPS URL the Render app dials.
+# 3. Funnel: the public HTTPS URL the Render app dials. Self.DNSName is read
+#    from the JSON (not scraped line-by-line) so a peer's name can never be
+#    mistaken for this machine's.
 FUNNEL_HOST="$("$TS_BIN" --socket="$TS_SOCK" status --json 2>/dev/null \
-  | sed -n 's/.*"DNSName": *"\([^"]*\)\..*/\1/p' | head -1)"
+  | node -e 'let s="";process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{try{const j=JSON.parse(s);process.stdout.write(String(j.Self?.DNSName||"").replace(/\.$/,""))}catch{}})')"
+if [ -z "$FUNNEL_HOST" ]; then
+  echo "could not read this machine's tailnet DNS name — is Tailscale logged in?" >&2
+  exit 1
+fi
 echo "exposing https://$FUNNEL_HOST …"
 "$TS_BIN" --socket="$TS_SOCK" funnel --bg "$RUNNER_PORT" >/dev/null
 "$TS_BIN" --socket="$TS_SOCK" funnel status
 
 echo
 echo "public healthz:"
-curl -fsS -m 45 "https://$FUNNEL_HOST/healthz" && echo
+published=""
+for _ in 1 2 3; do
+  if curl -fs -m 45 "https://$FUNNEL_HOST/healthz"; then
+    published=yes
+    echo
+    break
+  fi
+  sleep 5
+done
+if [ -z "$published" ]; then
+  echo "the funnel is configured but not answering yet — TLS/DERP can take a minute after tailscaled restarts" >&2
+fi
 echo "point Render's MEDIA_RUNNER_URL at https://$FUNNEL_HOST"

@@ -3,7 +3,13 @@
 //   NODE_OPTIONS="--import ./scripts/neon-local.mjs" node --env-file=.env.local <script>
 //   NODE_OPTIONS="--import ./scripts/neon-local.mjs" npm run dev
 //
-// Only activates for local DATABASE_URL hosts; production is untouched.
+// Only activates for local DATABASE_URL hosts; production is untouched, which
+// is why it is safe to preload from `npm start` as well as `npm run dev`.
+//
+// Nothing in here may throw: a preload failure aborts Node before any
+// application code runs, so a config typo would become a boot crash with no
+// usable message instead of a database error the app can report.
+//
 // `neon()` (and drizzle's neon-http driver on top of it) speaks Neon's HTTP
 // /sql protocol, which a vanilla Postgres has no endpoint for. fetchFunction
 // intercepts those calls, executes them through a WebSocket Pool tunneled by
@@ -37,7 +43,15 @@ if (!dbUrl) {
   }
 }
 
-const host = dbUrl ? new URL(dbUrl).hostname : "";
+// A malformed DATABASE_URL must not abort the host process. Treat an
+// unparseable value as "not local" and leave the driver untouched; the app's
+// own database error is far more useful than a preload crash.
+let host = "";
+try {
+  host = dbUrl ? new URL(dbUrl).hostname : "";
+} catch {
+  // Not a URL — the app will report it.
+}
 const isLocal = host === "postgres" || host === "localhost";
 
 if (isLocal) {
