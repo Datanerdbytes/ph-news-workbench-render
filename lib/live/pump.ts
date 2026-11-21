@@ -858,11 +858,11 @@ export class PumpManager {
       if (proc.attempts !== attempt || proc.attemptSettled) return;
       proc.child = null;
       // A successful source exit cannot erase a publisher failure.
-      if (!proc.stopping && code === 0 && proc.publisherExitCode) {
+      if (!proc.stopping && code === 0 && proc.publisherClosed && proc.publisherExitCode !== 0) {
         this.failAttempt(
           proc,
           `the RTMPS publisher exited with code ${proc.publisherExitCode}`,
-          proc.publisherExitCode,
+          proc.publisherExitCode ?? 1,
           'publisher'
         );
         return;
@@ -874,7 +874,7 @@ export class PumpManager {
       // failure, or when the publisher may already have caused this exit.
       const waitForPublisher =
         !proc.stopping && !proc.fatalError && publisher && !proc.publisherClosed &&
-        (publisher.exitCode != null ||
+        (publisher.exitCode != null || publisher.signalCode != null ||
           (code !== 0 && (proc.retries >= RETRY_BACKOFF_MS.length || /broken pipe/i.test(proc.tail))));
       if (proc.killTimer) {
         clearTimeout(proc.killTimer);
@@ -892,7 +892,9 @@ export class PumpManager {
         proc.sourceCloseTimer = null;
         // Node exposes the exit code before close if stdio has not drained.
         proc.publisherExitCode ??= publisher.exitCode ?? null;
-        const exitCode = code === 0 ? proc.publisherExitCode || 0 : code;
+        const publisherFailed =
+          (proc.publisherClosed || publisher.signalCode != null) && proc.publisherExitCode !== 0;
+        const exitCode = code === 0 && publisherFailed ? proc.publisherExitCode ?? 1 : code;
         this.settleAttempt(proc, exitCode);
       };
       proc.sourceCloseTimer = setTimeout(proc.finishSourceClose, PUBLISHER_SETTLE_GRACE_MS);
@@ -1498,14 +1500,14 @@ export class PumpManager {
     // Only a publisher that FAILED is quoted. A publisher that exited 0 wrote
     // nothing but its banner, and quoting that would bury the source's error.
     const publisherFailed =
-      proc.publisherExitCode !== null && proc.publisherExitCode !== 0;
+      proc.publisherClosed && proc.publisherExitCode !== 0;
     const stderr = publisherFailed
       ? this.quoteStderr(proc.publisherTail, PUBLISHER_EVIDENCE_CHARS)
       : '';
     // A failed publisher that said nothing still gets named: with the reader
     // gone the source can only report the closed pipe.
     const publisher = publisherFailed
-      ? stderr || `exited with code ${proc.publisherExitCode}`
+      ? stderr || (proc.publisherExitCode === null ? 'terminated without an exit code' : `exited with code ${proc.publisherExitCode}`)
       : '';
     if (!publisher) return `Source stderr: ${source}`;
     // `Publisher stderr:` only when it really is stderr — an exit code is not.

@@ -28,13 +28,15 @@ TAILSCALED="$(command -v tailscaled || echo /opt/homebrew/opt/tailscale/bin/tail
 RUNNER_PORT="${RUNNER_PORT:-8080}"
 HOSTNAME_TS="${TS_HOSTNAME:-ph-news-runner}"
 
-acquire_lifecycle_lock() {
-  # macOS lockf locks the open file description; the shell keeps fd 9 until
-  # exit. The kernel releases it even on SIGKILL, without a stale PID lock.
-  mkdir -p "$TS_DIR" || return 1
-  exec 9>"$TS_DIR/lifecycle.lock"
-  lockf -s 9
-}
+# Use the path-and-command interface supported by older macOS releases.
+# lockf owns the lock and closes its descriptor in the executed child, so
+# detached runner/daemon/supervisor processes cannot retain the lifecycle lock.
+if [ "${1:-}" = --locked ]; then
+  shift
+elif [ "${1:-}" != watch ]; then
+  mkdir -p "$TS_DIR"
+  exec lockf -k "$TS_DIR/lifecycle.lock" sh "$PWD/scripts/start-runner.sh" --locked "$@"
+fi
 
 runner_pid() {
   cat "$RUNNER_PID_FILE" 2>/dev/null || true
@@ -115,10 +117,6 @@ stop_all() {
   echo "stopped."
 }
 
-if [ "${1:-}" != watch ]; then
-  acquire_lifecycle_lock
-fi
-
 if [ "${1:-}" = "stop" ]; then
   stop_all
   exit 0
@@ -141,22 +139,27 @@ withdraw_funnel() {
   "$TS_BIN" --socket="$TS_SOCK" funnel --https=443 off >/dev/null 2>&1
 }
 
-# Detached supervisor: withdraw publication if the verified server exits.
-# A newer runner PID owns its own publication, so an old supervisor leaves it.
+# This command is executed under lockf. Startup may have replaced the runner
+# while its supervisor waited for the lock, so check ownership here.
+if [ "${1:-}" = withdraw-if-owner ]; then
+  if [ "$(runner_pid)" = "${2:?missing runner PID}" ]; then
+    withdraw_funnel
+  fi
+  exit 0
+fi
+
+# Detached supervisor: wait without a lock, then withdraw publication under
+# the same lifecycle lock as startup and stop. A newer owner is left intact.
 if [ "${1:-}" = watch ]; then
   watched_pid="${2:?missing runner PID}"
   while [ "$(runner_pid)" = "$watched_pid" ] && is_runner "$watched_pid"; do
     sleep 1
   done
   while :; do
-    if acquire_lifecycle_lock; then
-      # Startup may have replaced this runner while we waited for the lock.
-      if [ "$(runner_pid)" != "$watched_pid" ] || withdraw_funnel; then
-        exit 0
-      fi
+    if lockf -k "$TS_DIR/lifecycle.lock" sh "$PWD/scripts/start-runner.sh" --locked withdraw-if-owner "$watched_pid"; then
+      exit 0
     fi
     echo "could not withdraw Funnel after runner exit; retrying" >&2
-    exec 9>&-
     sleep 1
   done
 fi
@@ -179,7 +182,7 @@ if ! "$TS_BIN" --socket="$TS_SOCK" status >/dev/null 2>&1; then
   # nohup: the daemon must outlive the terminal that launched it.
   nohup "$TAILSCALED" --tun=userspace-networking \
     --statedir="$TS_DIR" --socket="$TS_SOCK" --port=41641 \
-    >>"$TS_DIR/tailscaled.log" 2>&1 9>&- &
+    >>"$TS_DIR/tailscaled.log" 2>&1 &
   # First run needs a browser login; the URL is printed by `tailscale up`.
   sleep 5
   if ! "$TS_BIN" --socket="$TS_SOCK" status >/dev/null 2>&1; then
@@ -213,10 +216,10 @@ else
     echo "starting runner on :${RUNNER_PORT}…"
     # Load tsx into Node so $! is the actual server, with no launcher child.
     PORT="$RUNNER_PORT" nohup node --env-file=.env.runner --import tsx "$RUNNER_ENTRY" \
-      >>"$TS_DIR/runner.log" 2>&1 9>&- &
+      >>"$TS_DIR/runner.log" 2>&1 &
     RUNNER_PID=$!
     echo "$RUNNER_PID" >"$RUNNER_PID_FILE"
-    nohup caffeinate -i -s -w "$RUNNER_PID" >/dev/null 2>&1 9>&- &
+    nohup caffeinate -i -s -w "$RUNNER_PID" >/dev/null 2>&1 &
   fi
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 3
@@ -241,7 +244,7 @@ fi
 echo "exposing https://$FUNNEL_HOST …"
 # Install the supervisor before publication, including when reusing a runner.
 TS_DIR="$TS_DIR" nohup sh "$PWD/scripts/start-runner.sh" watch "$RUNNER_PID" \
-  >>"$TS_DIR/runner.log" 2>&1 9>&- &
+  >>"$TS_DIR/runner.log" 2>&1 &
 "$TS_BIN" --socket="$TS_SOCK" funnel --bg "$RUNNER_PORT" >/dev/null
 "$TS_BIN" --socket="$TS_SOCK" funnel status
 

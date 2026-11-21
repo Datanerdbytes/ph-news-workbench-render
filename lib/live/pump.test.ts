@@ -778,13 +778,13 @@ describe('PumpManager publisher leg', () => {
     expect(status.error).toBeNull();
   });
 
-  it('retries when the publisher fails before the source exits cleanly', async () => {
+  it.each([1, null])('retries when the publisher exits %s before the source exits cleanly', async (code) => {
     stubGateOn();
     vi.useFakeTimers();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
     await startPump({ id: 43, source: LIVE_HLS, dest: DEST });
 
-    closeChild(ffmpegKids[0], 1);
+    closeChild(ffmpegKids[0], code);
     closeChild(ffmpegKids[1], 0);
     expect(manager.status(43)).toMatchObject({ running: false, retrying: true });
 

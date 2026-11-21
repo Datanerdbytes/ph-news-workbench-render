@@ -29,8 +29,13 @@ esac
   stub('lsof', 'echo 99999999\n');
   // Linux CI does not ship the macOS lockf utility. Model lock acquisition
   // so the script's ordering and owner recheck can be exercised there too.
-  stub('lockf', `printf '%s\\n' 'lock acquired' >> "$RUNNER_TEST_CALLS"
-if [ "\$RUNNER_TEST_REPLACE_ON_LOCK" = yes ]; then echo 4343 > "$TS_DIR/runner.pid"; fi
+  stub('lockf', `
+# Enforce the older path-and-command contract instead of accepting fd-only use.
+[ "$1" = -k ] && [ "$#" -ge 4 ] || exit 64
+printf '%s\\n' 'lock acquired' >> "$RUNNER_TEST_CALLS"
+if [ "$RUNNER_TEST_REPLACE_ON_LOCK" = yes ]; then echo 4343 > "$TS_DIR/runner.pid"; fi
+shift 2
+exec "$@"
 `);
   const run = (args: string[] = [], extra: Record<string, string> = {}) => spawnSync('sh', [script, ...args], {
     env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, TS_DIR: join(root, 'state'), RUNNER_TEST_CALLS: calls, ...extra },
