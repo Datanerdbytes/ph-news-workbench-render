@@ -69,4 +69,37 @@ describe('runner startup publication cleanup', () => {
       expect(readFileSync(host.calls, 'utf8').includes('funnel --https=443 off')).toBe(!replacement);
     } finally { rmSync(host.root, { recursive: true, force: true }); }
   });
+  it('rechecks ownership after waiting for a concurrent publication', () => {
+    const host = fakeHost();
+    try {
+      const state = join(host.root, 'state');
+      mkdirSync(join(state, 'runner.lock'));
+      writeFileSync(join(state, 'runner.pid'), '4242');
+      host.stub('ps', 'exit 1\n');
+      host.stub('sleep', 'echo 4343 > "$TS_DIR/runner.pid"\nrmdir "$TS_DIR/runner.lock"\n');
+      expect(host.run(['watch', '4242']).status).toBe(0);
+      expect(readFileSync(host.calls, 'utf8')).not.toContain('funnel --https=443 off');
+    } finally { rmSync(host.root, { recursive: true, force: true }); }
+  });
+
+  it('retries a failed watcher withdrawal while it still owns the rule', () => {
+    const host = fakeHost();
+    try {
+      writeFileSync(join(host.root, 'state/runner.pid'), '4242');
+      host.stub('ps', 'exit 1\n');
+      host.stub('sleep', 'echo slept >> "$RUNNER_TEST_CALLS"\n');
+      host.stub('tailscale', `printf '%s\\n' "$*" >> "$RUNNER_TEST_CALLS"
+case "$*" in
+  *'funnel status --json'*) echo '{"Web":{"runner.test:443":{"Handlers":{"/":{}}}}}' ;;
+  *'funnel --https=443 off'*) mkdir "$TS_DIR/failed-once" 2>/dev/null && exit 1 ;;
+esac
+exit 0
+`);
+      expect(host.run(['watch', '4242']).status).toBe(0);
+      const calls = readFileSync(host.calls, 'utf8').trim().split('\n');
+      expect(calls.filter((call) => call.endsWith('funnel --https=443 off') || call === 'slept')
+        .map((call) => call === 'slept' ? call : 'off')).toEqual(['off', 'slept', 'off']);
+    } finally { rmSync(host.root, { recursive: true, force: true }); }
+  });
+
 });

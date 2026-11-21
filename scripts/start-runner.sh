@@ -22,6 +22,7 @@ cd "$(dirname "$0")/.."
 TS_DIR="${TS_DIR:-$HOME/.local/share/tailscale-local}"
 TS_SOCK="$TS_DIR/tailscaled.sock"
 RUNNER_PID_FILE="$TS_DIR/runner.pid"
+RUNNER_LOCK="$TS_DIR/runner.lock"
 RUNNER_ENTRY="$PWD/media-runner.ts"
 TS_BIN="$(command -v tailscale || echo /opt/homebrew/bin/tailscale)"
 TAILSCALED="$(command -v tailscaled || echo /opt/homebrew/opt/tailscale/bin/tailscaled)"
@@ -107,10 +108,26 @@ stop_all() {
   echo "stopped."
 }
 
-if [ "${1:-}" = "stop" ]; then
-  stop_all
-  exit 0
-fi
+# mkdir is atomic on macOS and Linux. Keep the lock across PID changes and
+# Funnel commands so a stale watcher cannot withdraw a replacement's rule.
+acquire_runner_lock() {
+  mkdir -p "$TS_DIR" || return 1
+  lock_wait=0
+  until mkdir "$RUNNER_LOCK" 2>/dev/null; do
+    lock_wait=$((lock_wait + 1))
+    if [ "$lock_wait" -ge 300 ]; then
+      echo "timed out waiting for $RUNNER_LOCK; check for an interrupted runner command" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+release_runner_lock() {
+  rmdir "$RUNNER_LOCK"
+}
+
+trap 'exit 1' HUP INT TERM
 
 # A background Funnel rule survives a previous invocation. Withdraw it on
 # every failed start so an unrelated replacement listener is never published.
@@ -136,12 +153,29 @@ if [ "${1:-}" = watch ]; then
   while [ "$(runner_pid)" = "$watched_pid" ] && is_runner "$watched_pid"; do
     sleep 1
   done
-  if [ "$(runner_pid)" = "$watched_pid" ]; then
-    withdraw_funnel || { echo "could not withdraw Funnel after runner exit" >&2; exit 1; }
-  fi
+  while :; do
+    acquire_runner_lock || { sleep 1; continue; }
+    trap 'release_runner_lock' 0
+    if [ "$(runner_pid)" != "$watched_pid" ]; then
+      exit 0
+    fi
+    if withdraw_funnel; then
+      exit 0
+    fi
+    echo "could not withdraw Funnel after runner exit; retrying" >&2
+    release_runner_lock
+    trap - 0
+    sleep 1
+  done
+fi
+
+acquire_runner_lock
+trap 'release_runner_lock' 0
+if [ "${1:-}" = "stop" ]; then
+  stop_all
   exit 0
 fi
-trap 'withdraw_funnel || true' 0
+trap 'withdraw_funnel || true; release_runner_lock' 0
 
 if ! command -v lsof >/dev/null; then
   echo "lsof is required to verify the runner listener" >&2
@@ -245,5 +279,5 @@ if ! is_up "$RUNNER_PID"; then
   echo "runner lost readiness during publication" >&2
   exit 1
 fi
-trap - 0
+trap 'release_runner_lock' 0
 echo "point Render's MEDIA_RUNNER_URL at https://$FUNNEL_HOST"
