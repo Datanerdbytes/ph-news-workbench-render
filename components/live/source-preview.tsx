@@ -181,11 +181,14 @@ export function SourcePreview({
   return (
     <figure className="overflow-hidden rounded-lg border border-border bg-background">
       <div className="flex flex-wrap items-center gap-2 border-b border-border/60 px-2.5 py-2">
-        <p className="min-w-0 flex-1 truncate text-xs font-semibold">
+        {/* Source titles can be long YouTube strings with dates and emoji —
+            wrap to two lines instead of clipping to an unreadable single
+            line; the chips shrink-0 so the title always yields the space. */}
+        <p className="min-w-0 flex-1 line-clamp-2 text-xs font-semibold leading-snug">
           {title || 'Resolved source'}
         </p>
         {isLive && (
-          <span className="inline-flex items-center gap-1 rounded bg-destructive/10 px-1.5 py-0.5 font-mono text-[8px] font-bold tracking-[0.12em] text-destructive">
+          <span className="inline-flex shrink-0 items-center gap-1 rounded bg-destructive/10 px-1.5 py-0.5 font-mono text-[8px] font-bold tracking-[0.12em] text-destructive">
             <span
               className="size-1.5 animate-pulse rounded-full bg-destructive"
               aria-hidden
@@ -194,7 +197,7 @@ export function SourcePreview({
           </span>
         )}
         {extractor && (
-          <span className="rounded bg-surface-3 px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
+          <span className="shrink-0 rounded bg-surface-3 px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
             {extractor}
           </span>
         )}
@@ -202,7 +205,9 @@ export function SourcePreview({
       {staged ? (
         // Same footprint as the player above so the card keeps its shape,
         // but muted text and no player chrome: nothing is broken here.
-        <div className="flex aspect-video items-center justify-center px-6 text-center">
+        // bg-black keeps the black media-box look the page's placeholder
+        // states get from MediaPreviewMedia.
+        <div className="flex aspect-video items-center justify-center bg-black px-6 text-center">
           <p className="text-[11px] leading-relaxed text-muted-foreground">
             Preview unavailable for this source — Go live streams it through
             the pump.

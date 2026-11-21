@@ -341,50 +341,56 @@ export default function LivePage() {
         </>
       }
     >
-      <MediaPreviewMedia className="aspect-video">
-        {resolvedSource ? (
-          <SourcePreview {...resolvedSource} />
-        ) : hasTitle ? (
-          <>
-            <span className="absolute left-2.5 top-2.5 inline-flex items-center gap-1 rounded bg-black/50 px-1.5 py-0.5 font-mono text-[8px] font-bold tracking-[0.12em] text-white/85">
-              <span
-                className={cn(
-                  'size-1.5 rounded-full',
-                  scheduleOn ? 'bg-[#f0b429]' : 'bg-destructive animate-pulse'
-                )}
-                aria-hidden
-              />
-              {scheduleOn ? 'SCHEDULED' : 'LIVE'}
-            </span>
-            <div className="min-w-0 px-4 text-center">
-              <p className="line-clamp-2 text-[13px] font-semibold leading-snug text-white/90">
-                {title}
-              </p>
-              {description.trim() && (
-                <p className="mt-1.5 line-clamp-2 text-[10px] leading-relaxed text-white/60">
-                  {description}
+      {resolvedSource ? (
+        // The resolved source renders its own header row and aspect-video
+        // player, so it replaces the black media box entirely — nested
+        // inside it the figure is one header taller than the box, and the
+        // box's overflow-hidden clipped the title text and player controls.
+        <SourcePreview {...resolvedSource} />
+      ) : (
+        <MediaPreviewMedia className="aspect-video">
+          {hasTitle ? (
+            <>
+              <span className="absolute left-2.5 top-2.5 inline-flex items-center gap-1 rounded bg-black/50 px-1.5 py-0.5 font-mono text-[8px] font-bold tracking-[0.12em] text-white/85">
+                <span
+                  className={cn(
+                    'size-1.5 rounded-full',
+                    scheduleOn ? 'bg-[#f0b429]' : 'bg-destructive animate-pulse'
+                  )}
+                  aria-hidden
+                />
+                {scheduleOn ? 'SCHEDULED' : 'LIVE'}
+              </span>
+              <div className="min-w-0 px-4 text-center">
+                <p className="line-clamp-2 text-[13px] font-semibold leading-snug text-white/90">
+                  {title}
                 </p>
-              )}
+                {description.trim() && (
+                  <p className="mt-1.5 line-clamp-2 text-[10px] leading-relaxed text-white/60">
+                    {description}
+                  </p>
+                )}
+              </div>
+              <span className="absolute bottom-2 right-2.5 font-mono text-[8px] text-white/60">
+                {scheduleOn && !Number.isNaN(new Date(scheduledFor).getTime())
+                  ? `Planned ${new Date(scheduledFor).toLocaleString()}`
+                  : 'Goes live when the encoder connects'}
+              </span>
+            </>
+          ) : (
+            <div className="flex flex-col items-center gap-2 px-4 text-center text-white/60">
+              <span className="grid size-9 place-items-center rounded-full border border-white/25 bg-white/10">
+                <Radio className="size-3.5" aria-hidden />
+              </span>
+              <p className="text-[9.5px] leading-relaxed">
+                The live preview appears here
+                <br />
+                once you add a title.
+              </p>
             </div>
-            <span className="absolute bottom-2 right-2.5 font-mono text-[8px] text-white/60">
-              {scheduleOn && !Number.isNaN(new Date(scheduledFor).getTime())
-                ? `Planned ${new Date(scheduledFor).toLocaleString()}`
-                : 'Goes live when the encoder connects'}
-            </span>
-          </>
-        ) : (
-          <div className="flex flex-col items-center gap-2 px-4 text-center text-white/60">
-            <span className="grid size-9 place-items-center rounded-full border border-white/25 bg-white/10">
-              <Radio className="size-3.5" aria-hidden />
-            </span>
-            <p className="text-[9.5px] leading-relaxed">
-              The live preview appears here
-              <br />
-              once you add a title.
-            </p>
-          </div>
-        )}
-      </MediaPreviewMedia>
+          )}
+        </MediaPreviewMedia>
+      )}
     </MediaPreviewCard>
   );
 
