@@ -35,6 +35,9 @@ export type RunnerOutcome =
   | { kind: 'unreachable'; error: string };
 
 const RUNNER_TIMEOUT_MS = 60_000;
+// yt-dlp itself has a 60s extraction budget. Give /resolve a little room
+// for the companion's setup and the round trip instead of racing that limit.
+const RESOLVE_RUNNER_TIMEOUT_MS = 75_000;
 
 /**
  * POSTs JSON to one worker endpoint with the bearer token. Never throws —
@@ -54,35 +57,36 @@ export async function runnerRequest(
     return { kind: 'unreachable', error: 'The media runner token is not configured.' };
   }
 
-  let response: Response;
   try {
-    response = await fetch(`${base}${path}`, {
+    const response = await fetch(`${base}${path}`, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${token}`,
         'content-type': 'application/json',
       },
       body: JSON.stringify(body ?? {}),
-      // Resolve runs yt-dlp (20s budget) and start can spend time inside
-      // ffprobe/staged setup before answering — 60s covers both.
-      signal: AbortSignal.timeout(RUNNER_TIMEOUT_MS),
+      signal: AbortSignal.timeout(
+        path === '/resolve' ? RESOLVE_RUNNER_TIMEOUT_MS : RUNNER_TIMEOUT_MS
+      ),
       cache: 'no-store',
     });
+    // fetch resolves at headers, not at the end of the response. The same
+    // deadline must cover reading the body, and a broken/timed-out body is
+    // a transport failure just like a connection that never sent headers.
+    const text = await response.text();
+    let parsed: unknown = null;
+    try {
+      parsed = text ? JSON.parse(text) : null;
+    } catch {
+      parsed = { error: text.slice(0, 300) };
+    }
+    return { kind: 'response', status: response.status, body: parsed };
   } catch (error) {
     return {
       kind: 'unreachable',
       error: error instanceof Error ? error.message : 'The media runner request failed.',
     };
   }
-
-  const text = await response.text();
-  let parsed: unknown = null;
-  try {
-    parsed = text ? JSON.parse(text) : null;
-  } catch {
-    parsed = { error: text.slice(0, 300) };
-  }
-  return { kind: 'response', status: response.status, body: parsed };
 }
 
 /** The stable 502 the live routes render when the worker cannot be reached. */

@@ -23,6 +23,7 @@ export type PumpStatus = 'idle' | 'running' | 'stopped' | 'failed' | 'interrupte
 // Direct media files play through <video src> in every browser; only
 // manifests (m3u8 and friends) need the native-HLS check or hls.js.
 const DIRECT_FILE_PATTERN = /\.(mp4|webm)(?:[?#]|$)/i;
+const PLAYER_LOAD_TIMEOUT_MS = 45_000;
 
 /**
  * Inline preview of a resolved source. The page owns all fetching — this
@@ -54,21 +55,75 @@ export function SourcePreview({
     // through the preview proxy; direct files keep their original URL. The
     // local const keeps the narrowed non-null type in the closures below.
     const isHls = isHlsUrl(playableUrl);
-    // HLS must load same-origin (no CORS headers upstream), so manifests go
-    // through the preview proxy; direct files keep their original URL.
     const source: string = isHls ? proxyUrl(playableUrl) : playableUrl;
     const media: HTMLVideoElement = video;
 
     setPlayerError(null);
     let cancelled = false;
     let hls: { destroy(): void } | null = null;
+    let failed = false;
+    let hasMedia = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    function clearDeadline() {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+
+    function onMediaReady() {
+      hasMedia = true;
+      clearDeadline();
+    }
+
+    function onPause() {
+      // Pausing a stalled stream is intentional, but the initially paused
+      // video must still report sources that never deliver their first frame.
+      if (hasMedia) clearDeadline();
+    }
+
+    function fail(message: string) {
+      if (cancelled || failed) return;
+      failed = true;
+      clearDeadline();
+      hls?.destroy();
+      hls = null;
+      // Reset native playback as well: an error message alone leaves the
+      // browser's loading spinner (and sometimes a pending request) alive.
+      media.removeAttribute('src');
+      media.load();
+      setPlayerError(message);
+    }
+
+    function startDeadline() {
+      if (
+        cancelled || failed || timer !== undefined ||
+        (hasMedia && (media.paused || media.readyState >= media.HAVE_FUTURE_DATA))
+      ) return;
+      timer = setTimeout(() => {
+        fail('The stream took too long to load. Preview the link again to retry.');
+      }, PLAYER_LOAD_TIMEOUT_MS);
+    }
+
+    function onMediaError() {
+      fail('The stream could not be played. Preview the link again to retry.');
+    }
+
+    media.addEventListener('loadeddata', onMediaReady);
+    media.addEventListener('canplay', onMediaReady);
+    media.addEventListener('playing', onMediaReady);
+    media.addEventListener('pause', onPause);
+    media.addEventListener('play', startDeadline);
+    media.addEventListener('waiting', startDeadline);
+    media.addEventListener('stalled', startDeadline);
+    media.addEventListener('error', onMediaError);
+    startDeadline();
 
     async function playManifest() {
       try {
         const { default: Hls } = await import('hls.js');
-        if (cancelled) return;
+        if (cancelled || failed) return;
         if (!Hls.isSupported()) {
-          setPlayerError('This browser cannot play this stream.');
+          fail('This browser cannot play this stream.');
           return;
         }
         const instance = new Hls();
@@ -78,18 +133,14 @@ export function SourcePreview({
         // player down and say so instead of crashing.
         instance.on(Hls.Events.ERROR, (_event, data) => {
           if (!data.fatal) return;
-          instance.destroy();
-          if (hls === instance) hls = null;
-          setPlayerError(
+          fail(
             'The stream stopped playing. Preview the link again to retry.'
           );
         });
         instance.loadSource(source);
         instance.attachMedia(media);
       } catch {
-        if (!cancelled) {
-          setPlayerError('The preview player could not be loaded.');
-        }
+        fail('The preview player could not be loaded.');
       }
     }
 
@@ -108,6 +159,15 @@ export function SourcePreview({
 
     return () => {
       cancelled = true;
+      clearDeadline();
+      media.removeEventListener('loadeddata', onMediaReady);
+      media.removeEventListener('canplay', onMediaReady);
+      media.removeEventListener('playing', onMediaReady);
+      media.removeEventListener('pause', onPause);
+      media.removeEventListener('play', startDeadline);
+      media.removeEventListener('waiting', startDeadline);
+      media.removeEventListener('stalled', startDeadline);
+      media.removeEventListener('error', onMediaError);
       if (hls) {
         hls.destroy();
         hls = null;

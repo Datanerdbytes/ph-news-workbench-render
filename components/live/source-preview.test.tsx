@@ -50,6 +50,7 @@ function stubCanPlayType(answer: '' | 'maybe' | 'probably') {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -59,6 +60,7 @@ beforeEach(() => {
   hlsMock.Hls.isSupported.mockClear();
   // Default to a Chrome-like browser: no native HLS.
   stubCanPlayType('');
+  vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
 });
 
 const MANIFEST_URL = 'https://cdn.example/live.m3u8';
@@ -98,6 +100,101 @@ function renderPump(
 }
 
 describe('SourcePreview', () => {
+  it('stops a player that never receives media and offers a preview retry', async () => {
+    vi.useFakeTimers();
+    renderPreview();
+    await act(async () => {});
+    await act(async () => { await vi.advanceTimersByTimeAsync(45_000); });
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/took too long.*preview.*again/i);
+    expect(hlsMock.instances[0].destroy).toHaveBeenCalledOnce();
+    expect(document.querySelector('video')?.hasAttribute('src')).toBe(false);
+    expect(HTMLMediaElement.prototype.load).toHaveBeenCalledOnce();
+  });
+
+  it('clears the loading deadline when media arrives, including while paused', async () => {
+    vi.useFakeTimers();
+    renderPreview();
+    await act(async () => {});
+    fireEvent.loadedData(document.querySelector('video')!);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(hlsMock.instances[0].destroy).not.toHaveBeenCalled();
+  });
+
+  it('bounds a later playback stall too', async () => {
+    vi.useFakeTimers();
+    renderPreview();
+    await act(async () => {});
+    const video = document.querySelector('video')!;
+    fireEvent.loadedData(video);
+    Object.defineProperty(video, 'paused', { value: false });
+    fireEvent.waiting(video);
+    await act(async () => { await vi.advanceTimersByTimeAsync(45_000); });
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/took too long/i);
+    expect(hlsMock.instances[0].destroy).toHaveBeenCalledOnce();
+  });
+
+  it('suspends a buffering deadline while paused and re-arms it on resume', async () => {
+    vi.useFakeTimers();
+    renderPreview();
+    await act(async () => {});
+    const video = document.querySelector('video')!;
+    Object.defineProperty(video, 'paused', { value: false, writable: true });
+    fireEvent.loadedData(video);
+    fireEvent.waiting(video);
+    Object.defineProperty(video, 'paused', { value: true });
+    fireEvent.pause(video);
+    fireEvent.stalled(video);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    Object.defineProperty(video, 'paused', { value: false });
+    fireEvent.play(video);
+    await act(async () => { await vi.advanceTimersByTimeAsync(45_000); });
+    expect(screen.getByRole('alert')).toHaveTextContent(/took too long/i);
+  });
+
+  it('keeps the initial deadline when paused before any media arrives', async () => {
+    vi.useFakeTimers();
+    renderPreview();
+    await act(async () => {});
+    fireEvent.pause(document.querySelector('video')!);
+    await act(async () => { await vi.advanceTimersByTimeAsync(45_000); });
+    expect(screen.getByRole('alert')).toHaveTextContent(/took too long/i);
+  });
+
+  it('does not time out a stalled network request while enough media is buffered', async () => {
+    vi.useFakeTimers();
+    renderPreview();
+    await act(async () => {});
+    const video = document.querySelector('video')!;
+    fireEvent.loadedData(video);
+    Object.defineProperty(video, 'readyState', { value: video.HAVE_ENOUGH_DATA });
+    fireEvent.stalled(video);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(hlsMock.instances[0].destroy).not.toHaveBeenCalled();
+  });
+
+  it('cancels the player deadline on unmount', async () => {
+    vi.useFakeTimers();
+    const { unmount } = renderPreview();
+    await act(async () => {});
+    unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(hlsMock.instances[0].destroy).toHaveBeenCalledOnce();
+    expect(HTMLMediaElement.prototype.load).not.toHaveBeenCalled();
+  });
+
+  it('reports native media errors instead of leaving a direct-file spinner', () => {
+    renderPreview({ playableUrl: FILE_URL });
+    fireEvent.error(document.querySelector('video')!);
+    expect(screen.getByRole('alert')).toHaveTextContent(/could not be played/i);
+  });
+
   it('always routes an HLS manifest through hls.js even in a native-HLS browser', async () => {
     stubCanPlayType('probably');
     renderPreview({ isLive: true });

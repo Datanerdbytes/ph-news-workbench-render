@@ -19,6 +19,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   delete process.env.MEDIA_RUNNER_URL;
   delete process.env.MEDIA_RUNNER_TOKEN;
   vi.restoreAllMocks();
@@ -76,6 +77,48 @@ describe('runnerRequest', () => {
     const outcome = await runnerRequest('/resolve', { url: 'https://x' });
 
     expect(outcome).toEqual({ kind: 'unreachable', error: 'fetch failed' });
+  });
+
+  it('unreachable when the connection fails after response headers', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(new ReadableStream({
+      start(controller) {
+        controller.error(new TypeError('terminated'));
+      },
+    })));
+
+    await expect(runnerRequest('/resolve', { url: 'https://x' })).resolves.toEqual({
+      kind: 'unreachable', error: 'terminated',
+    });
+  });
+
+  it.each(['headers', 'body'])('bounds a stalled runner %s with the request deadline', async (phase) => {
+    vi.useFakeTimers();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException('Runner timed out', 'TimeoutError')), ms);
+      return controller.signal;
+    });
+    fetchMock.mockImplementationOnce((_url, init: RequestInit) => {
+      const signal = init.signal!;
+      if (phase === 'headers') {
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      }
+      return Promise.resolve(new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"title":'));
+          signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+        },
+      })));
+    });
+
+    const pending = runnerRequest('/resolve', { url: 'https://x' });
+    // Attach the assertion before advancing so rejected bodies are observed.
+    const result = expect(pending).resolves.toMatchObject({ kind: 'unreachable' });
+    await vi.advanceTimersByTimeAsync(75_000);
+    await result;
+    expect(timeout).toHaveBeenCalledWith(75_000);
   });
 
   it('unreachable when the token is not configured', async () => {
