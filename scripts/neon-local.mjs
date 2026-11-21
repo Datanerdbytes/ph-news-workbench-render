@@ -3,7 +3,13 @@
 //   NODE_OPTIONS="--import ./scripts/neon-local.mjs" node --env-file=.env.local <script>
 //   NODE_OPTIONS="--import ./scripts/neon-local.mjs" npm run dev
 //
-// Only activates for local DATABASE_URL hosts; production is untouched.
+// Only activates for local DATABASE_URL hosts; production is untouched, which
+// is why it is safe to preload from `npm start` as well as `npm run dev`.
+//
+// Nothing in here may throw: a preload failure aborts Node before any
+// application code runs, so a config typo would become a boot crash with no
+// usable message instead of a database error the app can report.
+//
 // `neon()` (and drizzle's neon-http driver on top of it) speaks Neon's HTTP
 // /sql protocol, which a vanilla Postgres has no endpoint for. fetchFunction
 // intercepts those calls, executes them through a WebSocket Pool tunneled by
@@ -16,12 +22,25 @@
 import { neonConfig, Pool } from "@neondatabase/serverless";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { connect } from "node:net";
 
-// The preload runs before Next has loaded .env.local, so fall back to
-// reading the file directly — but never let a missing file kill the host
-// process; a preload failure aborts Node before any code runs.
+// Next's CLI has not loaded its env files yet. Use the same loader and mode
+// before capturing a connection string for the local pool.
+const require = createRequire(import.meta.url);
+const nextMode = process.env.NEON_LOCAL_NEXT_MODE;
 let dbUrl = process.env.DATABASE_URL;
-if (!dbUrl) {
+if (nextMode === "development" || nextMode === "production") {
+  try {
+    const { loadEnvConfig } = createRequire(require.resolve("next/package.json"))("@next/env");
+    loadEnvConfig(process.cwd(), nextMode === "development");
+    dbUrl = process.env.DATABASE_URL;
+  } catch {
+    // Let Next report any environment-loading failure itself.
+    dbUrl = undefined;
+  }
+} else if (dbUrl === undefined) {
+  // Standalone workers use Node's --env-file; retain the local fallback for
+  // invocations that preload this module without that flag.
   try {
     dbUrl =
       readFileSync(new URL("../.env.local", import.meta.url), "utf8")
@@ -36,7 +55,15 @@ if (!dbUrl) {
   }
 }
 
-const host = dbUrl ? new URL(dbUrl).hostname : "";
+// A malformed DATABASE_URL must not abort the host process. Treat an
+// unparseable value as "not local" and leave the driver untouched; the app's
+// own database error is far more useful than a preload crash.
+let host = "";
+try {
+  host = dbUrl ? new URL(dbUrl).hostname : "";
+} catch {
+  // Not a URL — the app will report it.
+}
 const isLocal = host === "postgres" || host === "localhost";
 
 if (isLocal) {
@@ -100,7 +127,7 @@ if (isLocal) {
     }
   };
 
-  const cjs = createRequire(import.meta.url)("@neondatabase/serverless");
+  const cjs = require("@neondatabase/serverless");
   const cjsConfig = cjs.neonConfig;
   cjsConfig.wsProxy = neonConfig.wsProxy;
   cjsConfig.useSecureWebSocket = false;
@@ -114,4 +141,29 @@ if (isLocal) {
   // as a read-only getter, so it cannot be patched here either. CJS scripts
   // that rely on it (migrate-auth.js) must have their statements applied out
   // of band, e.g. via psql.
+
+  // The driver reports a stopped Docker stack as a bare "fetch failed", which
+  // names neither the cause nor the fix. Probe the proxy once and say so.
+  // Warn only: a missing container must not abort the host process.
+  try {
+    await new Promise((resolve, reject) => {
+      const socket = connect({ host: "127.0.0.1", port: 5434 });
+      socket.setTimeout(1000);
+      socket.once("connect", () => {
+        socket.destroy();
+        resolve();
+      });
+      socket.once("timeout", () => {
+        socket.destroy();
+        reject(new Error("timeout"));
+      });
+      socket.once("error", reject);
+    });
+  } catch {
+    console.warn(
+      "[neon-local] no local Postgres proxy on localhost:5434 — database " +
+        "queries will fail. Start the containers with: " +
+        "docker start phnews-pg phnews-wsproxy",
+    );
+  }
 }

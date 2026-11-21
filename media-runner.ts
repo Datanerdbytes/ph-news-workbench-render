@@ -30,6 +30,7 @@ import {
 } from './lib/live/public-network';
 import { localRuntimeEnabled } from './lib/reels/media';
 import { runnerToken } from './lib/live/runner-config';
+import { withWorkspaceLiveLock } from './lib/live/workspace-lock';
 
 // Media runner: the standalone worker that owns the sandboxed native-media
 // work when the web runtime cannot run the sandbox (Render). The web app
@@ -137,6 +138,10 @@ type TrackedPump = {
   workspaceId: string;
   /** True once the DB row has been confirmed `running` for this pump. */
   dbRunning: boolean;
+  /** Ownership is reserved before asynchronous native setup starts. */
+  starting?: boolean;
+  /** A terminal update still owed even if native setup removed its process. */
+  pendingTerminal?: { error: string | null };
 };
 
 const RECONCILE_INTERVAL_MS = 3_000;
@@ -201,8 +206,15 @@ export async function reconcileOrphanedPumps(sql: RunnerSql): Promise<number> {
 export function createRunnerServer(deps: RunnerDeps) {
   /** Stream id → workspace: the pumps this process is responsible for. */
   const registry = new Map<string, TrackedPump>();
+  let shuttingDown = false;
   let reconciling = false;
   let reconcileTimer: ReturnType<typeof setInterval> | null = null;
+
+  // Reuse the live lifecycle mutex with a runner-specific, per-stream key.
+  // Native setup stays outside it so stop can cancel an in-flight start.
+  function withStreamState<T>(id: string, operation: () => Promise<T> | T): Promise<T> {
+    return withWorkspaceLiveLock(`media-runner:${id}`, operation);
+  }
 
   /**
    * Keeps the DB honest for the pumps this process owns: a terminal settle
@@ -215,48 +227,60 @@ export function createRunnerServer(deps: RunnerDeps) {
     reconciling = true;
     try {
       for (const [id, tracked] of registry) {
-        const status = deps.manager.status(id);
-        if (status.running || status.retrying) {
-          // Still live (or inside a retry backoff — not terminal). If the
-          // start path never confirmed the DB write (e.g. a network hiccup
-          // right after a successful spawn), self-heal it once.
-          if (!tracked.dbRunning) {
-            await deps.sql`
-              UPDATE live_streams
-              SET pump_status = 'running',
-                  pump_started_at = COALESCE(pump_started_at, now()),
-                  pump_error = NULL, updated_at = now()
-              WHERE id::text = ${id} AND workspace_id = ${tracked.workspaceId}
-            `;
-            tracked.dbRunning = true;
-            log({ event: 'reconciled_running', streamId: id });
-          }
-          continue;
-        }
-        registry.delete(id);
-        if (status.error) {
-          await markPumpsFailed(deps.sql, [id], [tracked.workspaceId], status.error);
-          log({ event: 'reconciled_failed', streamId: id });
-        } else {
-          await deps.sql`
-            UPDATE live_streams
-            SET pump_status = 'stopped', updated_at = now()
-            WHERE id::text = ${id} AND workspace_id = ${tracked.workspaceId}
-          `;
-          log({ event: 'reconciled_stopped', streamId: id });
+        if (tracked.starting) continue;
+        try {
+          await withStreamState(id, async () => {
+            if (shuttingDown || registry.get(id) !== tracked || tracked.starting) return;
+            const status = deps.manager.status(id);
+            if (!tracked.pendingTerminal && (status.running || status.retrying)) {
+              // Still live (or inside a retry backoff — not terminal). If the
+              // start path never confirmed the DB write (e.g. a network hiccup
+              // right after a successful spawn), self-heal it once.
+              if (!tracked.dbRunning) {
+                await deps.sql`
+                  UPDATE live_streams
+                  SET pump_status = 'running',
+                      pump_started_at = COALESCE(pump_started_at, now()),
+                      pump_error = NULL, updated_at = now()
+                  WHERE id::text = ${id} AND workspace_id = ${tracked.workspaceId}
+                `;
+                tracked.dbRunning = true;
+                log({ event: 'reconciled_running', streamId: id });
+              }
+              return;
+            }
+            const terminalError = tracked.pendingTerminal ? tracked.pendingTerminal.error : status.error;
+            if (terminalError) {
+              await markPumpsFailed(deps.sql, [id], [tracked.workspaceId], terminalError);
+              log({ event: 'reconciled_failed', streamId: id });
+            } else {
+              await deps.sql`
+                UPDATE live_streams
+                SET pump_status = 'stopped', updated_at = now()
+                WHERE id::text = ${id} AND workspace_id = ${tracked.workspaceId}
+              `;
+              log({ event: 'reconciled_stopped', streamId: id });
+            }
+            // Keep terminal pumps tracked until their DB update succeeds, so a
+            // transient database outage is retried on the next sweep. A restart
+            // while the write was in flight may have installed a new entry.
+            if (registry.get(id) === tracked) registry.delete(id);
+          });
+        } catch (error) {
+          log({
+            event: 'reconcile_error',
+            streamId: id,
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
       }
-    } catch (error) {
-      log({
-        event: 'reconcile_error',
-        error: error instanceof Error ? error.message : String(error),
-      });
     } finally {
       reconciling = false;
     }
   }
 
   async function handleStart(request: IncomingMessage): Promise<HttpResponse> {
+    if (shuttingDown) return { status: 503, body: { error: SHUTDOWN_ERROR } };
     const body = (await readJson(request)) as {
       workspaceId?: unknown;
       streamId?: unknown;
@@ -321,69 +345,98 @@ export function createRunnerServer(deps: RunnerDeps) {
     }
 
     const manager = deps.manager;
-    if (manager.status(stream.id).running) {
-      return {
-        status: 409,
-        body: { error: 'The pump is already running for this stream.' },
-      };
-    }
-
-    const outcome = await manager.start({
-      id: stream.id,
-      source: stream.source_url,
-      // 'staged' rows (DASH-only sources, no playable URL) are piped through
-      // yt-dlp feeders; everything else takes the ffprobe path.
-      mode: parseSourceMode(stream.source_mode) ?? 'direct',
-      // Never logged or returned — the manager redacts it everywhere it lands.
-      dest: ingestUrl,
+    const id = String(stream.id);
+    const reservation = await withStreamState(id, () => {
+      if (shuttingDown) return { status: 503, body: { error: SHUTDOWN_ERROR } };
+      const status = manager.status(stream.id);
+      if (registry.get(id)?.starting || status.running || status.retrying) {
+        return { status: 409, body: { error: 'The pump is already running for this stream.' } };
+      }
+      const tracked: TrackedPump = { workspaceId, dbRunning: false, starting: true };
+      const previous = registry.get(id);
+      if (previous) tracked.pendingTerminal = previous.pendingTerminal ?? { error: status.error };
+      registry.set(id, tracked);
+      return tracked;
     });
+    if ('status' in reservation) return reservation;
+    const tracked = reservation;
+    // The lock releases before this continuation resumes. A stop or shutdown
+    // may already have cancelled ownership without a native process to stop.
+    if (shuttingDown) return { status: 503, body: { error: SHUTDOWN_ERROR } };
+    if (registry.get(id) !== tracked) return { status: 409, body: { error: 'The pump start was cancelled.' } };
+    let outcome;
+    try {
+      outcome = await manager.start({
+        id: stream.id,
+        source: stream.source_url,
+        // 'staged' rows (DASH-only sources, no playable URL) are piped through
+        // yt-dlp feeders; everything else takes the ffprobe path.
+        mode: parseSourceMode(stream.source_mode) ?? 'direct',
+        // Never logged or returned — the manager redacts it everywhere it lands.
+        dest: ingestUrl,
+      });
+    } catch (error) {
+      await withStreamState(id, () => {
+        if (registry.get(id) === tracked) {
+          tracked.starting = false;
+          tracked.pendingTerminal ??= { error: 'The media runner could not start this pump.' };
+        }
+      });
+      throw error;
+    }
+    return withStreamState(id, async () => {
+      tracked.starting = false;
+      if (shuttingDown) return { status: 503, body: { error: SHUTDOWN_ERROR } };
+      if (registry.get(id) !== tracked) {
+        return { status: 409, body: { error: 'The pump start was cancelled.' } };
+      }
+      if (!outcome.ok) {
+        // Keep any older unsaved terminal state for gate failures; a setup
+        // failure replaces it with this attempt's error until SQL succeeds.
+        if (outcome.reason === 'spawn_failed') tracked.pendingTerminal = { error: outcome.error };
+        if (!tracked.pendingTerminal) registry.delete(id);
+        if (outcome.reason === 'gate_disabled') {
+          return { status: 400, body: { error: outcome.error } };
+        }
+        if (outcome.reason === 'isolation_unavailable') {
+          return { status: 503, body: { error: outcome.error } };
+        }
+        if (outcome.reason === 'already_running') {
+          return { status: 409, body: { error: outcome.error } };
+        }
+        // spawn_failed — the manager's error text is already key-redacted.
+        await deps.sql`
+          UPDATE live_streams
+          SET pump_status = 'failed', pump_error = ${outcome.error}, updated_at = now()
+          WHERE id = ${stream.id} AND workspace_id = ${workspaceId}
+        `;
+        if (registry.get(id) === tracked) registry.delete(id);
+        return { status: 502, body: { error: outcome.error } };
+      }
 
-    if (!outcome.ok) {
-      if (outcome.reason === 'gate_disabled') {
-        return { status: 400, body: { error: outcome.error } };
-      }
-      if (outcome.reason === 'isolation_unavailable') {
-        return { status: 503, body: { error: outcome.error } };
-      }
-      if (outcome.reason === 'already_running') {
-        return { status: 409, body: { error: outcome.error } };
-      }
-      // spawn_failed — the manager's error text is already key-redacted.
-      await deps.sql`
+      delete tracked.pendingTerminal;
+      const updated = (await deps.sql`
         UPDATE live_streams
-        SET pump_status = 'failed', pump_error = ${outcome.error}, updated_at = now()
+        SET pump_status = 'running', pump_started_at = now(), pump_error = NULL,
+            updated_at = now()
         WHERE id = ${stream.id} AND workspace_id = ${workspaceId}
-      `;
-      return { status: 502, body: { error: outcome.error } };
-    }
+        RETURNING pump_started_at
+      `) as unknown as { pump_started_at: string | Date | null }[];
 
-    registry.set(String(stream.id), {
-      workspaceId,
-      dbRunning: false,
-    });
+      // The start write landed — the reconciler only backfills it if it hadn't.
+      if (registry.get(id) === tracked) tracked.dbRunning = true;
 
-    const updated = (await deps.sql`
-      UPDATE live_streams
-      SET pump_status = 'running', pump_started_at = now(), pump_error = NULL,
-          updated_at = now()
-      WHERE id = ${stream.id} AND workspace_id = ${workspaceId}
-      RETURNING pump_started_at
-    `) as unknown as { pump_started_at: string | Date | null }[];
-
-    // The start write landed — the reconciler only backfills it if it hadn't.
-    const tracked = registry.get(String(stream.id));
-    if (tracked) tracked.dbRunning = true;
-
-    log({ event: 'pump_started', streamId: stream.id, workspaceId });
-    return {
-      status: 200,
-      body: {
-        pump: {
-          status: 'running',
-          startedAt: updated[0]?.pump_started_at ?? null,
+      log({ event: 'pump_started', streamId: stream.id, workspaceId });
+      return {
+        status: 200,
+        body: {
+          pump: {
+            status: 'running',
+            startedAt: updated[0]?.pump_started_at ?? null,
+          },
         },
-      },
-    };
+      };
+    });
   }
 
   async function handleStop(request: IncomingMessage): Promise<HttpResponse> {
@@ -406,11 +459,11 @@ export function createRunnerServer(deps: RunnerDeps) {
       // stream is a no-op success, not an error.
       deps.manager.stop(stream.id);
       registry.delete(String(stream.id));
-      await deps.sql`
+      await withStreamState(String(stream.id), () => deps.sql`
         UPDATE live_streams
         SET pump_status = 'stopped', updated_at = now()
         WHERE id = ${stream.id} AND workspace_id = ${workspaceId}
-      `;
+      `);
       log({ event: 'pump_stopped', streamId: stream.id, workspaceId });
       return {
         status: 200,
@@ -426,17 +479,16 @@ export function createRunnerServer(deps: RunnerDeps) {
     const own = [...registry.entries()].filter(
       ([, tracked]) => tracked.workspaceId === workspaceId
     );
-    for (const [id] of own) {
+    const writes = own.map(([id]) => {
       deps.manager.stop(id);
       registry.delete(id);
-    }
-    for (const [id] of own) {
-      await deps.sql`
+      return withStreamState(id, () => deps.sql`
         UPDATE live_streams
         SET pump_status = 'stopped', updated_at = now()
         WHERE id::text = ${id} AND workspace_id = ${workspaceId}
-      `;
-    }
+      `);
+    });
+    await Promise.all(writes);
     log({ event: 'pump_stopped_all', workspaceId, count: own.length });
     return { status: 200, body: { pump: { status: 'stopped', startedAt: null } } };
   }
@@ -563,17 +615,21 @@ export function createRunnerServer(deps: RunnerDeps) {
     },
     /** Terminal write for every pump this process owns (shutdown path). */
     async markOwnPumpsFailed(error: string): Promise<void> {
+      shuttingDown = true;
       const ids = [...registry.keys()];
-      await markPumpsFailed(
-        deps.sql,
-        ids,
-        ids.map((id) => registry.get(id)?.workspaceId ?? null),
-        error
-      );
-      for (const id of ids) {
-        deps.manager.stop(id);
-        registry.delete(id);
-      }
+      // Stop detached media groups before any network I/O: the Mac's stop
+      // script may terminate this server while the database is unavailable.
+      for (const id of ids) deps.manager.stop(id, { force: true });
+      const outcomes = await Promise.allSettled(ids.map((id) =>
+        withStreamState(id, async () => {
+          const tracked = registry.get(id);
+          if (!tracked) return;
+          await markPumpsFailed(deps.sql, [id], [tracked.workspaceId], error);
+          if (registry.get(id) === tracked) registry.delete(id);
+        })
+      ));
+      const failure = outcomes.find((outcome) => outcome.status === 'rejected');
+      if (failure?.status === 'rejected') throw failure.reason;
     },
     listen(port: number): Promise<void> {
       return new Promise((resolve) => {

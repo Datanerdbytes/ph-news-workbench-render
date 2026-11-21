@@ -499,6 +499,40 @@ describe('POST /pump/stop', () => {
     }
   });
 
+  it('queues the second stop before a replacement starts while the first write stalls', async () => {
+    let release: (() => void) | undefined;
+    const { fn } = fakeSql();
+    const order: string[] = [];
+    const runner = createRunnerServer({
+      manager: fakeManager(), resolveVideo: resolveVideoMock,
+      sql: (strings, ...values) => {
+        const sql = strings.join('?');
+        if (sql.includes('SELECT')) return Promise.resolve([{ ...STREAM_ROW()[0], id: 8 }]);
+        if (sql.includes("SET pump_status = 'stopped'") && values.includes('7')) {
+          return new Promise((resolve) => { release = () => resolve([]); });
+        }
+        if (sql.includes("SET pump_status = 'stopped'")) order.push('stopped');
+        if (sql.includes("SET pump_status = 'running'")) order.push('running');
+        return fn(strings, ...values);
+      },
+    });
+    runner.registry.set('7', { workspaceId: 'ws-1', dbRunning: true });
+    runner.registry.set('8', { workspaceId: 'ws-1', dbRunning: true });
+    startMock.mockResolvedValue({ ok: true });
+    const port = await listen(runner);
+    const stopping = client(port, '/pump/stop', { token: TOKEN, body: { workspaceId: 'ws-1' } });
+    try {
+      await vi.waitFor(() => expect(release).toBeDefined());
+      expect((await client(port, '/pump/start', {
+        token: TOKEN, body: { workspaceId: 'ws-1', streamId: '8' },
+      })).status).toBe(200);
+    } finally {
+      release?.();
+      try { await stopping; } finally { await runner.close(); }
+    }
+    expect(order).toEqual(['stopped', 'running']);
+  });
+
   it('stop-all only touches pumps this worker started for the workspace', async () => {
     // Start a pump first so the registry has an entry for ws-1.
     startMock.mockResolvedValue({ ok: true });
@@ -537,6 +571,213 @@ describe('POST /pump/stop', () => {
 });
 
 describe('reconcileOnce', () => {
+  it('retains a failed replacement until its terminal status is persisted', async () => {
+    let writes = 0;
+    let savedError: unknown;
+    const { runner } = makeServer((text, values) => {
+      if (text.includes('SELECT')) return STREAM_ROW();
+      writes += 1;
+      if (writes <= 2) throw new Error('database unavailable');
+      savedError = values[0];
+      return [];
+    });
+    runner.registry.set('7', { workspaceId: 'ws-1', dbRunning: true });
+    statusMock.mockReturnValue({ running: false, retrying: false, error: 'old failure' });
+    await runner.reconcileOnce();
+    startMock.mockImplementation(async () => {
+      statusMock.mockReturnValue({ running: false, retrying: false, error: null });
+      return { ok: false, reason: 'spawn_failed', error: 'replacement setup failed' };
+    });
+    const port = await listen(runner);
+    try {
+      expect((await client(port, '/pump/start', { token: TOKEN, body: { workspaceId: 'ws-1', streamId: '7' } })).status).toBe(500);
+      expect(runner.registry.has('7')).toBe(true);
+      await runner.reconcileOnce();
+      expect(savedError).toBe('replacement setup failed');
+      expect(runner.registry.has('7')).toBe(false);
+    } finally { await runner.close(); }
+  });
+
+  it('does not spawn if shutdown cancels the reservation before the caller resumes', async () => {
+    const { runner } = makeServer((text) => text.includes('SELECT') ? STREAM_ROW() : []);
+    let shutdown: Promise<void> | undefined;
+    const set = runner.registry.set.bind(runner.registry);
+    vi.spyOn(runner.registry, 'set').mockImplementation((id, tracked) => {
+      const result = set(id, tracked);
+      queueMicrotask(() => { shutdown = runner.markOwnPumpsFailed('shutdown'); });
+      return result;
+    });
+    startMock.mockResolvedValue({ ok: true });
+    const port = await listen(runner);
+    try {
+      expect((await client(port, '/pump/start', { token: TOKEN, body: { workspaceId: 'ws-1', streamId: '7' } })).status).toBe(503);
+      await shutdown;
+      expect(startMock).not.toHaveBeenCalled();
+    } finally { await shutdown; await runner.close(); }
+  });
+
+  it('finishes the old terminal write before starting a replacement pump', async () => {
+    let release: (() => void) | undefined;
+    let reads = 0;
+    const writes: string[] = [];
+    const runner = createRunnerServer({
+      manager: fakeManager(), resolveVideo: resolveVideoMock,
+      sql: (strings) => {
+        const text = strings.join('?');
+        if (text.includes('SELECT')) { reads += 1; return Promise.resolve(STREAM_ROW()); }
+        if (text.includes("SET pump_status = 'stopped'")) {
+          return new Promise((resolve) => { release = () => { writes.push('stopped'); resolve([]); }; });
+        }
+        writes.push('running');
+        return Promise.resolve([]);
+      },
+    });
+    startMock.mockResolvedValue({ ok: true });
+    runner.registry.set('7', { workspaceId: 'ws-1', dbRunning: true });
+    const port = await listen(runner);
+    const sweep = runner.reconcileOnce();
+    try {
+      let starting: Promise<ClientResult> | undefined;
+      try {
+        await vi.waitFor(() => expect(release).toBeDefined());
+        starting = client(port, '/pump/start', { token: TOKEN, body: { workspaceId: 'ws-1', streamId: '7' } });
+        await vi.waitFor(() => expect(reads).toBe(1));
+        expect(startMock).not.toHaveBeenCalled();
+      } finally {
+        release?.();
+        await sweep;
+        if (starting) await starting;
+      }
+      expect((await starting)?.status).toBe(200);
+    } finally {
+      await runner.close();
+    }
+    expect(writes).toEqual(['stopped', 'running']);
+    expect(runner.registry.has('7')).toBe(true);
+  });
+
+  it.each([false, true])('does not write running for a cancelled start (replacement: %s)', async (replacement) => {
+    let release!: (value: PumpStartResult) => void;
+    startMock.mockImplementationOnce(() => new Promise<PumpStartResult>((resolve) => { release = resolve; }));
+    startMock.mockResolvedValue({ ok: true });
+    const { runner, queries } = makeServer((text) => text.includes('SELECT') ? STREAM_ROW() : []);
+    const port = await listen(runner);
+    const starting = client(port, '/pump/start', { token: TOKEN, body: { workspaceId: 'ws-1', streamId: '7' } });
+    try {
+      await vi.waitFor(() => expect(release).toBeDefined());
+      expect((await client(port, '/pump/stop', { token: TOKEN, body: { workspaceId: 'ws-1' } })).status).toBe(200);
+      if (replacement) {
+        expect((await client(port, '/pump/start', { token: TOKEN, body: { workspaceId: 'ws-1', streamId: '7' } })).status).toBe(200);
+      }
+      release({ ok: true });
+      expect((await starting).status).toBe(409);
+      expect(queries.filter((query) => query.text.includes("SET pump_status = 'running'"))).toHaveLength(replacement ? 1 : 0);
+      expect(stopMock).toHaveBeenCalledTimes(1);
+    } finally {
+      release?.({ ok: true });
+      await starting;
+      await runner.close();
+    }
+  });
+
+  it('continues reconciling other pumps when one terminal write keeps failing', async () => {
+    const { runner, queries } = makeServer((text, values) => {
+      if (text.includes('UPDATE') && values.includes('7')) throw new Error('pump 7 write failed');
+      return [];
+    });
+    runner.registry.set('7', { workspaceId: 'ws-1', dbRunning: true });
+    runner.registry.set('8', { workspaceId: 'ws-1', dbRunning: true });
+    await runner.reconcileOnce();
+    expect(runner.registry.has('7')).toBe(true);
+    expect(runner.registry.has('8')).toBe(false);
+    expect(queries.some((query) => query.values.includes('8'))).toBe(true);
+  });
+
+  it('owns a starting pump during shutdown and refuses subsequent starts', async () => {
+    let finishStart!: (value: PumpStartResult) => void;
+    startMock.mockImplementation(() => new Promise<PumpStartResult>((resolve) => { finishStart = resolve; }));
+    const { runner, queries } = makeServer((text) =>
+      text.includes('FROM live_streams') ? STREAM_ROW() : []
+    );
+    const port = await listen(runner);
+    const request = client(port, '/pump/start', { token: TOKEN, body: { workspaceId: 'ws-1', streamId: '7' } });
+    try {
+      await vi.waitFor(() => expect(startMock).toHaveBeenCalled());
+      await runner.markOwnPumpsFailed('shutting down');
+      finishStart({ ok: true });
+      expect((await request).status).toBe(503);
+      expect(stopMock).toHaveBeenCalledWith('7', { force: true });
+      expect(queries.some((query) => query.text.includes("SET pump_status = 'running'"))).toBe(false);
+      const next = await client(port, '/pump/start', { token: TOKEN, body: { workspaceId: 'ws-1', streamId: '7' } });
+      expect(next.status).toBe(503);
+      expect(startMock).toHaveBeenCalledTimes(1);
+    } finally {
+      finishStart?.({ ok: true });
+      await request;
+      await runner.close();
+    }
+  });
+
+  it.each([
+    { state: 'failed', error: 'Source stderr: HTTP error 403 Forbidden' },
+    { state: 'stopped', error: null },
+  ])('retries a lost $state write without forgetting the terminal pump', async ({ state, error }) => {
+    startMock.mockResolvedValue({ ok: true });
+    let terminalWrites = 0;
+    const { runner, queries } = makeServer((text, values) => {
+      if (text.includes('FROM live_streams')) {
+        return [{ ...STREAM_ROW()[0], id: values.includes('8') ? 8 : 7 }];
+      }
+      if (text.includes(`SET pump_status = '${state}'`) && values.includes('7')) {
+        terminalWrites += 1;
+        if (terminalWrites === 1) throw new Error('fetch failed');
+      }
+      return [{ pump_started_at: null }];
+    });
+    const port = await listen(runner);
+    try {
+      const start = await client(port, '/pump/start', {
+        token: TOKEN,
+        body: { workspaceId: 'ws-1', streamId: '7' },
+      });
+      expect(start.status).toBe(200);
+      const secondStart = await client(port, '/pump/start', {
+        token: TOKEN,
+        body: { workspaceId: 'ws-1', streamId: '8' },
+      });
+      expect(secondStart.status).toBe(200);
+      statusMock.mockReturnValue({
+        running: false,
+        startedAt: new Date(),
+        error,
+        retrying: false,
+      });
+
+      await runner.reconcileOnce();
+      expect(terminalWrites).toBe(1);
+      expect(runner.registry.has('7')).toBe(true);
+      expect(runner.registry.has('8')).toBe(false);
+      expect(queries.some((query) =>
+        query.text.includes(`SET pump_status = '${state}'`) && query.values.includes('8')
+      )).toBe(true);
+
+      await runner.reconcileOnce();
+      expect(terminalWrites).toBe(2);
+      expect(runner.registry.has('7')).toBe(false);
+      const update = queries.find((query) =>
+        query.text.includes(`SET pump_status = '${state}'`) && query.values.includes('7')
+      );
+      expect(update?.values).toContain('7');
+      expect(update?.values).toContain('ws-1');
+      if (error) expect(update?.values).toContain(error);
+
+      await runner.reconcileOnce();
+      expect(terminalWrites).toBe(2);
+    } finally {
+      await runner.close();
+    }
+  });
+
   it('writes failed with the manager error when a pump terminally dies', async () => {
     startMock.mockResolvedValue({ ok: true });
     // Start with the pump idle so the start request passes the duplicate
@@ -580,7 +821,7 @@ describe('reconcileOnce', () => {
       running: false,
       startedAt: new Date(),
       error: null as string | null,
-      retrying: true,
+      retrying: false,
     };
     statusMock.mockImplementation(() => managerStatus);
     const { runner, queries } = makeServer((text) =>
@@ -592,11 +833,20 @@ describe('reconcileOnce', () => {
         token: TOKEN,
         body: { workspaceId: 'ws-1', streamId: '7' },
       });
+      managerStatus.retrying = true;
       const before = queries.length;
       await runner.reconcileOnce();
       expect(
         queries.slice(before).some((query) => query.text.includes('UPDATE'))
       ).toBe(false);
+      // Pending settlement is reported as retrying too: it must remain in
+      // the workspace registry so disconnect can cancel the eventual retry.
+      expect(runner.registry.has('7')).toBe(true);
+      await client(port, '/pump/stop', {
+        token: TOKEN,
+        body: { workspaceId: 'ws-1' },
+      });
+      expect(stopMock).toHaveBeenCalledWith('7');
     } finally {
       await runner.close();
     }
@@ -647,6 +897,57 @@ describe('reconcileOnce', () => {
     } finally {
       await runner.close();
     }
+  });
+});
+
+describe('shutdown cleanup', () => {
+  it.each(['rejects', 'stalls'])('submits every shutdown write even if the first %s', async (failure) => {
+    let rejectFirst!: (error: Error) => void;
+    const first = new Promise<unknown[]>((_, reject) => { rejectFirst = reject; });
+    const writes: unknown[][] = [];
+    const runner = createRunnerServer({ manager: fakeManager(), resolveVideo: resolveVideoMock,
+      sql: (_strings, ...values) => {
+        expect(stopMock).toHaveBeenCalledTimes(2);
+        writes.push(values);
+        if (values.includes('7')) return failure === 'rejects' ? Promise.reject(new Error('write failed')) : first;
+        return Promise.resolve([]);
+      },
+    });
+    runner.registry.set('7', { workspaceId: 'ws-1', dbRunning: true });
+    runner.registry.set('8', { workspaceId: 'ws-1', dbRunning: true });
+    const shutdown = runner.markOwnPumpsFailed('shutdown').catch((error: Error) => error);
+    try {
+      await vi.waitFor(() => expect(writes).toHaveLength(2));
+      expect(runner.registry.has('8')).toBe(false);
+    } finally {
+      if (failure === 'stalls') rejectFirst(new Error('write failed'));
+      await shutdown;
+    }
+    expect(runner.registry.has('7')).toBe(true);
+  });
+
+  it.each(['rejects', 'stalls'])('kills owned pumps before a database write that %s', async (failure) => {
+    let stoppedBeforeWrite = false;
+    let rejectWrite!: (error: Error) => void;
+    const blockedWrite = new Promise<unknown[]>((_, reject) => { rejectWrite = reject; });
+    const { fn } = fakeSql();
+    const runner = createRunnerServer({
+      sql: (strings, ...values) => {
+        stoppedBeforeWrite = stopMock.mock.calls.some(
+          ([id, options]) => id === '7' && options?.force === true
+        );
+        return failure === 'rejects'
+          ? Promise.reject(new Error('fetch failed'))
+          : blockedWrite.then(() => fn(strings, ...values));
+      },
+      manager: fakeManager(),
+      resolveVideo: resolveVideoMock,
+    });
+    runner.registry.set('7', { workspaceId: 'ws-1', dbRunning: true });
+    const shutdown = runner.markOwnPumpsFailed('shutting down').catch((error: Error) => error);
+    if (failure === 'stalls') rejectWrite(new Error('fetch failed'));
+    expect(await shutdown).toMatchObject({ message: 'fetch failed' });
+    expect(stoppedBeforeWrite).toBe(true);
   });
 });
 

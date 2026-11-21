@@ -64,6 +64,7 @@ import {
   isFacebookIngestUrl,
   REDACTED_KEY,
   redactStreamKey,
+  PUBLISHER_SETTLE_GRACE_MS,
   RETRY_BACKOFF_MS,
   STOP_GRACE_MS,
   type VideoStreams,
@@ -73,6 +74,7 @@ type FakeChild = EventEmitter & {
   stdout: EventEmitter;
   stderr: EventEmitter;
   pid: number;
+  exitCode?: number;
 };
 
 function makeFakeChild(): FakeChild {
@@ -731,6 +733,11 @@ describe('PumpManager publisher leg', () => {
 
     closeChild(ffmpegKids[0], 1);
 
+    // The publisher's death waits one grace beat for the source side to say
+    // why, so nothing is killed yet.
+    expect(processKillMock).not.toHaveBeenCalledWith(ffmpegKids[1], 'SIGKILL');
+    await vi.advanceTimersByTimeAsync(PUBLISHER_SETTLE_GRACE_MS);
+
     // The dead publisher settles the attempt; the sandboxed source is killed.
     expect(processKillMock).toHaveBeenCalledWith(ffmpegKids[1], 'SIGKILL');
     expect(processKillMock).toHaveBeenCalledWith(ffmpegKids[0], 'SIGKILL');
@@ -769,6 +776,336 @@ describe('PumpManager publisher leg', () => {
     const status = manager.status(42);
     expect(status.running).toBe(false);
     expect(status.error).toBeNull();
+  });
+
+  it.each([1, null])('retries when the publisher exits %s before the source exits cleanly', async (code) => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
+    await startPump({ id: 43, source: LIVE_HLS, dest: DEST });
+
+    closeChild(ffmpegKids[0], code);
+    closeChild(ffmpegKids[1], 0);
+    expect(manager.status(43)).toMatchObject({ running: false, retrying: true });
+
+    await vi.advanceTimersByTimeAsync(RETRY_BACKOFF_MS[0]);
+    await flushChildEvents();
+    expect(ffmpegKids).toHaveLength(4);
+  });
+
+  it('keeps deferred settlement nonterminal and cancels its retry when stopped', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
+    await startPump({ id: 49, source: LIVE_HLS, dest: DEST });
+
+    stderrLine(ffmpegKids[1], 'Error writing trailer: Broken pipe\n');
+    closeChild(ffmpegKids[1], 1);
+    expect(manager.status(49)).toMatchObject({ running: false, retrying: true });
+
+    manager.stop(49);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(ffmpegKids).toHaveLength(2);
+    expect(manager.status(49)).toMatchObject({ running: false, retrying: false });
+  });
+
+  it.each([false, true])('force stop kills an in-flight probe (spawn pending: %s)', async (pending) => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids } = useSpawns();
+    const spawn = spawnMock.getMockImplementation()!;
+    const probe = makeFakeChild();
+    let release!: () => void;
+    spawnMock.mockImplementation((command: string, ...args: unknown[]) => {
+      if (command !== 'ffprobe') return spawn(command, ...args);
+      return pending ? new Promise((resolve) => { release = () => resolve(probe); }) : probe;
+    });
+    const starting = manager.start({ id: 52, source: LIVE_HLS, dest: DEST });
+    await flushChildEvents();
+    manager.stop(52, { force: true });
+    if (pending) release();
+    await flushChildEvents();
+    closeChild(probe, 1);
+    await starting;
+    expect(processKillMock).toHaveBeenCalledWith(probe, 'SIGKILL');
+    expect(ffmpegKids).toHaveLength(0);
+    const signals = processKillMock.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(processKillMock).toHaveBeenCalledTimes(signals);
+  });
+
+  it.each(['force stop', 'settled attempt'] as const)('handles a feeder whose guarded spawn resolves after %s', async (ending) => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { feederKids, ffmpegKids } = useSpawns();
+    const spawn = spawnMock.getMockImplementation()!;
+    let release!: () => void;
+    spawnMock.mockImplementation((command: string, ...args: unknown[]) => {
+      const child = spawn(command, ...args);
+      if (command === 'ffmpeg' || command === 'mkfifo' || command === 'ffprobe') return child;
+      // guardedSpawn is asynchronous: stop after the OS child exists but
+      // before the manager receives and registers it.
+      return new Promise((resolve) => {
+        release = () => {
+          resolve(child);
+          setTimeout(() => child.emit('spawn'), 0);
+        };
+      });
+    });
+    const starting = manager.start({ id: 51, source: FB_REPLAY, mode: 'staged', dest: DEST });
+    await flushChildEvents();
+    expect(feederKids).toHaveLength(1);
+    if (ending === 'force stop') {
+      manager.stop(51, { force: true });
+    } else {
+      feederKids[0].exitCode = 0;
+      closeChild(ffmpegKids[1], 0);
+    }
+    release();
+    await flushChildEvents();
+    await starting;
+    const signals = processKillMock.mock.calls.filter(([child]) => child === feederKids[0]);
+    expect(signals).toEqual(ending === 'force stop' ? [[feederKids[0], 'SIGKILL']] : []);
+    expect(feederKids).toHaveLength(1);
+    expect(manager.status(51)).toMatchObject({ running: false, retrying: false });
+  });
+
+  it.each(['direct', 'staged'] as const)('force stop kills every %s media process group immediately', async (mode) => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids, feederKids } = useSpawns({ probe: PROBE_COPY });
+    await startPump({ id: 50, source: mode === 'staged' ? FB_REPLAY : LIVE_HLS, mode, dest: DEST });
+
+    manager.stop(50, { force: true });
+    expect(feederKids).toHaveLength(mode === 'staged' ? 2 : 0);
+    for (const child of [...ffmpegKids, ...feederKids]) {
+      expect(processKillMock).toHaveBeenCalledWith(child, 'SIGKILL');
+    }
+    expect(manager.status(50)).toMatchObject({ running: false, retrying: false });
+    const signals = processKillMock.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(processKillMock).toHaveBeenCalledTimes(signals);
+    expect(ffmpegKids).toHaveLength(2);
+  });
+
+  it('a dead publisher quotes the source side that explains it, not just the exit code', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
+    await startPump({ id: 43, source: LIVE_HLS, dest: DEST });
+
+    // Every attempt: the publisher dies first because the flv fifo stays
+    // empty, then the source reports the actual cause a beat later. This is
+    // the Fly.io failure shape — a sandbox network denial surfaced only as
+    // "the RTMPS publisher exited with code 1".
+    for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt += 1) {
+      const publisher = ffmpegKids[attempt * 2];
+      const source = ffmpegKids[attempt * 2 + 1];
+      closeChild(publisher, 1);
+      stderrLine(
+        source,
+        'https://manifest.googlevideo.com/api/manifest: Server returned 403 Forbidden (access denied)\n'
+      );
+      closeChild(source, 1);
+      await vi.advanceTimersByTimeAsync(
+        attempt < RETRY_BACKOFF_MS.length ? RETRY_BACKOFF_MS[attempt] : 60_000
+      );
+      await flushChildEvents();
+    }
+
+    const status = manager.status(43);
+    expect(status.error).toContain('403 Forbidden');
+    expect(status.error).toContain('Source stderr:');
+    // The source explained the failure; the publisher's exit code still rides
+    // along as context, but never as stderr it did not write.
+    expect(status.error).toContain('Publisher: exited with code 1');
+    expect(status.error).not.toContain('Publisher stderr:');
+    expect(status.error!.indexOf('Source stderr:')).toBeLessThan(
+      status.error!.indexOf('Publisher:')
+    );
+  });
+
+  it.each([false, true])('keeps the publisher error after a broken pipe (source close first: %s)', async (sourceFirst) => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
+    await startPump({ id: 44, source: LIVE_HLS, dest: DEST });
+
+    // The real shape of a publisher-side failure: Facebook rejects the stream,
+    // the publisher exits, and the source — writing into a fifo whose reader
+    // just died — prints "Broken pipe" and exits first, inside the grace
+    // window. The pipe error is downstream, so the publisher's own message has
+    // to survive.
+    for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt += 1) {
+      const publisher = ffmpegKids[attempt * 2];
+      const source = ffmpegKids[attempt * 2 + 1];
+      const finishPublisher = () => {
+        stderrLine(publisher, 'rtmp://live-api-s.facebook.com:443: Server error: Invalid stream key\n');
+        closeChild(publisher, 1);
+      };
+      if (!sourceFirst) finishPublisher();
+      stderrLine(source, '[out#0/flv] Error writing trailer: Broken pipe\n');
+      closeChild(source, 1);
+      if (sourceFirst) finishPublisher();
+      await vi.advanceTimersByTimeAsync(
+        attempt < RETRY_BACKOFF_MS.length ? RETRY_BACKOFF_MS[attempt] : 60_000
+      );
+      await flushChildEvents();
+    }
+
+    const status = manager.status(44);
+    expect(status.error).toContain('Broken pipe');
+    expect(status.error).toContain('Publisher stderr:');
+    expect(status.error).toContain('Invalid stream key');
+  });
+
+  it('names the publisher exit code when it failed without writing to stderr', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
+    await startPump({ id: 45, source: LIVE_HLS, dest: DEST });
+
+    for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt += 1) {
+      const publisher = ffmpegKids[attempt * 2];
+      const source = ffmpegKids[attempt * 2 + 1];
+      closeChild(publisher, 1);
+      stderrLine(source, '[out#0/flv] Error closing file: Broken pipe\n');
+      closeChild(source, 1);
+      await vi.advanceTimersByTimeAsync(
+        attempt < RETRY_BACKOFF_MS.length ? RETRY_BACKOFF_MS[attempt] : 60_000
+      );
+      await flushChildEvents();
+    }
+
+    const status = manager.status(45);
+    expect(status.error).toContain('Broken pipe');
+    expect(status.error).toContain('Publisher: exited with code 1');
+  });
+
+  it('does not quote a publisher that exited 0 and printed only its banner', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
+    await startPump({ id: 47, source: LIVE_HLS, dest: DEST });
+
+    for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt += 1) {
+      const publisher = ffmpegKids[attempt * 2];
+      const source = ffmpegKids[attempt * 2 + 1];
+      // Every ffmpeg writes this to stderr on startup; it is never the reason.
+      stderrLine(
+        publisher,
+        'ffmpeg version 8.0.1 Copyright (c) 2000-2025 the FFmpeg developers\n' +
+          '  libavutil      61.  1.102 / 61.  1.102\n'
+      );
+      closeChild(publisher, 0);
+      stderrLine(source, '[https @ 0x1] HTTP error 404 Not Found\n');
+      closeChild(source, 1);
+      await vi.advanceTimersByTimeAsync(
+        attempt < RETRY_BACKOFF_MS.length ? RETRY_BACKOFF_MS[attempt] : 60_000
+      );
+      await flushChildEvents();
+    }
+
+    const status = manager.status(47);
+    expect(status.error).toContain('404 Not Found');
+    expect(status.error).not.toContain('Publisher');
+    expect(status.error).not.toContain('ffmpeg version');
+  });
+
+  it('strips FFmpeg banners and progress from retry logs and final evidence', async () => {
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      stubGateOn();
+      vi.useFakeTimers();
+      const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
+      await startPump({ id: 48, source: LIVE_HLS, dest: DEST });
+
+      for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt += 1) {
+        const publisher = ffmpegKids[attempt * 2];
+        const source = ffmpegKids[attempt * 2 + 1];
+        closeChild(publisher, 0);
+        // The real shape: the banner arrives first, the error last, and on a
+        // short tail the banner would otherwise fill most of the quote.
+        stderrLine(
+          source,
+          'ffmpeg version 8.0.1 Copyright (c) 2000-2025 the FFmpeg developers\n' +
+            '  built with Apple clang version 17.0.0\n' +
+            '  configuration: --prefix=/opt/homebrew\n' +
+            '  libavutil      61.  1.102 / 61.  1.102\n' +
+            '  libswscale     10.  1.102 / 10.  1.102\n' +
+            '  libswresample   7.  1.102 /  7.  1.102\n' +
+            '  --enable-videotoolbox --enable-neon\n' +
+            '[https @ 0x1] HTTP error 404 Not Found\r' +
+            'frame=   50 fps=25 time=00:00:02.00 speed=1x\r'.repeat(10) +
+            'fps=25\rtime=00:00:02.00\r\n'
+        );
+        closeChild(source, 1);
+        await vi.advanceTimersByTimeAsync(
+          attempt < RETRY_BACKOFF_MS.length ? RETRY_BACKOFF_MS[attempt] : 60_000
+        );
+        await flushChildEvents();
+      }
+
+      const retries = logs.mock.calls.map(([line]) => JSON.parse(line))
+        .filter((entry) => entry.event === 'retry');
+      expect(retries).toHaveLength(RETRY_BACKOFF_MS.length);
+      for (const retry of retries) {
+        expect(new Set(retry.stderr.split('\n'))).toEqual(
+          new Set(['[https @ 0x1] HTTP error 404 Not Found'])
+        );
+      }
+      const status = manager.status(48);
+      const evidence = status.error?.split('Source stderr: ')[1];
+      expect(new Set(evidence?.split('\n'))).toEqual(
+        new Set(['[https @ 0x1] HTTP error 404 Not Found'])
+      );
+      for (const banner of [
+        'ffmpeg version',
+        'built with',
+        'configuration:',
+        'libavutil',
+        'libswscale',
+        'libswresample',
+        '--enable-',
+      ]) {
+        expect(status.error).not.toContain(banner);
+      }
+    } finally {
+      logs.mockRestore();
+    }
+  });
+
+  it('does not quote an earlier attempt publisher error in a later failure', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
+    await startPump({ id: 46, source: LIVE_HLS, dest: DEST });
+
+    // Attempt 1: the publisher fails with a distinctive message.
+    stderrLine(ffmpegKids[0], 'Server error: Invalid stream key\n');
+    closeChild(ffmpegKids[0], 1);
+    stderrLine(ffmpegKids[1], 'Broken pipe\n');
+    closeChild(ffmpegKids[1], 1);
+    await vi.advanceTimersByTimeAsync(RETRY_BACKOFF_MS[0]);
+    await flushChildEvents();
+
+    // Attempts 2..4: the publisher is silent, the source reports its own
+    // failure. The attempt-1 publisher message belongs to a settled attempt.
+    for (let attempt = 1; attempt <= RETRY_BACKOFF_MS.length; attempt += 1) {
+      const publisher = ffmpegKids[attempt * 2];
+      const source = ffmpegKids[attempt * 2 + 1];
+      closeChild(publisher, 0);
+      stderrLine(source, 'Server returned 403 Forbidden\n');
+      closeChild(source, 1);
+      await vi.advanceTimersByTimeAsync(
+        attempt < RETRY_BACKOFF_MS.length ? RETRY_BACKOFF_MS[attempt] : 60_000
+      );
+      await flushChildEvents();
+    }
+
+    const status = manager.status(46);
+    expect(status.error).toContain('403 Forbidden');
+    expect(status.error).not.toContain('Invalid stream key');
   });
 });
 
