@@ -537,6 +537,55 @@ describe('POST /pump/stop', () => {
 });
 
 describe('reconcileOnce', () => {
+  it.each([
+    { state: 'failed', error: 'Source stderr: HTTP error 403 Forbidden' },
+    { state: 'stopped', error: null },
+  ])('retries a lost $state write without forgetting the terminal pump', async ({ state, error }) => {
+    startMock.mockResolvedValue({ ok: true });
+    let terminalWrites = 0;
+    const { runner, queries } = makeServer((text) => {
+      if (text.includes('FROM live_streams')) return STREAM_ROW();
+      if (text.includes(`SET pump_status = '${state}'`)) {
+        terminalWrites += 1;
+        if (terminalWrites === 1) throw new Error('fetch failed');
+      }
+      return [{ pump_started_at: null }];
+    });
+    const port = await listen(runner);
+    try {
+      const start = await client(port, '/pump/start', {
+        token: TOKEN,
+        body: { workspaceId: 'ws-1', streamId: '7' },
+      });
+      expect(start.status).toBe(200);
+      statusMock.mockReturnValue({
+        running: false,
+        startedAt: new Date(),
+        error,
+        retrying: false,
+      });
+
+      await runner.reconcileOnce();
+      expect(terminalWrites).toBe(1);
+      expect(runner.registry.has('7')).toBe(true);
+
+      await runner.reconcileOnce();
+      expect(terminalWrites).toBe(2);
+      expect(runner.registry.has('7')).toBe(false);
+      const update = queries.find((query) =>
+        query.text.includes(`SET pump_status = '${state}'`)
+      );
+      expect(update?.values).toContain('7');
+      expect(update?.values).toContain('ws-1');
+      if (error) expect(update?.values).toContain(error);
+
+      await runner.reconcileOnce();
+      expect(terminalWrites).toBe(2);
+    } finally {
+      await runner.close();
+    }
+  });
+
   it('writes failed with the manager error when a pump terminally dies', async () => {
     startMock.mockResolvedValue({ ok: true });
     // Start with the pump idle so the start request passes the duplicate

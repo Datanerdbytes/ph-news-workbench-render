@@ -233,7 +233,6 @@ export function createRunnerServer(deps: RunnerDeps) {
           }
           continue;
         }
-        registry.delete(id);
         if (status.error) {
           await markPumpsFailed(deps.sql, [id], [tracked.workspaceId], status.error);
           log({ event: 'reconciled_failed', streamId: id });
@@ -245,6 +244,10 @@ export function createRunnerServer(deps: RunnerDeps) {
           `;
           log({ event: 'reconciled_stopped', streamId: id });
         }
+        // Keep terminal pumps tracked until their DB update succeeds, so a
+        // transient database outage is retried on the next sweep. A restart
+        // while the write was in flight may have installed a new entry.
+        if (registry.get(id) === tracked) registry.delete(id);
       }
     } catch (error) {
       log({
