@@ -4,6 +4,11 @@ import {
   assertPublicSourceUrl,
   NetworkPolicyError,
 } from '@/lib/live/public-network';
+import {
+  runnerMode,
+  runnerStreamRequest,
+  RUNNER_UNREACHABLE_ERROR,
+} from '@/lib/live/runner-config';
 import { requireWorkspace, unauthorized } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
@@ -28,6 +33,24 @@ export async function GET(request: Request): Promise<Response> {
 
     if (!target) {
       return errorResponse('A stream URL is required to preview.', 400);
+    }
+
+    // Media egress belongs where the media was resolved: googlevideo binds
+    // videoplayback URLs to the network position that requested them, and a
+    // CDN edge host answers DNS per region — so a segment the sandboxed
+    // worker's network can stream is refused to this runtime's egress with
+    // an HTTP-level 403 no matter how the dial picks its address family. In
+    // runner mode the fetches are therefore relayed through the worker (the
+    // same position the pump pulls the source from); the runner enforces the
+    // same public-source policy on every hop. Classification still happens
+    // HERE, on the relayed bytes, so exactly one place decides what may be
+    // served to a browser.
+    if (runnerMode()) {
+      const viaRunner = await previewViaRunner(target, request.signal);
+      if (viaRunner) {
+        return classifyAndStream(viaRunner.upstream, viaRunner.finalUrl);
+      }
+      // A runner without the media relay keeps the direct-egress path below.
     }
 
     return await streamPreview(target, request.signal);
@@ -56,6 +79,64 @@ function hostOf(target: string | null): string | null {
     return new URL(target).host;
   } catch {
     return null;
+  }
+}
+
+/** What a successful media relay hands back to GET: the raw upstream body
+ * plus the post-redirect URL the playlist rewriter resolves URIs against. */
+type RunnerPreview = { upstream: Response; finalUrl: string };
+
+/**
+ * Fetches one target through the runner's /preview-media relay. Returns null
+ * when the runner predates the endpoint (404) so GET can fall back to the
+ * direct-egress path instead of hard-failing during a deploy stagger.
+ */
+async function previewViaRunner(
+  target: string,
+  signal: AbortSignal
+): Promise<RunnerPreview | null> {
+  let response: Response;
+  try {
+    response = await runnerStreamRequest('/preview-media', { url: target }, signal);
+  } catch {
+    // Transport failure or deadline — the resolve route's stable message
+    // keeps the failure story consistent across the live page.
+    throw new Error(RUNNER_UNREACHABLE_ERROR);
+  }
+  if (response.status === 404) return null;
+  if (response.status === 400) {
+    // The runner relays its own policy verdict verbatim (NetworkPolicyError
+    // messages are safe by construction).
+    const data = (await response.json().catch(() => null)) as {
+      error?: string;
+    } | null;
+    throw new NetworkPolicyError(
+      data?.error ?? 'That link is not a URL we can preview.'
+    );
+  }
+  if (!response.ok || !response.body) {
+    throw new Error('The stream could not be reached for preview.');
+  }
+  const finalUrl = decodeFinalUrl(
+    response.headers.get('x-final-url'),
+    target
+  );
+  const upstream = new Response(response.body, {
+    status: response.status,
+    headers: {
+      'content-type':
+        response.headers.get('content-type') ?? 'application/octet-stream',
+    },
+  });
+  return { upstream, finalUrl };
+}
+
+function decodeFinalUrl(header: string | null, fallback: string): string {
+  if (!header) return fallback;
+  try {
+    return decodeURIComponent(header);
+  } catch {
+    return fallback;
   }
 }
 

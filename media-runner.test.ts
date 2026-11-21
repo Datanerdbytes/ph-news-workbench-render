@@ -20,12 +20,24 @@ const {
   stopMock,
   statusMock,
   resolveVideoMock,
+  fetchPublicSourceMock,
+  lookupMock,
 } = vi.hoisted(() => ({
   startMock: vi.fn(),
   stopMock: vi.fn(),
   statusMock: vi.fn(),
   resolveVideoMock: vi.fn(),
+  fetchPublicSourceMock: vi.fn(),
+  lookupMock: vi.fn(),
 }));
+
+// The /preview-media relay's egress is mocked at the transport boundary; the
+// REAL public-network policy runs over mocked DNS so hop validation (ports,
+// private addresses) is exercised for keeps.
+vi.mock('./lib/live/public-fetch', () => ({
+  fetchPublicSource: fetchPublicSourceMock,
+}));
+vi.mock('node:dns/promises', () => ({ lookup: lookupMock }));
 
 const TOKEN = 'runner-test-token';
 const SECRET = 'runner-test-secret-for-better-auth';
@@ -146,6 +158,9 @@ beforeEach(() => {
   stopMock.mockReset();
   statusMock.mockReset();
   resolveVideoMock.mockReset();
+  fetchPublicSourceMock.mockReset();
+  lookupMock.mockReset();
+  lookupMock.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
   statusMock.mockReturnValue({
     running: false,
     startedAt: null,
@@ -269,6 +284,199 @@ describe('POST /resolve', () => {
         body: {},
       });
       expect(result.status).toBe(400);
+    } finally {
+      await runner.close();
+    }
+  });
+});
+
+/**
+ * POST /preview-media — the raw relay. Responses carry headers and streamed
+ * bytes instead of the JSON-outcome contract, so these tests read the raw
+ * HTTP exchange rather than the parsed body alone.
+ */
+describe('POST /preview-media', () => {
+  type RawResult = {
+    status: number;
+    headers: Record<string, string>;
+    body: string;
+  };
+
+  function clientRaw(
+    port: number,
+    options: { method?: string; token?: string; body?: unknown } = {}
+  ): Promise<RawResult> {
+    return new Promise((resolve, reject) => {
+      const request = httpRequest(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/preview-media',
+          method: options.method ?? 'POST',
+          headers: {
+            ...(options.token
+              ? { authorization: `Bearer ${options.token}` }
+              : {}),
+            ...(options.body !== undefined
+              ? { 'content-type': 'application/json' }
+              : {}),
+          },
+        },
+        (response) => {
+          const chunks: Buffer[] = [];
+          response.on('data', (chunk: Buffer) => chunks.push(chunk));
+          response.on('end', () => {
+            const headers: Record<string, string> = {};
+            for (const [name, value] of Object.entries(response.headers)) {
+              headers[name] = Array.isArray(value) ? value.join(', ') : (value ?? '');
+            }
+            resolve({
+              status: response.statusCode ?? 0,
+              headers,
+              body: Buffer.concat(chunks).toString('utf8'),
+            });
+          });
+        }
+      );
+      request.on('error', reject);
+      if (options.body !== undefined) request.end(JSON.stringify(options.body));
+      else request.end();
+    });
+  }
+
+  it('relays the upstream body with its content-type and the final URL', async () => {
+    const target = 'https://manifest.example/live/master.m3u8';
+    fetchPublicSourceMock.mockResolvedValueOnce(
+      new Response('#EXTM3U\nhttps://seg.example/0.ts\n', {
+        status: 200,
+        headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+      })
+    );
+    const { runner } = makeServer();
+    const port = await listen(runner);
+    try {
+      const result = await clientRaw(port, { token: TOKEN, body: { url: target } });
+      expect(result.status).toBe(200);
+      expect(result.headers['content-type']).toBe('application/vnd.apple.mpegurl');
+      expect(decodeURIComponent(result.headers['x-final-url'])).toBe(target);
+      expect(result.body).toBe('#EXTM3U\nhttps://seg.example/0.ts\n');
+      expect(fetchPublicSourceMock).toHaveBeenCalledWith(
+        target,
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      );
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('follows redirects, re-validating each hop through the policy', async () => {
+    const next = 'https://seg.example/next/0.ts';
+    fetchPublicSourceMock
+      .mockResolvedValueOnce(
+        new Response(null, { status: 302, headers: { location: next } })
+      )
+      .mockResolvedValueOnce(
+        new Response('segment-bytes', {
+          status: 200,
+          headers: { 'content-type': 'video/mp2t' },
+        })
+      );
+    const { runner } = makeServer();
+    const port = await listen(runner);
+    try {
+      const result = await clientRaw(port, {
+        token: TOKEN,
+        body: { url: 'https://manifest.example/live/master.m3u8' },
+      });
+      expect(result.status).toBe(200);
+      expect(fetchPublicSourceMock).toHaveBeenCalledTimes(2);
+      expect(fetchPublicSourceMock).toHaveBeenNthCalledWith(
+        2,
+        next,
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      );
+      expect(decodeURIComponent(result.headers['x-final-url'])).toBe(next);
+      expect(result.body).toBe('segment-bytes');
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('refuses a redirect hop that fails the URL policy', async () => {
+    fetchPublicSourceMock.mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: { location: 'http://127.0.0.1:8080/secret' },
+      })
+    );
+    const { runner } = makeServer();
+    const port = await listen(runner);
+    try {
+      const result = await clientRaw(port, {
+        token: TOKEN,
+        body: { url: 'https://manifest.example/live/master.m3u8' },
+      });
+      expect(result.status).toBe(400);
+      expect(fetchPublicSourceMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('maps an upstream error status to the relay 502 contract', async () => {
+    fetchPublicSourceMock.mockResolvedValueOnce(
+      new Response('forbidden', { status: 403 })
+    );
+    const { runner } = makeServer();
+    const port = await listen(runner);
+    try {
+      const result = await clientRaw(port, {
+        token: TOKEN,
+        body: { url: 'https://seg.example/0.ts' },
+      });
+      expect(result.status).toBe(502);
+      expect(JSON.parse(result.body)).toMatchObject({
+        error: 'The stream could not be reached for preview.',
+      });
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('maps a policy rejection of the initial URL to 400', async () => {
+    lookupMock.mockResolvedValue([{ address: '10.0.0.5', family: 4 }]);
+    const { runner } = makeServer();
+    const port = await listen(runner);
+    try {
+      const result = await clientRaw(port, {
+        token: TOKEN,
+        body: { url: 'https://internal.example/secret.m3u8' },
+      });
+      expect(result.status).toBe(400);
+      expect(fetchPublicSourceMock).not.toHaveBeenCalled();
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('answers 400 when the url is missing', async () => {
+    const { runner } = makeServer();
+    const port = await listen(runner);
+    try {
+      const result = await clientRaw(port, { token: TOKEN, body: {} });
+      expect(result.status).toBe(400);
+      expect(JSON.parse(result.body)).toMatchObject({ error: expect.any(String) });
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('refuses a non-POST method with 405', async () => {
+    const { runner } = makeServer();
+    const port = await listen(runner);
+    try {
+      const result = await clientRaw(port, { method: 'GET', token: TOKEN });
+      expect(result.status).toBe(405);
     } finally {
       await runner.close();
     }
