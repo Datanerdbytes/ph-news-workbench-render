@@ -492,8 +492,19 @@ type PumpProc = {
    * the real cause out of the quoted tail.
    */
   tail: string;
-  /** Stderr of the unsandboxed RTMPS publisher. Quoted second, never first. */
+  /**
+   * Stderr of the unsandboxed RTMPS publisher for the CURRENT attempt.
+   * Reset per attempt: a publisher that died in attempt 1 must not be quoted
+   * as the reason attempt 4 failed.
+   */
   publisherTail: string;
+  /**
+   * Exit code of the current attempt's publisher, once it closed. Recorded
+   * even when the attempt is already settled, because a publisher that died
+   * first is what makes the source print "Broken pipe" — the recorded error
+   * has to name it even when the publisher said nothing on stderr.
+   */
+  publisherExitCode: number | null;
   /**
    * Pending grace timer after the publisher died: the source side usually
    * reports the real reason a beat later. Cleared on teardown so it can never
@@ -590,6 +601,7 @@ export class PumpManager {
       lastError: null,
       tail: '',
       publisherTail: '',
+      publisherExitCode: null,
       publisherSettleTimer: null,
       retryTimer: null,
       killTimer: null,
@@ -716,6 +728,11 @@ export class PumpManager {
   private async spawnAttempt(proc: PumpProc): Promise<void> {
     proc.attempts += 1;
     this.clearPublisherSettleTimer(proc);
+    // The publisher is a per-attempt child; its evidence belongs to this
+    // attempt only (finding: an attempt-1 publisher error must not be quoted
+    // as the reason attempt 4 failed).
+    proc.publisherTail = '';
+    proc.publisherExitCode = null;
     proc.attemptSettled = false;
     if (proc.attempts === 1) {
       this.log(proc, 'started', { transcode: proc.params.needsTranscode });
@@ -853,6 +870,11 @@ export class PumpManager {
       this.appendStderr(proc, 'publisher', text);
     });
     publisher.once('close', (code: number | null) => {
+      // Recorded before the settled check: a publisher that died first is the
+      // cause of the source's "Broken pipe", so its exit code is evidence even
+      // when the source side has already won the settlement race. The identity
+      // check keeps a late close from a previous attempt out of this one.
+      if (proc.publisher === publisher) proc.publisherExitCode = code;
       if (proc.attemptSettled || proc.stopping) return;
       if (code === 0) return;
       // The publisher reads the flv fifo, so it is the FIRST to die when the
@@ -908,6 +930,8 @@ export class PumpManager {
   private async spawnStagedAttempt(proc: PumpProc): Promise<void> {
     proc.attempts += 1;
     this.clearPublisherSettleTimer(proc);
+    proc.publisherTail = '';
+    proc.publisherExitCode = null;
     proc.attemptSettled = false;
     if (proc.attempts === 1) {
       this.log(proc, 'started', { mode: 'staged' });
@@ -1367,16 +1391,31 @@ export class PumpManager {
    * The stderr evidence quoted by a recorded failure. The source side leads
    * because it explains the failure: the publisher reads the flv fifo, so when
    * the sandboxed ffmpeg produces nothing the publisher exits first and its
-   * "exited with code 1" is a symptom, not the cause. The publisher tail is
-   * appended only when it says something, and it is labelled so the two can't
-   * be confused again.
+   * "exited with code 1" is a symptom, not the cause.
+   *
+   * The reverse case matters just as much, though: when the publisher dies for
+   * its own reason (a rejected stream key, an ingest drop), the source side is
+   * the one that becomes a symptom — it prints "Broken pipe" the moment the
+   * fifo loses its reader and settles the attempt before the publisher's grace
+   * timer fires. So a publisher that exited non-zero is ALWAYS quoted, falling
+   * back to its exit code when it wrote nothing at all. Otherwise that failure
+   * would be recorded as a bare pipe error with no cause.
    */
   private failureEvidence(proc: PumpProc): string {
     const source = proc.tail.trim().slice(-SOURCE_EVIDENCE_CHARS) || 'none';
-    const publisher = proc.publisherTail.trim().slice(-PUBLISHER_EVIDENCE_CHARS);
-    return publisher
-      ? `Source stderr: ${source} | Publisher stderr: ${publisher}`
-      : `Source stderr: ${source}`;
+    const stderr = proc.publisherTail.trim().slice(-PUBLISHER_EVIDENCE_CHARS);
+    // A publisher that exited non-zero is always named, falling back to its
+    // exit code when it wrote nothing. Dropping it was the bug: with the
+    // publisher gone the source can only report the closed pipe.
+    const publisher =
+      stderr ||
+      (proc.publisherExitCode !== null && proc.publisherExitCode !== 0
+        ? `exited with code ${proc.publisherExitCode}`
+        : '');
+    if (!publisher) return `Source stderr: ${source}`;
+    // `Publisher stderr:` only when it really is stderr — an exit code is not.
+    const label = stderr ? 'Publisher stderr' : 'Publisher';
+    return `Source stderr: ${source} | ${label}: ${publisher}`;
   }
 
   private settleAttempt(proc: PumpProc, code: number | null): void {

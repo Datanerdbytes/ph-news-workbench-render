@@ -805,23 +805,35 @@ describe('PumpManager publisher leg', () => {
     const status = manager.status(43);
     expect(status.error).toContain('403 Forbidden');
     expect(status.error).toContain('Source stderr:');
-    // The source explained the failure, so the publisher's exit code — a
-    // symptom — is not even needed.
+    // The source explained the failure; the publisher's exit code still rides
+    // along as context, but never as stderr it did not write.
+    expect(status.error).toContain('Publisher: exited with code 1');
     expect(status.error).not.toContain('Publisher stderr:');
+    expect(status.error!.indexOf('Source stderr:')).toBeLessThan(
+      status.error!.indexOf('Publisher:')
+    );
   });
 
-  it('labels the publisher tail when the source side dies without a word', async () => {
+  it('keeps the publisher error when its death makes the source report a broken pipe', async () => {
     stubGateOn();
     vi.useFakeTimers();
     const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
     await startPump({ id: 44, source: LIVE_HLS, dest: DEST });
 
+    // The real shape of a publisher-side failure: Facebook rejects the stream,
+    // the publisher exits, and the source — writing into a fifo whose reader
+    // just died — prints "Broken pipe" and exits first, inside the grace
+    // window. The pipe error is downstream, so the publisher's own message has
+    // to survive.
     for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt += 1) {
       const publisher = ffmpegKids[attempt * 2];
       const source = ffmpegKids[attempt * 2 + 1];
-      stderrLine(publisher, 'rtmp://live-api-s.facebook.com:443: I/O error\n');
+      stderrLine(
+        publisher,
+        'rtmp://live-api-s.facebook.com:443: Server error: Invalid stream key\n'
+      );
       closeChild(publisher, 1);
-      await vi.advanceTimersByTimeAsync(PUBLISHER_SETTLE_GRACE_MS);
+      stderrLine(source, '[out#0/flv] Error writing trailer: Broken pipe\n');
       closeChild(source, 1);
       await vi.advanceTimersByTimeAsync(
         attempt < RETRY_BACKOFF_MS.length ? RETRY_BACKOFF_MS[attempt] : 60_000
@@ -830,9 +842,65 @@ describe('PumpManager publisher leg', () => {
     }
 
     const status = manager.status(44);
-    expect(status.error).toContain('Source stderr: none');
+    expect(status.error).toContain('Broken pipe');
     expect(status.error).toContain('Publisher stderr:');
-    expect(status.error).toContain('I/O error');
+    expect(status.error).toContain('Invalid stream key');
+  });
+
+  it('names the publisher exit code when it failed without writing to stderr', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
+    await startPump({ id: 45, source: LIVE_HLS, dest: DEST });
+
+    for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt += 1) {
+      const publisher = ffmpegKids[attempt * 2];
+      const source = ffmpegKids[attempt * 2 + 1];
+      closeChild(publisher, 1);
+      stderrLine(source, '[out#0/flv] Error closing file: Broken pipe\n');
+      closeChild(source, 1);
+      await vi.advanceTimersByTimeAsync(
+        attempt < RETRY_BACKOFF_MS.length ? RETRY_BACKOFF_MS[attempt] : 60_000
+      );
+      await flushChildEvents();
+    }
+
+    const status = manager.status(45);
+    expect(status.error).toContain('Broken pipe');
+    expect(status.error).toContain('Publisher: exited with code 1');
+  });
+
+  it('does not quote an earlier attempt publisher error in a later failure', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
+    await startPump({ id: 46, source: LIVE_HLS, dest: DEST });
+
+    // Attempt 1: the publisher fails with a distinctive message.
+    stderrLine(ffmpegKids[0], 'Server error: Invalid stream key\n');
+    closeChild(ffmpegKids[0], 1);
+    stderrLine(ffmpegKids[1], 'Broken pipe\n');
+    closeChild(ffmpegKids[1], 1);
+    await vi.advanceTimersByTimeAsync(RETRY_BACKOFF_MS[0]);
+    await flushChildEvents();
+
+    // Attempts 2..4: the publisher is silent, the source reports its own
+    // failure. The attempt-1 publisher message belongs to a settled attempt.
+    for (let attempt = 1; attempt <= RETRY_BACKOFF_MS.length; attempt += 1) {
+      const publisher = ffmpegKids[attempt * 2];
+      const source = ffmpegKids[attempt * 2 + 1];
+      closeChild(publisher, 0);
+      stderrLine(source, 'Server returned 403 Forbidden\n');
+      closeChild(source, 1);
+      await vi.advanceTimersByTimeAsync(
+        attempt < RETRY_BACKOFF_MS.length ? RETRY_BACKOFF_MS[attempt] : 60_000
+      );
+      await flushChildEvents();
+    }
+
+    const status = manager.status(46);
+    expect(status.error).toContain('403 Forbidden');
+    expect(status.error).not.toContain('Invalid stream key');
   });
 });
 
