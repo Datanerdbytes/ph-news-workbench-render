@@ -88,7 +88,9 @@ every production deploy a manual step.
 | Name | Scope | Used by |
 | --- | --- | --- |
 | `CRON_SECRET` | repository | `keep-alive.yml` — the hourly feed ingest |
-| `E2E_DATABASE_URL`, `E2E_OWNER_EMAIL`, `E2E_OWNER_PASSWORD`, `E2E_BETTER_AUTH_SECRET`, `E2E_SIGNUP_INVITE_CODE` | the protected `e2e` environment | the Playwright job in `ci.yml` |
+| `E2E_OWNER_EMAIL`, `E2E_OWNER_PASSWORD`, `E2E_BETTER_AUTH_SECRET`, `E2E_SIGNUP_INVITE_CODE` | the protected `e2e` environment | the Playwright job in `ci.yml` |
+| `NEON_API_KEY` | the protected `e2e` environment | creates and deletes the ephemeral `ci-e2e-run-*` branch the e2e job runs against |
+| `E2E_DATABASE_URL` (optional) | the protected `e2e` environment | when set and healthy, the e2e job reuses this database instead of provisioning a fresh branch |
 
 ## Required Render configuration
 
@@ -139,7 +141,7 @@ go through GitHub Actions, and it does not wait for CI.
 | `Static analysis & lint` | an ESLint error, a type error, or a dependency advisory that reached the blocking floor (`npm audit --audit-level=critical`) |
 | `Unit & integration tests` | a failing vitest test |
 | `Docker build & scan` | the image failed to build, or Trivy found a HIGH/CRITICAL vulnerability that has an upstream fix |
-| `E2E against the production container` | the Neon `ci-e2e` branch was deleted or `E2E_DATABASE_URL` was repointed — the job says so in its log |
+| `E2E against the production container` | the Neon API calls failed or the freshly created branch never became connectable — the job says so in its log |
 
 The e2e job needs an approval on the protected `e2e` environment before it
 runs; that approval is a separate step from the merge approval.
@@ -174,10 +176,35 @@ queued deploy is normal and not a failure.
 branch. The optional *commit* input deploys a specific commit sha instead of
 the branch head — useful for redeploying the commit that is already live.
 
-### The e2e database disappeared
+### The e2e database
 
-The Neon branch `ci-e2e` is a throwaway copy of the schema and is deleted
-seven days after it was created. When it is gone the e2e job fails with
-*Require the E2E database*. Recreate the branch, copy its connection string
-into the `E2E_DATABASE_URL` secret of the `e2e` environment, and re-run the
-pull request check.
+The e2e job runs against an ephemeral Neon branch: unless the optional
+`E2E_DATABASE_URL` override is set and healthy, the job creates
+`ci-e2e-run-<run id>` from the production branch, wipes the schema production
+copied along, seeds it fresh (see `scripts/prepare-e2e-db.mjs`), and deletes
+the branch when the job finishes — success or failure. Neon's free plan
+deletes non-primary branches seven days after creation, but a branch that
+lives for the duration of one job never gets that old, so nothing expires
+under CI and there is nothing to renew by hand.
+
+This needs one secret in the protected `e2e` environment: `NEON_API_KEY`,
+created in the Neon console under Account → API keys. It authorizes the
+branch create/delete calls against project `aged-rain-00317126`. If the
+provisioning step says the key is missing, add it and re-run the check.
+
+Two things worth knowing:
+
+- `E2E_DATABASE_URL` is an optional override. When it points at a living
+  branch, the job reuses that database instead of provisioning — useful to
+  pin the suite to a specific branch. When it is stale, the job notices (its
+  `SELECT 1` probe fails) and provisions a fresh branch anyway, so leaving a
+  stale secret in place is harmless; deleting it entirely is also fine.
+- Do **not** reset `neondb_owner`'s password to fix an auth failure. It is a
+  project-wide credential and production's Render connection uses the same
+  one; resetting it breaks the deployed app. Connection strings the job
+  exports carry it, and they are masked in the job log.
+
+A leftover `ci-e2e-run-*` branch — a runner crashed mid-job, so the teardown
+step never ran — is swept automatically before the next run provisions its
+own branch. The legacy `ci-e2e` branch is never touched by the automation and
+can be deleted by hand once nothing points at it.

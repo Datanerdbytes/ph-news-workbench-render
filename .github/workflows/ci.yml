@@ -266,16 +266,19 @@ jobs:
     env:
       # The tag the docker job pushed for the commit this run verifies.
       IMAGE_SHA: ${{ inputs.sha || github.sha }}
-    # The suite runs against the `ci-e2e` Neon branch — a throwaway copy of
-    # the production schema, seeded fresh by the job below. That branch
-    # auto-deletes seven days after it was created, so E2E_DATABASE_URL has to
-    # be repointed when it disappears.
+    # The suite runs against an ephemeral Neon branch — a throwaway copy of
+    # the production branch, created from it by the provisioning step below
+    # (ci-e2e-run-<run id>), seeded fresh, and deleted by the last step. Neon's
+    # free plan deletes non-primary branches seven days after creation, so a
+    # persistent branch would keep expiring under CI; a branch created (and
+    # deleted) per run never gets the chance. The NEON_API_KEY authorizes
+    # those API calls.
     #
-    # The E2E_* secrets live in the protected `e2e` environment instead of at
-    # repository scope: a pull request can rewrite this workflow, so
-    # repository secrets were readable by any pull request's own code. The
-    # environment's required reviewer has to approve every deployment before
-    # the secrets are released.
+    # The E2E_* secrets and NEON_API_KEY live in the protected `e2e`
+    # environment instead of at repository scope: a pull request can rewrite
+    # this workflow, so repository secrets were readable by any pull request's
+    # own code. The environment's required reviewer has to approve every
+    # deployment before the secrets are released.
     #
     # Pull requests only. A push to main would sit waiting for that approval,
     # and the pull request run already tested the exact merge commit that
@@ -334,16 +337,19 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       # The app talks to Neon over its HTTP SQL API, so a stock postgres
-      # service container cannot back it — E2E_DATABASE_URL must point at a
-      # Neon branch (a throwaway copy of the schema, reset per run).
-      - name: Require the E2E database
-        run: |
-          if [ -z "${E2E_DATABASE_URL}" ]; then
-            echo "::error::E2E_DATABASE_URL is not set — the \`e2e\` environment secret is missing. A pull request from a fork cannot read it; run the suite locally instead. See the comment in this job." >&2
-            exit 1
-          fi
+      # service container cannot back it — the suite's database must be a
+      # Neon branch. The override secret is used when it answers, otherwise
+      # this creates ci-e2e-run-<run id> from production, wipes the schema
+      # production copied along, and exports E2E_DATABASE_URL for the rest of
+      # the job. scripts/provision-e2e-db.mjs documents the trade-offs.
+      - name: Provision the E2E database
+        run: node scripts/provision-e2e-db.mjs ensure
         env:
           E2E_DATABASE_URL: ${{ secrets.E2E_DATABASE_URL }}
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_PROJECT_ID: aged-rain-00317126
+          NEON_PARENT_BRANCH_ID: br-bitter-pine-beii44p7
+          GITHUB_RUN_ID: ${{ github.run_id }}
 
       # The base schema, the migrations, the owner account and its workspace,
       # in the order the migrations depend on each other. The Facebook page
@@ -352,7 +358,7 @@ jobs:
       - name: Prepare the test database
         run: node scripts/prepare-e2e-db.mjs
         env:
-          DATABASE_URL: ${{ secrets.E2E_DATABASE_URL }}
+          DATABASE_URL: ${{ env.E2E_DATABASE_URL }}
           OWNER_EMAIL: ${{ secrets.E2E_OWNER_EMAIL }}
           OWNER_PASSWORD: ${{ secrets.E2E_OWNER_PASSWORD }}
           BETTER_AUTH_SECRET: ${{ secrets.E2E_BETTER_AUTH_SECRET }}
@@ -376,7 +382,7 @@ jobs:
         run: |
           docker run -d --name app \
             -p ${{ env.APP_PORT }}:7860 \
-            -e DATABASE_URL="${{ secrets.E2E_DATABASE_URL }}" \
+            -e DATABASE_URL="${{ env.E2E_DATABASE_URL }}" \
             -e BETTER_AUTH_SECRET="${{ secrets.E2E_BETTER_AUTH_SECRET }}" \
             -e BETTER_AUTH_URL="http://localhost:${{ env.APP_PORT }}" \
             -e BETTER_AUTH_TRUSTED_ORIGINS="http://localhost:${{ env.APP_PORT }}" \
@@ -402,7 +408,7 @@ jobs:
         run: npx playwright test
         env:
           PLAYWRIGHT_BASE_URL: http://localhost:${{ env.APP_PORT }}
-          DATABASE_URL: ${{ secrets.E2E_DATABASE_URL }}
+          DATABASE_URL: ${{ env.E2E_DATABASE_URL }}
           OWNER_EMAIL: ${{ secrets.E2E_OWNER_EMAIL }}
           OWNER_PASSWORD: ${{ secrets.E2E_OWNER_PASSWORD }}
 
@@ -415,3 +421,16 @@ jobs:
             playwright-report/
             test-results/
           retention-days: 7
+
+      # Nothing else in the run needs the database, so the branch is deleted
+      # last, success or failure. A failed cleanup only warns — the next
+      # run's provisioning sweeps leftover ci-e2e-run-* branches first,
+      # because the job's concurrency group guarantees no other E2E run is
+      # using one.
+      - name: Delete the E2E database branch
+        if: always()
+        run: node scripts/provision-e2e-db.mjs teardown
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_PROJECT_ID: aged-rain-00317126
+          NEON_BRANCH_ID: ${{ env.NEON_BRANCH_ID }}
