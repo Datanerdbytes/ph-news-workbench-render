@@ -83,31 +83,69 @@ export async function fetchPublicSource(
 }
 
 /**
- * Builds a dispatcher whose TCP connector dials only the validated numeric
- * address. The requested hostname is preserved as TLS `servername` (and the
+ * Builds a dispatcher whose TCP connector dials only validated numeric
+ * addresses. The requested hostname is preserved as TLS `servername` (and the
  * URL keeps the original authority for the `Host` header), so certificates
  * still verify against the real origin while the socket cannot be pointed at
  * a different address by a racing DNS answer.
+ *
+ * The dial tries the validated addresses in sequence until one connects.
+ * A pinned literal has no Happy-Eyeballs family fallback — and CDN hosts
+ * answer DNS per region, so a runtime with no IPv6 egress (Render) can be
+ * handed an IPv6-first answer for an edge host (googlevideo `rrN---sn-…`)
+ * while the same resolver keeps `manifest.googlevideo.com` IPv4-first.
+ * Pinning only `addresses[0]` then strands every request on the dead
+ * family, which surfaced as a 502 on every HLS segment while the manifest
+ * itself kept loading. IPv4 is dialed first because server runtimes
+ * commonly have IPv4-only egress; the other family stays reachable as a
+ * fallback, and every candidate is already policy-validated.
  */
 function createPinnedDispatcher(
   hostname: string,
   addresses: LookupAddress[]
 ): Agent {
-  const pinned = addresses[0];
-  if (!pinned) throw new Error('No validated address was available.');
+  if (addresses.length === 0) {
+    throw new Error('No validated address was available.');
+  }
+  const ordered = [...addresses].sort((a, b) =>
+    a.family === b.family ? 0 : a.family === 4 ? -1 : 1
+  );
 
   const defaultConnector = buildConnector({ timeout: CONNECT_TIMEOUT_MS });
-  const connect: NonNullable<Agent.Options['connect']> = (options, callback) =>
-    defaultConnector(
-      {
-        ...options,
-        hostname: pinned.address,
-        host: pinned.address,
-        // TLS SNI + certificate identity stay the requested hostname.
-        servername: options.servername || normalizeHostname(hostname),
-      },
-      callback
-    );
+  const connect: NonNullable<Agent.Options['connect']> = (options, callback) => {
+    // Exactly one callback fires: the first successful dial, or the last
+    // error after every validated address has been tried.
+    let index = 0;
+    const attempt = (previous?: unknown) => {
+      if (index >= ordered.length) {
+        callback(
+          previous instanceof Error
+            ? previous
+            : new Error('No validated address could be dialed.'),
+          null
+        );
+        return;
+      }
+      const target = ordered[index++];
+      defaultConnector(
+        {
+          ...options,
+          hostname: target.address,
+          host: target.address,
+          // TLS SNI + certificate identity stay the requested hostname.
+          servername: options.servername || normalizeHostname(hostname),
+        },
+        (error, socket) => {
+          if (error) {
+            attempt(error);
+            return;
+          }
+          callback(null, socket);
+        }
+      );
+    };
+    attempt();
+  };
 
   return new Agent({
     connect,

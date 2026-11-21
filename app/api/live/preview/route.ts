@@ -20,11 +20,12 @@ const SECURITY_HEADERS = {
 };
 
 export async function GET(request: Request): Promise<Response> {
+  // Read before the try so the failure log below can name the upstream host.
+  const target = new URL(request.url).searchParams.get('url');
   try {
     const access = await requireWorkspace(request);
     if (!access) return secureResponse(unauthorized());
 
-    const target = new URL(request.url).searchParams.get('url');
     if (!target) {
       return errorResponse('A stream URL is required to preview.', 400);
     }
@@ -34,7 +35,27 @@ export async function GET(request: Request): Promise<Response> {
     if (error instanceof NetworkPolicyError) {
       return errorResponse(error.message, 400);
     }
+    // The client gets a generic 502 by design; this log keeps the cause
+    // diagnosable server-side. Only the upstream host is logged, never the
+    // target itself — signed media links have no business in logs.
+    console.error(
+      JSON.stringify({
+        route: 'live/preview',
+        event: 'upstream_failed',
+        host: hostOf(target),
+        error: error instanceof Error ? error.message : String(error),
+      })
+    );
     return errorResponse('The stream could not be reached for preview.', 502);
+  }
+}
+
+function hostOf(target: string | null): string | null {
+  if (!target) return null;
+  try {
+    return new URL(target).host;
+  } catch {
+    return null;
   }
 }
 
