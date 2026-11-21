@@ -481,6 +481,8 @@ type PumpProc = {
   flvFifo: string | null;
   /** The unsandboxed RTMPS publisher — the only child outside the sandbox. */
   publisher: ChildProcess | null;
+  probe: ChildProcess | null;
+  cancelProbe: (() => void) | null;
   /** Write-end opens still waiting for a reader — unblocked on teardown. */
   pendingOpens: Promise<FileHandle>[];
   startedAt: Date;
@@ -601,6 +603,8 @@ export class PumpManager {
       fifos: null,
       flvFifo: path.join(os.tmpdir(), `live-pump-out-${randomUUID()}.flv`),
       publisher: null,
+      probe: null,
+      cancelProbe: null,
       pendingOpens: [],
       startedAt: new Date(),
       attempts: 0,
@@ -651,7 +655,7 @@ export class PumpManager {
 
     // An unprobeable source defaults to transcode: Facebook rejects unknown
     // codecs, and a needless re-encode is cheaper than a dead broadcast.
-    const streams = await this.probeSource(source);
+    const streams = await this.probeSource(proc);
     proc.params.needsTranscode = decideTranscode(streams);
     proc.starting = false;
     if (proc.stopping) return { ok: true };
@@ -680,6 +684,10 @@ export class PumpManager {
     // setup checks it between steps and aborts instead of spawning orphaned
     // children (this also closes the direct path's probe-window race).
     proc.stopping = true;
+    if (proc.probe) {
+      signalProcessTree(proc.probe, 'SIGKILL');
+      proc.cancelProbe?.();
+    }
     proc.finishSourceClose?.();
     this.clearPublisherSettleTimer(proc);
     if (proc.retryTimer) {
@@ -1588,16 +1596,21 @@ export class PumpManager {
   }
 
   private async probeSource(
-    source: string,
+    proc: PumpProc,
     timeoutMs = 15_000
   ): Promise<VideoStreams> {
     // The probe is a sandboxed process too: its nested requests get the same
     // egress policy as the pump itself.
     const child = await guardedSpawn(
       FFPROBE_BIN,
-      ['-v', 'error', '-show_streams', '-of', 'json', source],
+      ['-v', 'error', '-show_streams', '-of', 'json', proc.params.source],
       { stdio: ['ignore', 'pipe', 'pipe'] }
     );
+    if (proc.stopping) {
+      signalProcessTree(child, 'SIGKILL');
+      return { ...EMPTY_STREAMS };
+    }
+    proc.probe = child;
     return new Promise((resolve) => {
       let output = '';
       child.stdout?.on('data', (chunk: Buffer) => {
@@ -1611,13 +1624,18 @@ export class PumpManager {
         timeoutMs
       );
       timer.unref?.();
-      child.once('error', () => {
+      const finish = (streams: VideoStreams) => {
         clearTimeout(timer);
-        resolve({ ...EMPTY_STREAMS });
-      });
+        if (proc.probe === child) {
+          proc.probe = null;
+          proc.cancelProbe = null;
+        }
+        resolve(streams);
+      };
+      proc.cancelProbe = () => finish({ ...EMPTY_STREAMS });
+      child.once('error', () => finish({ ...EMPTY_STREAMS }));
       child.once('close', (code: number | null) => {
-        clearTimeout(timer);
-        resolve(code === 0 ? parseProbeStreams(output) : { ...EMPTY_STREAMS });
+        finish(code === 0 ? parseProbeStreams(output) : { ...EMPTY_STREAMS });
       });
     });
   }
