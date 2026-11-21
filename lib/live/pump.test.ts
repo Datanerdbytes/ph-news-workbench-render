@@ -146,6 +146,7 @@ function useSpawns(
     probeFails?: boolean;
     failingFeederCommands?: string[];
     mkfifoFails?: boolean;
+    beforeFeederRegistered?: () => void;
   } = {}
 ): {
   ffmpegKids: FakeChild[];
@@ -177,6 +178,7 @@ function useSpawns(
       ffmpegKids.push(kid);
     } else {
       feederKids.push(kid);
+      options.beforeFeederRegistered?.();
       if (options.failingFeederCommands?.includes(command)) {
         setTimeout(() => {
           kid.emit(
@@ -824,6 +826,21 @@ describe('PumpManager publisher leg', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(processKillMock).toHaveBeenCalledTimes(signals);
     expect(ffmpegKids).toHaveLength(2);
+  });
+
+  it('force stop kills a staged feeder that registers after teardown', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { feederKids } = useSpawns({
+      beforeFeederRegistered: () => manager.stop(51, { force: true }),
+    });
+
+    await startPump({ id: 51, source: FB_REPLAY, mode: 'staged', dest: DEST });
+
+    expect(feederKids).toHaveLength(1);
+    expect(processKillMock.mock.calls.filter(([child]) => child === feederKids[0]))
+      .toEqual([[feederKids[0], 'SIGKILL']]);
+    expect(manager.status(51)).toMatchObject({ running: false, retrying: false });
   });
 
   it('a dead publisher quotes the source side that explains it, not just the exit code', async () => {

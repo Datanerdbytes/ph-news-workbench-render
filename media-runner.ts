@@ -215,45 +215,48 @@ export function createRunnerServer(deps: RunnerDeps) {
     reconciling = true;
     try {
       for (const [id, tracked] of registry) {
-        const status = deps.manager.status(id);
-        if (status.running || status.retrying) {
-          // Still live (or inside a retry backoff — not terminal). If the
-          // start path never confirmed the DB write (e.g. a network hiccup
-          // right after a successful spawn), self-heal it once.
-          if (!tracked.dbRunning) {
+        try {
+          const status = deps.manager.status(id);
+          if (status.running || status.retrying) {
+            // Still live (or inside a retry backoff — not terminal). If the
+            // start path never confirmed the DB write (e.g. a network hiccup
+            // right after a successful spawn), self-heal it once.
+            if (!tracked.dbRunning) {
+              await deps.sql`
+                UPDATE live_streams
+                SET pump_status = 'running',
+                    pump_started_at = COALESCE(pump_started_at, now()),
+                    pump_error = NULL, updated_at = now()
+                WHERE id::text = ${id} AND workspace_id = ${tracked.workspaceId}
+              `;
+              tracked.dbRunning = true;
+              log({ event: 'reconciled_running', streamId: id });
+            }
+            continue;
+          }
+          if (status.error) {
+            await markPumpsFailed(deps.sql, [id], [tracked.workspaceId], status.error);
+            log({ event: 'reconciled_failed', streamId: id });
+          } else {
             await deps.sql`
               UPDATE live_streams
-              SET pump_status = 'running',
-                  pump_started_at = COALESCE(pump_started_at, now()),
-                  pump_error = NULL, updated_at = now()
+              SET pump_status = 'stopped', updated_at = now()
               WHERE id::text = ${id} AND workspace_id = ${tracked.workspaceId}
             `;
-            tracked.dbRunning = true;
-            log({ event: 'reconciled_running', streamId: id });
+            log({ event: 'reconciled_stopped', streamId: id });
           }
-          continue;
+          // Keep terminal pumps tracked until their DB update succeeds, so a
+          // transient database outage is retried on the next sweep. A restart
+          // while the write was in flight may have installed a new entry.
+          if (registry.get(id) === tracked) registry.delete(id);
+        } catch (error) {
+          log({
+            event: 'reconcile_error',
+            streamId: id,
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
-        if (status.error) {
-          await markPumpsFailed(deps.sql, [id], [tracked.workspaceId], status.error);
-          log({ event: 'reconciled_failed', streamId: id });
-        } else {
-          await deps.sql`
-            UPDATE live_streams
-            SET pump_status = 'stopped', updated_at = now()
-            WHERE id::text = ${id} AND workspace_id = ${tracked.workspaceId}
-          `;
-          log({ event: 'reconciled_stopped', streamId: id });
-        }
-        // Keep terminal pumps tracked until their DB update succeeds, so a
-        // transient database outage is retried on the next sweep. A restart
-        // while the write was in flight may have installed a new entry.
-        if (registry.get(id) === tracked) registry.delete(id);
       }
-    } catch (error) {
-      log({
-        event: 'reconcile_error',
-        error: error instanceof Error ? error.message : String(error),
-      });
     } finally {
       reconciling = false;
     }

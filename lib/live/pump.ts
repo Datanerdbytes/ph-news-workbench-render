@@ -1200,6 +1200,15 @@ export class PumpManager {
       // stop() racing this window finds it in the attempt's process list.
       proc.feeders.push(child);
       this.watchFeeder(proc, child, kind);
+      if (proc.stopping) {
+        // Stop may have already torn down the attempt while guardedSpawn
+        // was pending. This child was not in the list stop signalled.
+        if (child.pid && child.exitCode == null && child.signalCode == null) {
+          signalProcessTree(child, 'SIGKILL');
+        }
+        proc.feeders = proc.feeders.filter((tracked) => tracked !== child);
+        throw new Error(`the ${kind} feeder could not start`);
+      }
       const outcome = await new Promise<'spawned' | Error>((resolve) => {
         child.once('error', (error: Error) => resolve(error));
         child.once('spawn', () => resolve('spawned'));

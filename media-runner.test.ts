@@ -543,9 +543,11 @@ describe('reconcileOnce', () => {
   ])('retries a lost $state write without forgetting the terminal pump', async ({ state, error }) => {
     startMock.mockResolvedValue({ ok: true });
     let terminalWrites = 0;
-    const { runner, queries } = makeServer((text) => {
-      if (text.includes('FROM live_streams')) return STREAM_ROW();
-      if (text.includes(`SET pump_status = '${state}'`)) {
+    const { runner, queries } = makeServer((text, values) => {
+      if (text.includes('FROM live_streams')) {
+        return [{ ...STREAM_ROW()[0], id: values.includes('8') ? 8 : 7 }];
+      }
+      if (text.includes(`SET pump_status = '${state}'`) && values.includes('7')) {
         terminalWrites += 1;
         if (terminalWrites === 1) throw new Error('fetch failed');
       }
@@ -558,6 +560,11 @@ describe('reconcileOnce', () => {
         body: { workspaceId: 'ws-1', streamId: '7' },
       });
       expect(start.status).toBe(200);
+      const secondStart = await client(port, '/pump/start', {
+        token: TOKEN,
+        body: { workspaceId: 'ws-1', streamId: '8' },
+      });
+      expect(secondStart.status).toBe(200);
       statusMock.mockReturnValue({
         running: false,
         startedAt: new Date(),
@@ -568,12 +575,16 @@ describe('reconcileOnce', () => {
       await runner.reconcileOnce();
       expect(terminalWrites).toBe(1);
       expect(runner.registry.has('7')).toBe(true);
+      expect(runner.registry.has('8')).toBe(false);
+      expect(queries.some((query) =>
+        query.text.includes(`SET pump_status = '${state}'`) && query.values.includes('8')
+      )).toBe(true);
 
       await runner.reconcileOnce();
       expect(terminalWrites).toBe(2);
       expect(runner.registry.has('7')).toBe(false);
       const update = queries.find((query) =>
-        query.text.includes(`SET pump_status = '${state}'`)
+        query.text.includes(`SET pump_status = '${state}'`) && query.values.includes('7')
       );
       expect(update?.values).toContain('7');
       expect(update?.values).toContain('ws-1');
