@@ -239,6 +239,7 @@ export default function LivePage() {
   }
 
   async function create() {
+    if (resolving) return;
     let scheduledForIso: string | null = null;
     if (scheduleOn) {
       const schedule = resolveScheduledFor(scheduledFor);
@@ -471,7 +472,7 @@ export default function LivePage() {
               variant="brand"
               size="sm"
               onClick={create}
-              disabled={!title.trim() || busy}
+              disabled={!title.trim() || busy || resolving}
             >
               <Radio className="size-3.5" aria-hidden />
               {busy ? 'Creating…' : scheduleOn ? 'Schedule stream' : 'Create stream'}

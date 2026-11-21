@@ -129,11 +129,41 @@ describe('SourcePreview', () => {
     await act(async () => {});
     const video = document.querySelector('video')!;
     fireEvent.loadedData(video);
+    Object.defineProperty(video, 'paused', { value: false });
     fireEvent.waiting(video);
     await act(async () => { await vi.advanceTimersByTimeAsync(45_000); });
 
     expect(screen.getByRole('alert')).toHaveTextContent(/took too long/i);
     expect(hlsMock.instances[0].destroy).toHaveBeenCalledOnce();
+  });
+
+  it('suspends a buffering deadline while paused and re-arms it on resume', async () => {
+    vi.useFakeTimers();
+    renderPreview();
+    await act(async () => {});
+    const video = document.querySelector('video')!;
+    Object.defineProperty(video, 'paused', { value: false, writable: true });
+    fireEvent.loadedData(video);
+    fireEvent.waiting(video);
+    Object.defineProperty(video, 'paused', { value: true });
+    fireEvent.pause(video);
+    fireEvent.stalled(video);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    Object.defineProperty(video, 'paused', { value: false });
+    fireEvent.play(video);
+    await act(async () => { await vi.advanceTimersByTimeAsync(45_000); });
+    expect(screen.getByRole('alert')).toHaveTextContent(/took too long/i);
+  });
+
+  it('keeps the initial deadline when paused before any media arrives', async () => {
+    vi.useFakeTimers();
+    renderPreview();
+    await act(async () => {});
+    fireEvent.pause(document.querySelector('video')!);
+    await act(async () => { await vi.advanceTimersByTimeAsync(45_000); });
+    expect(screen.getByRole('alert')).toHaveTextContent(/took too long/i);
   });
 
   it('does not time out a stalled network request while enough media is buffered', async () => {

@@ -62,11 +62,23 @@ export function SourcePreview({
     let cancelled = false;
     let hls: { destroy(): void } | null = null;
     let failed = false;
+    let hasMedia = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     function clearDeadline() {
       clearTimeout(timer);
       timer = undefined;
+    }
+
+    function onMediaReady() {
+      hasMedia = true;
+      clearDeadline();
+    }
+
+    function onPause() {
+      // Pausing a stalled stream is intentional, but the initially paused
+      // video must still report sources that never deliver their first frame.
+      if (hasMedia) clearDeadline();
     }
 
     function fail(message: string) {
@@ -85,7 +97,7 @@ export function SourcePreview({
     function startDeadline() {
       if (
         cancelled || failed || timer !== undefined ||
-        media.readyState >= media.HAVE_FUTURE_DATA
+        (hasMedia && (media.paused || media.readyState >= media.HAVE_FUTURE_DATA))
       ) return;
       timer = setTimeout(() => {
         fail('The stream took too long to load. Preview the link again to retry.');
@@ -96,9 +108,11 @@ export function SourcePreview({
       fail('The stream could not be played. Preview the link again to retry.');
     }
 
-    media.addEventListener('loadeddata', clearDeadline);
-    media.addEventListener('canplay', clearDeadline);
-    media.addEventListener('playing', clearDeadline);
+    media.addEventListener('loadeddata', onMediaReady);
+    media.addEventListener('canplay', onMediaReady);
+    media.addEventListener('playing', onMediaReady);
+    media.addEventListener('pause', onPause);
+    media.addEventListener('play', startDeadline);
     media.addEventListener('waiting', startDeadline);
     media.addEventListener('stalled', startDeadline);
     media.addEventListener('error', onMediaError);
@@ -146,9 +160,11 @@ export function SourcePreview({
     return () => {
       cancelled = true;
       clearDeadline();
-      media.removeEventListener('loadeddata', clearDeadline);
-      media.removeEventListener('canplay', clearDeadline);
-      media.removeEventListener('playing', clearDeadline);
+      media.removeEventListener('loadeddata', onMediaReady);
+      media.removeEventListener('canplay', onMediaReady);
+      media.removeEventListener('playing', onMediaReady);
+      media.removeEventListener('pause', onPause);
+      media.removeEventListener('play', startDeadline);
       media.removeEventListener('waiting', startDeadline);
       media.removeEventListener('stalled', startDeadline);
       media.removeEventListener('error', onMediaError);

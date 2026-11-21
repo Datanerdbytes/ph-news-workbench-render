@@ -304,6 +304,29 @@ describe('live source resolution deadline', () => {
     expect(document.querySelector('video')?.getAttribute('src')).toBe(source.playableUrl);
   });
 
+  it('blocks creation during a preview retry and keeps the resolved source after success', async () => {
+    fetchMock.mockResolvedValueOnce(response([]));
+    fetchMock.mockResolvedValueOnce(Response.json(source));
+    await startPreview();
+    expect(screen.getByRole('button', { name: 'Create stream' })).toBeEnabled();
+    let finish!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    await flush();
+    expect(screen.getByRole('button', { name: 'Create stream' })).toBeDisabled();
+
+    finish(Response.json(source));
+    await flush();
+    expect(screen.getByRole('button', { name: 'Create stream' })).toBeEnabled();
+    fetchMock.mockResolvedValueOnce(Response.json({ stream: stream('idle') }));
+    fetchMock.mockResolvedValueOnce(response([]));
+    fireEvent.click(screen.getByRole('button', { name: 'Create stream' }));
+    await flush();
+    expect(JSON.parse(String(fetchMock.mock.calls[3][1]?.body))).toMatchObject({
+      sourceUrl: source.playableUrl, mode: 'direct',
+    });
+  });
+
   it('cancels an obsolete resolve so its late result cannot replace a newer source', async () => {
     fetchMock.mockResolvedValueOnce(response([]));
     let finish!: (response: Response) => void;
