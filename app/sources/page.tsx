@@ -1,34 +1,41 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
-  Plus,
-  Trash2,
-  RefreshCw,
-  ExternalLink,
   AlertTriangle,
+  ArrowUpRight,
   CheckCircle,
-  XCircle,
+  ChevronDown,
   Clock,
-  Globe,
   Edit2,
+  Layers,
   Loader2,
+  Newspaper,
+  Plus,
+  RefreshCw,
+  Rss,
+  Trash2,
+  XCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from 'cn';
 import { AppFrame } from '@/components/app-frame';
+import { statusMeta } from '@/components/status-pill';
 import { Button } from '@/components/ui/button';
 import { ErrorState } from '@/components/ui/error-state';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Modal } from '@/components/ui/modal';
-import { timeAgo } from '@/lib/format';
+import { formatDomain, timeAgo } from '@/lib/format';
+import { fetchQueueItem } from '@/lib/story-queue';
 
 type Feed = {
   id: number;
   workspace_id: string;
   url: string;
   title: string | null;
+  category: string | null;
   last_fetched_at: string | null;
   error_message: string | null;
   enabled: boolean;
@@ -36,136 +43,202 @@ type Feed = {
   item_count: number;
 };
 
-type PreviewItem = {
+type SourceItem = {
+  id: number;
   title: string;
+  summary: string | null;
   link: string;
+  image_url: string | null;
   published_at: string | null;
+  created_at: string | null;
+  feed_id: number | null;
+  feed_title: string | null;
+  status: string;
 };
 
-function FeedCard({
+const UNGROUPED = 'Ungrouped';
+
+function feedName(feed: Pick<Feed, 'title' | 'url'>): string {
+  return feed.title?.trim() || formatDomain(feed.url);
+}
+
+/** Monogram tile standing in for a source avatar (feeds have no icon data). */
+function SourceMark({
   feed,
-  onToggle,
-  onDelete,
-  onFetchNow,
-  onEdit,
-  fetchingIds,
-  togglingIds,
+  className,
 }: {
-  feed: Feed;
-  onToggle: (id: number, enabled: boolean) => void;
-  onDelete: (feed: Feed) => void;
-  onFetchNow: (id: number) => void;
-  onEdit: (feed: Feed) => void;
-  fetchingIds: Set<number>;
-  togglingIds: Set<number>;
+  feed: Pick<Feed, 'title' | 'url'>;
+  className?: string;
 }) {
-  const isFetching = fetchingIds.has(feed.id);
-  const isToggling = togglingIds.has(feed.id);
+  const letter = (feedName(feed).match(/[a-z0-9]/i)?.[0] ?? '?').toUpperCase();
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        'grid size-6 shrink-0 place-items-center rounded-md bg-brand text-[10px] font-semibold text-brand-foreground',
+        className
+      )}
+    >
+      {letter}
+    </span>
+  );
+}
 
-  const getStatus = () => {
-    if (!feed.enabled) return { label: 'Disabled', variant: 'secondary' as const, icon: XCircle };
-    if (feed.error_message) return { label: 'Error', variant: 'destructive' as const, icon: AlertTriangle };
-    if (!feed.last_fetched_at) return { label: 'Never fetched', variant: 'outline' as const, icon: Clock };
-    return { label: 'Active', variant: 'default' as const, icon: CheckCircle };
+/** Display-only status for a feed (Active / Error / Disabled / Never fetched). */
+function feedStatus(feed: Feed) {
+  if (!feed.enabled) {
+    return {
+      label: 'Disabled',
+      pill: 'border-border bg-secondary text-muted-foreground',
+      icon: XCircle,
+    };
+  }
+  if (feed.error_message) {
+    return {
+      label: 'Error',
+      pill: 'border-destructive/20 bg-destructive/10 text-destructive',
+      icon: AlertTriangle,
+    };
+  }
+  if (!feed.last_fetched_at) {
+    return {
+      label: 'Never fetched',
+      pill: 'border-border bg-card text-muted-foreground',
+      icon: Clock,
+    };
+  }
+  return {
+    label: 'Active',
+    pill: 'border-success/20 bg-success/10 text-success',
+    icon: CheckCircle,
   };
+}
 
-  const status = getStatus();
-  const StatusIcon = status.icon;
+function FeedStatusPill({ feed }: { feed: Feed }) {
+  const status = feedStatus(feed);
+  const Icon = status.icon;
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider',
+        status.pill
+      )}
+    >
+      <Icon className="size-3" aria-hidden />
+      {status.label}
+    </span>
+  );
+}
+
+function ArticleThumb({ src, title }: { src: string | null; title: string }) {
+  const [failed, setFailed] = useState(false);
+  if (!src || failed) {
+    const letter = (title.match(/[a-z0-9]/i)?.[0] ?? '·').toUpperCase();
+    return (
+      <div className="grid h-full w-full place-items-center bg-secondary">
+        <span className="font-heading text-lg text-faint" aria-hidden>
+          {letter}
+        </span>
+      </div>
+    );
+  }
+  return (
+    // eslint-disable-next-line @next/next/no-img-element -- remote feed imagery with arbitrary hosts; the app renders remote media with plain img (see page-selection.tsx)
+    <img
+      src={src}
+      alt=""
+      loading="lazy"
+      onError={() => setFailed(true)}
+      className="h-full w-full object-cover"
+    />
+  );
+}
+
+function ArticleRow({
+  item,
+  showSource,
+  onDraft,
+  drafting,
+}: {
+  item: SourceItem;
+  showSource: boolean;
+  onDraft: (item: SourceItem) => void;
+  drafting: boolean;
+}) {
+  // Pending is the default state — only flag stories already handled.
+  const meta = item.status !== 'pending' ? statusMeta(item.status) : null;
+  const when = item.published_at ?? item.created_at;
 
   return (
-    <div className="rounded-xl border border-border bg-card p-4 transition-colors hover:border-border/50">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 flex-wrap">
-            <h3 className="font-semibold text-[13px] truncate">{feed.title ?? 'Untitled Feed'}</h3>
+    <article className="group flex gap-3.5 px-4 py-3.5 transition-colors hover:bg-surface-2/60 sm:px-5">
+      <div className="h-[72px] w-[108px] shrink-0 overflow-hidden rounded-lg border border-border/60 bg-secondary">
+        <ArticleThumb src={item.image_url} title={item.title} />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+          {meta && (
+            <>
+              <span className={cn('size-1.5 rounded-full', meta.dot)} aria-hidden />
+              {meta.label}
+              <span aria-hidden>·</span>
+            </>
+          )}
+          {showSource && (
+            <>
+              <span className="normal-case tracking-normal">
+                {item.feed_title?.trim() || formatDomain(item.link)}
+              </span>
+              <span aria-hidden>·</span>
+            </>
+          )}
+          {when && <span className="normal-case tracking-normal">{timeAgo(when)}</span>}
+        </div>
+        <h3 className="mt-1 font-heading text-[15.5px] leading-snug tracking-[-0.01em] text-foreground/90">
+          <a
+            href={item.link}
+            target="_blank"
+            rel="noreferrer"
+            className="transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          >
+            {item.title}
+          </a>
+        </h3>
+        {item.summary && (
+          <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
+            {item.summary}
+          </p>
+        )}
+        <div className="mt-2 flex items-center justify-end gap-2">
+          <a
+            href={item.link}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          >
+            Read original
+            <ArrowUpRight className="size-3" aria-hidden />
+          </a>
+          {item.status === 'pending' && (
             <Button
-              variant={status.variant}
+              variant="brand"
               size="sm"
-              className="h-6 px-2 gap-1"
-              disabled={isToggling}
+              onClick={() => onDraft(item)}
+              disabled={drafting}
+              aria-busy={drafting}
+              aria-label={`Draft "${item.title}" in Compose`}
+              className="min-w-[64px]"
             >
-              <StatusIcon className="size-3" aria-hidden />
-              {isToggling ? '…' : status.label}
+              {drafting ? (
+                <Loader2 className="size-3.5 animate-spin" aria-hidden />
+              ) : (
+                <Edit2 className="size-3.5" aria-hidden />
+              )}
+              {drafting ? 'Opening…' : 'Draft'}
             </Button>
-          </div>
-          <p className="mt-1 truncate text-[10.5px] text-muted-foreground">{feed.url}</p>
-          <div className="mt-2 flex flex-wrap items-center gap-3 text-[10.5px] text-muted-foreground">
-            <span className="flex items-center gap-1">
-              <Globe className="size-3" aria-hidden />
-              {feed.item_count} stories
-            </span>
-            {feed.last_fetched_at && (
-              <span className="flex items-center gap-1">
-                <Clock className="size-3" aria-hidden />
-                Last fetched {timeAgo(feed.last_fetched_at)}
-              </span>
-            )}
-            {!feed.last_fetched_at && feed.enabled && (
-              <span className="flex items-center gap-1 text-warning">
-                <Clock className="size-3" aria-hidden />
-                Never fetched
-              </span>
-            )}
-          </div>
-          {feed.error_message && (
-            <p className="mt-2 text-[10.5px] text-destructive flex items-center gap-1">
-              <AlertTriangle className="size-3" aria-hidden />
-              {feed.error_message}
-            </p>
           )}
         </div>
-        <div className="flex items-center gap-1.5 shrink-0">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => onEdit(feed)}
-            className="size-9"
-            aria-label="Edit feed"
-            disabled={isFetching || isToggling}
-          >
-            <Edit2 className="size-3.5" aria-hidden />
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => onFetchNow(feed.id)}
-            className="size-9"
-            aria-label="Fetch now"
-            disabled={isFetching || isToggling || !feed.enabled}
-          >
-            {isFetching ? (
-              <Loader2 className="size-3.5 animate-spin" aria-hidden />
-            ) : (
-              <RefreshCw className="size-3.5" aria-hidden />
-            )}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => onToggle(feed.id, !feed.enabled)}
-            className="size-9"
-            aria-label={feed.enabled ? 'Disable feed' : 'Enable feed'}
-            disabled={isToggling}
-          >
-            {feed.enabled ? (
-              <XCircle className="size-3.5 text-muted-foreground" aria-hidden />
-            ) : (
-              <CheckCircle className="size-3.5 text-success" aria-hidden />
-            )}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => onDelete(feed)}
-            className="size-9 text-destructive hover:bg-destructive/10 hover:text-destructive"
-            aria-label="Delete feed"
-            disabled={isFetching || isToggling}
-          >
-            <Trash2 className="size-3.5" aria-hidden />
-          </Button>
-        </div>
       </div>
-    </div>
+    </article>
   );
 }
 
@@ -174,13 +247,16 @@ function AddFeedDialog({
   onClose,
   onSubmit,
   submitting,
+  categories,
 }: {
   open: boolean;
   onClose: () => void;
-  onSubmit: (url: string) => Promise<void>;
+  onSubmit: (url: string, category: string) => Promise<void>;
   submitting: boolean;
+  categories: string[];
 }) {
   const [url, setUrl] = useState('');
+  const [category, setCategory] = useState('');
   const [error, setError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -188,8 +264,9 @@ function AddFeedDialog({
     e.preventDefault();
     setError('');
     try {
-      await onSubmit(url.trim());
+      await onSubmit(url.trim(), category.trim());
       setUrl('');
+      setCategory('');
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to add feed');
@@ -211,6 +288,25 @@ function AddFeedDialog({
             className="h-9 text-[12px]"
             disabled={submitting}
           />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="feed-group" className="text-[12px]">
+            Group <span className="font-normal text-faint">(optional)</span>
+          </Label>
+          <Input
+            id="feed-group"
+            list="add-feed-group-options"
+            value={category}
+            onChange={e => setCategory(e.target.value)}
+            placeholder="e.g. Tech, News"
+            className="h-9 text-[12px]"
+            disabled={submitting}
+          />
+          <datalist id="add-feed-group-options">
+            {categories.map(categoryName => (
+              <option key={categoryName} value={categoryName} />
+            ))}
+          </datalist>
         </div>
         {error && (
           <p className="text-[10.5px] text-destructive flex items-center gap-1">
@@ -240,25 +336,31 @@ function EditFeedDialog({
   feed,
   onSubmit,
   submitting,
+  categories,
 }: {
   open: boolean;
   onClose: () => void;
   feed: Feed | null;
-  onSubmit: (id: number, title: string) => Promise<void>;
+  onSubmit: (id: number, title: string, category: string) => Promise<void>;
   submitting: boolean;
+  categories: string[];
 }) {
   const [title, setTitle] = useState('');
+  const [category, setCategory] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (feed) setTitle(feed.title ?? '');
+    if (feed) {
+      setTitle(feed.title ?? '');
+      setCategory(feed.category ?? '');
+    }
   }, [feed]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!feed) return;
     try {
-      await onSubmit(feed.id, title.trim());
+      await onSubmit(feed.id, title.trim(), category.trim());
       onClose();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to update feed');
@@ -284,6 +386,25 @@ function EditFeedDialog({
             className="h-9 text-[12px]"
             disabled={submitting}
           />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="edit-feed-group" className="text-[12px]">
+            Group <span className="font-normal text-faint">(optional)</span>
+          </Label>
+          <Input
+            id="edit-feed-group"
+            list="edit-feed-group-options"
+            value={category}
+            onChange={e => setCategory(e.target.value)}
+            placeholder="e.g. Tech, News"
+            className="h-9 text-[12px]"
+            disabled={submitting}
+          />
+          <datalist id="edit-feed-group-options">
+            {categories.map(categoryName => (
+              <option key={categoryName} value={categoryName} />
+            ))}
+          </datalist>
         </div>
         <p className="text-[10.5px] text-muted-foreground truncate">{feed?.url}</p>
         <div className="flex justify-end gap-2 pt-2">
@@ -330,10 +451,53 @@ function DeleteConfirmDialog({
   );
 }
 
-export default function SourcesPage() {
+/** Day bucket for date-group headers, keyed by local calendar day. */
+function dayKey(value: string | null): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+}
+
+function dayLabel(key: string): string {
+  const [year, month, day] = key.split('-').map(Number);
+  const date = new Date(year, month, day);
+  const today = new Date();
+  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const diffDays = Math.round((startOfToday.getTime() - date.getTime()) / 86_400_000);
+  if (diffDays <= 0) return 'Today';
+  if (diffDays === 1) return 'Yesterday';
+  const options: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' };
+  if (year !== today.getFullYear()) options.year = 'numeric';
+  return date.toLocaleDateString('en-PH', options);
+}
+
+function SourcesPageInner() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const feedParam = searchParams.get('feed');
+
   const [feeds, setFeeds] = useState<Feed[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState(false);
+  const [feedsLoading, setFeedsLoading] = useState(true);
+  const [feedsError, setFeedsError] = useState(false);
+
+  // Selection mirrors ?feed=<id> so sources can be deep-linked; 'all' is the
+  // default view. The effect keeps the back/forward buttons working.
+  const [selectedKey, setSelectedKey] = useState(() =>
+    feedParam && feedParam !== 'all' ? feedParam : 'all'
+  );
+  useEffect(() => {
+    setSelectedKey(feedParam && feedParam !== 'all' ? feedParam : 'all');
+  }, [feedParam]);
+
+  const [items, setItems] = useState<SourceItem[]>([]);
+  const [itemsLoading, setItemsLoading] = useState(true);
+  const [itemsError, setItemsError] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<number | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [draftingId, setDraftingId] = useState<number | null>(null);
+
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -342,7 +506,7 @@ export default function SourcesPage() {
   const [submitting, setSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [fetchingIds, setFetchingIds] = useState<Set<number>>(new Set());
-  const [togglingIds, setDisablingIds] = useState<Set<number>>(new Set());
+  const [togglingIds, setTogglingIds] = useState<Set<number>>(new Set());
 
   const loadFeeds = useCallback(async () => {
     try {
@@ -350,14 +514,14 @@ export default function SourcesPage() {
       if (!res.ok) throw new Error('Failed to load feeds');
       const data = await res.json();
       setFeeds(data.feeds ?? []);
-      setLoadError(false);
+      setFeedsError(false);
     } catch (error) {
-      setLoadError(true);
+      setFeedsError(true);
       toast.error('Could not load sources', {
         description: error instanceof Error ? error.message : 'Please try again.',
       });
     } finally {
-      setLoading(false);
+      setFeedsLoading(false);
     }
   }, []);
 
@@ -365,36 +529,156 @@ export default function SourcesPage() {
     loadFeeds();
   }, [loadFeeds]);
 
+  // Fall back to the "All sources" view when a deep-linked feed no longer
+  // exists (deleted, or another workspace's id).
+  const selectedFeed =
+    selectedKey !== 'all' ? (feeds.find(feed => String(feed.id) === selectedKey) ?? null) : null;
+  const effectiveKey =
+    !feedsLoading && selectedKey !== 'all' && !selectedFeed ? 'all' : selectedKey;
+  // Mirror of the effective selection for stale-response guards. Kept in sync
+  // by an effect (declared before the fetch effect, so it always runs first)
+  // rather than during render.
+  const selectedKeyRef = useRef(effectiveKey);
+  useEffect(() => {
+    selectedKeyRef.current = effectiveKey;
+  }, [effectiveKey]);
+  const selectedFeedId = effectiveKey === 'all' ? null : Number(effectiveKey);
+
+  const loadItems = useCallback(async () => {
+    const keyAtRequest = selectedKeyRef.current;
+    setItemsLoading(true);
+    setItemsError(false);
+    try {
+      const query =
+        keyAtRequest === 'all' ? '' : `feed=${encodeURIComponent(keyAtRequest)}`;
+      const res = await fetch(`/api/source-items${query ? `?${query}` : ''}`, {
+        cache: 'no-store',
+      });
+      if (!res.ok) throw new Error('Failed to load stories');
+      const data = await res.json();
+      if (keyAtRequest !== selectedKeyRef.current) return;
+      setItems(data.rows ?? []);
+      setNextCursor(typeof data.nextCursor === 'number' ? data.nextCursor : null);
+      setHasMore(Boolean(data.hasMore));
+    } catch {
+      if (keyAtRequest !== selectedKeyRef.current) return;
+      setItemsError(true);
+    } finally {
+      if (keyAtRequest === selectedKeyRef.current) setItemsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadItems();
+  }, [loadItems, selectedFeedId]);
+
+  const loadMore = useCallback(async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const keyAtRequest = selectedKeyRef.current;
+      const query =
+        keyAtRequest === 'all'
+          ? `before=${nextCursor}`
+          : `feed=${encodeURIComponent(keyAtRequest)}&before=${nextCursor}`;
+      const res = await fetch(`/api/source-items?${query}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error('Failed to load stories');
+      const data = await res.json();
+      if (keyAtRequest !== selectedKeyRef.current) return;
+      setItems(prev => {
+        const seen = new Set(prev.map(item => item.id));
+        return [...prev, ...(data.rows ?? []).filter((item: SourceItem) => !seen.has(item.id))];
+      });
+      setNextCursor(typeof data.nextCursor === 'number' ? data.nextCursor : null);
+      setHasMore(Boolean(data.hasMore));
+    } catch {
+      toast.error('Could not load more stories');
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [nextCursor, loadingMore]);
+
+  const select = useCallback(
+    (key: string) => {
+      setSelectedKey(key);
+      router.replace(key === 'all' ? '/sources' : `/sources?feed=${key}`);
+    },
+    [router]
+  );
+
+  const totalCount = useMemo(
+    () => feeds.reduce((sum, feed) => sum + feed.item_count, 0),
+    [feeds]
+  );
+
+  const groups = useMemo(() => {
+    const map = new Map<string, Feed[]>();
+    for (const feed of feeds) {
+      const label = feed.category?.trim() || UNGROUPED;
+      const bucket = map.get(label);
+      if (bucket) bucket.push(feed);
+      else map.set(label, [feed]);
+    }
+    return [...map.entries()].sort(([a], [b]) => {
+      if (a === UNGROUPED) return 1;
+      if (b === UNGROUPED) return -1;
+      return a.localeCompare(b);
+    });
+  }, [feeds]);
+
+  const categories = useMemo(
+    () => groups.map(([label]) => label).filter(label => label !== UNGROUPED),
+    [groups]
+  );
+
+  // Date-grouped sections, newest first (items arrive id DESC and the
+  // grouping preserves that order).
+  const sections = useMemo(() => {
+    const map = new Map<string, SourceItem[]>();
+    for (const item of items) {
+      const key = dayKey(item.published_at ?? item.created_at) ?? 'undated';
+      const bucket = map.get(key);
+      if (bucket) bucket.push(item);
+      else map.set(key, [item]);
+    }
+    return [...map.entries()].map(([key, rows]) => ({
+      key,
+      label: key === 'undated' ? 'Earlier' : dayLabel(key),
+      rows,
+    }));
+  }, [items]);
+
   async function refresh() {
     setRefreshing(true);
     await loadFeeds();
     setRefreshing(false);
   }
 
-  const handleAddFeed = async (url: string) => {
+  const handleAddFeed = async (url: string, category: string) => {
     setSubmitting(true);
     try {
       const res = await fetch('/api/sources', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ url, category }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'Failed to add feed');
       toast.success('Feed added', { description: `${data.feed.title ?? 'Feed'} has been added.` });
       await loadFeeds();
+      select(String(data.feed.id));
     } finally {
       setSubmitting(false);
     }
   };
 
-  const handleEditFeed = async (id: number, title: string) => {
+  const handleEditFeed = async (id: number, title: string, category: string) => {
     setSubmitting(true);
     try {
       const res = await fetch(`/api/sources/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title }),
+        body: JSON.stringify({ title, category }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'Failed to update feed');
@@ -406,7 +690,7 @@ export default function SourcesPage() {
   };
 
   const handleToggleFeed = async (id: number, enabled: boolean) => {
-    setDisablingIds(prev => new Set(prev).add(id));
+    setTogglingIds(prev => new Set(prev).add(id));
     try {
       const res = await fetch(`/api/sources/${id}`, {
         method: 'PATCH',
@@ -422,7 +706,7 @@ export default function SourcesPage() {
         description: error instanceof Error ? error.message : 'Please try again.',
       });
     } finally {
-      setDisablingIds(prev => {
+      setTogglingIds(prev => {
         const next = new Set(prev);
         next.delete(id);
         return next;
@@ -440,6 +724,7 @@ export default function SourcesPage() {
         description: `${data.ingested ?? 0} new stories · ${data.skipped ?? 0} already seen`,
       });
       await loadFeeds();
+      if (String(id) === selectedKeyRef.current) await loadItems();
     } catch (error) {
       toast.error('Could not fetch feed', {
         description: error instanceof Error ? error.message : 'Please try again.',
@@ -453,7 +738,6 @@ export default function SourcesPage() {
     }
   };
 
-
   const confirmDelete = async () => {
     if (!deletingFeedId) return;
     setSubmitting(true);
@@ -462,6 +746,7 @@ export default function SourcesPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'Failed to delete feed');
       toast.success('Feed deleted');
+      if (String(deletingFeedId) === selectedKey) select('all');
       await loadFeeds();
     } catch (error) {
       toast.error('Could not delete feed', {
@@ -484,125 +769,465 @@ export default function SourcesPage() {
     setDeleteDialogOpen(true);
   };
 
-  if (loading) {
-    return (
-      <AppFrame>
-        <div className="mx-auto w-full max-w-[880px] px-4 py-6 sm:px-6 lg:py-7">
-          <p className="eyebrow">Manage</p>
-          <h1 className="page-title mt-1">Sources</h1>
-          <p className="mt-1 text-[12.5px] text-muted-foreground">
-            Manage RSS feeds that populate your Story Queue.
-          </p>
-          <div className="mt-5 space-y-4">
-            {[1, 2, 3].map(i => (
-              <div key={i} className="animate-pulse rounded-xl border border-border/80 bg-card p-4">
-                <div className="h-4 w-1/3 rounded bg-muted" />
-                <div className="mt-2 h-3 w-1/2 rounded bg-muted" />
-                <div className="mt-2 h-3 w-1/4 rounded bg-muted" />
-              </div>
-            ))}
-          </div>
-        </div>
-      </AppFrame>
-    );
-  }
+  // "Draft" opens the story in Compose, same flow as the queue's Add: the
+  // single-item fetch validates the story still exists before navigating.
+  const draftInCompose = async (item: SourceItem) => {
+    if (draftingId !== null) return;
+    setDraftingId(item.id);
+    try {
+      const fresh = await fetchQueueItem(item.id);
+      if (!fresh) throw new Error('Story not found');
+      router.push(`/compose?item=${item.id}`);
+    } catch (error) {
+      toast.error('Could not open the story in Compose', {
+        description: error instanceof Error ? error.message : 'Please try again.',
+      });
+      setDraftingId(null);
+    }
+  };
+
+  const isAll = effectiveKey === 'all';
+  const headerTotal = isAll ? totalCount : (selectedFeed?.item_count ?? 0);
+
+  const sourceRowBase =
+    'flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50';
 
   return (
-    <AppFrame>
-      <div className="mx-auto w-full max-w-[880px] px-4 py-6 sm:px-6 lg:py-7">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="eyebrow">Manage</p>
-            <h1 className="page-title mt-1">Sources</h1>
-            <p className="mt-1 text-[12.5px] text-muted-foreground">
-              Manage RSS feeds that populate your Story Queue.
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              className="h-9"
-              onClick={() => void refresh()}
-              disabled={refreshing}
-              aria-busy={refreshing}
-            >
-              <RefreshCw
-                className={cn("size-3.5", refreshing && "animate-spin")}
-                aria-hidden
-              />
-              {refreshing ? "Refreshing…" : "Refresh"}
-            </Button>
-            <Button onClick={() => setAddDialogOpen(true)} className="h-9">
-              <Plus className="size-3.5" aria-hidden />
-              Add source
-            </Button>
-          </div>
-        </div>
-
-        {loadError ? (
-          <ErrorState
-            className="mt-5"
-            title="Couldn't load your sources"
-            onRetry={loadFeeds}
-          />
-        ) : feeds.length === 0 ? (
-          <div className="mt-5 rounded-xl border border-dashed border-border bg-card/50 p-8 text-center">
-            <div className="mx-auto grid size-11 place-items-center rounded-full bg-secondary">
-              <Globe className="size-5 text-muted-foreground" aria-hidden />
+    <AppFrame fill>
+      <div className="flex min-h-0 flex-1">
+        {/* Sources sidebar (desktop) */}
+        <aside className="hidden w-[264px] shrink-0 flex-col border-r border-border/70 bg-surface-2/40 md:flex">
+          <div className="flex items-center justify-between gap-2 px-3 pb-1 pt-3.5">
+            <p className="eyebrow px-1">Sources</p>
+            <div className="flex items-center gap-0.5">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => void refresh()}
+                disabled={refreshing}
+                aria-busy={refreshing}
+                aria-label="Refresh sources"
+              >
+                <RefreshCw className={cn('size-3.5', refreshing && 'animate-spin')} aria-hidden />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => setAddDialogOpen(true)}
+                aria-label="Add source"
+              >
+                <Plus className="size-3.5" aria-hidden />
+              </Button>
             </div>
-            <h2 className="mt-4 font-heading text-xl">No sources yet</h2>
-            <p className="mt-2 text-sm leading-relaxed text-muted-foreground max-w-sm mx-auto">
-              Add your first RSS feed to start pulling stories into your Story Queue.
-            </p>
-            <Button variant="brand" size="sm" className="mt-4" onClick={() => setAddDialogOpen(true)}>
-              <Plus className="size-3.5" aria-hidden />
-              Add your first feed
-            </Button>
           </div>
-        ) : (
-          <div className="mt-5 grid gap-3 sm:grid-cols-2">
-            {feeds.map(feed => (
-              <FeedCard
-                key={feed.id}
-                feed={feed}
-                onToggle={handleToggleFeed}
-                onDelete={openDeleteDialog}
-                onFetchNow={handleFetchNow}
-                onEdit={openEditDialog}
-                fetchingIds={fetchingIds}
-                togglingIds={togglingIds}
-              />
-            ))}
-          </div>
-        )}
+          <nav
+            className="min-h-0 flex-1 overflow-y-auto px-3 pb-4"
+            aria-label="Source list"
+          >
+            {feedsLoading ? (
+              <div className="animate-pulse space-y-1.5">
+                {Array.from({ length: 6 }).map((_, index) => (
+                  <div key={index} className="flex items-center gap-2 px-2 py-1.5">
+                    <div className="size-6 rounded-md bg-muted" />
+                    <div className="h-3 flex-1 rounded bg-muted" />
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => select('all')}
+                  aria-current={isAll}
+                  className={cn(
+                    sourceRowBase,
+                    isAll
+                      ? 'bg-brand-soft font-semibold text-foreground'
+                      : 'text-muted-foreground hover:bg-card hover:text-foreground'
+                  )}
+                >
+                  <span className="grid size-6 shrink-0 place-items-center rounded-md border border-border bg-card">
+                    <Layers className="size-3.5 text-muted-foreground" aria-hidden />
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">All sources</span>
+                  <span className="text-[10.5px] tabular-nums text-faint">{totalCount}</span>
+                </button>
+                {groups.map(([label, groupFeeds]) => (
+                  <div key={label} className="mt-3">
+                    <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-faint">
+                      {label}
+                    </p>
+                    <div className="space-y-0.5">
+                      {groupFeeds.map(feed => {
+                        const active = String(feed.id) === effectiveKey;
+                        return (
+                          <button
+                            key={feed.id}
+                            type="button"
+                            onClick={() => select(String(feed.id))}
+                            aria-current={active}
+                            className={cn(
+                              sourceRowBase,
+                              active
+                                ? 'bg-brand-soft font-semibold text-foreground'
+                                : 'text-muted-foreground hover:bg-card hover:text-foreground',
+                              !feed.enabled && !active && 'opacity-55'
+                            )}
+                          >
+                            <SourceMark feed={feed} />
+                            <span className="min-w-0 flex-1 truncate">{feedName(feed)}</span>
+                            {feed.error_message && (
+                              <AlertTriangle
+                                className="size-3 shrink-0 text-destructive"
+                                aria-label="Fetch error"
+                              />
+                            )}
+                            <span className="text-[10.5px] tabular-nums text-faint">
+                              {feed.item_count}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
+          </nav>
+        </aside>
 
-        <AddFeedDialog
-          open={addDialogOpen}
-          onClose={() => setAddDialogOpen(false)}
-          onSubmit={handleAddFeed}
-          submitting={submitting}
-        />
-        <EditFeedDialog
-          open={editDialogOpen}
-          onClose={() => {
-            setEditDialogOpen(false);
-            setEditingFeed(null);
-          }}
-          feed={editingFeed}
-          onSubmit={handleEditFeed}
-          submitting={submitting}
-        />
-        <DeleteConfirmDialog
-          open={deleteDialogOpen}
-          onClose={() => {
-            setDeleteDialogOpen(false);
-            setDeletingFeedId(null);
-          }}
-          onConfirm={confirmDelete}
-          confirming={submitting}
-          feedTitle={feeds.find(f => f.id === deletingFeedId)?.title ?? 'this feed'}
-        />
+        {/* Main pane */}
+        <section className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {/* Mobile top bar + source chips */}
+          <div className="shrink-0 border-b border-border/70 md:hidden">
+            <div className="flex items-center justify-between px-4 py-3">
+              <h1 className="font-heading text-lg font-semibold tracking-tight">Sources</h1>
+              <Button size="sm" onClick={() => setAddDialogOpen(true)}>
+                <Plus className="size-3.5" aria-hidden />
+                Add source
+              </Button>
+            </div>
+            <div
+              className="flex items-center gap-1 overflow-x-auto px-4 pb-2"
+              role="group"
+              aria-label="Browse by source"
+            >
+              {feedsLoading ? (
+                Array.from({ length: 3 }).map((_, index) => (
+                  <div key={index} className="h-7 w-24 shrink-0 animate-pulse rounded-full bg-muted" />
+                ))
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => select('all')}
+                    aria-pressed={isAll}
+                    className={cn(
+                      'flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-colors',
+                      isAll
+                        ? 'bg-ink text-paper'
+                        : 'text-muted-foreground hover:bg-card hover:text-foreground'
+                    )}
+                  >
+                    All sources
+                    <span className="rounded-full bg-secondary px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-muted-foreground">
+                      {totalCount}
+                    </span>
+                  </button>
+                  {feeds.map(feed => {
+                    const active = String(feed.id) === effectiveKey;
+                    return (
+                      <button
+                        key={feed.id}
+                        type="button"
+                        onClick={() => select(String(feed.id))}
+                        aria-pressed={active}
+                        className={cn(
+                          'flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-colors',
+                          active
+                            ? 'bg-ink text-paper'
+                            : 'text-muted-foreground hover:bg-card hover:text-foreground'
+                        )}
+                      >
+                        <span className="max-w-[180px] truncate">{feedName(feed)}</span>
+                        <span
+                          className={cn(
+                            'rounded-full px-1.5 py-0.5 text-[10px] font-semibold tabular-nums',
+                            active ? 'bg-paper/20 text-paper' : 'bg-secondary text-muted-foreground'
+                          )}
+                        >
+                          {feed.item_count}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Source header */}
+          <header className="shrink-0 border-b border-border/70 bg-card/50">
+            <div className="mx-auto w-full max-w-[900px] px-4 py-4 sm:px-6">
+              {feedsError ? (
+                <ErrorState
+                  compact
+                  title="Couldn't load your sources"
+                  onRetry={loadFeeds}
+                />
+              ) : isAll ? (
+                <div className="flex items-center gap-3">
+                  <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-brand text-brand-foreground">
+                    <Layers className="size-4" aria-hidden />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <h1 className="font-heading text-xl font-semibold tracking-tight">
+                      All sources
+                    </h1>
+                    <p className="mt-0.5 text-[11px] text-muted-foreground">
+                      {feeds.length} {feeds.length === 1 ? 'source' : 'sources'} ·{' '}
+                      {headerTotal} {headerTotal === 1 ? 'story' : 'stories'}
+                    </p>
+                  </div>
+                </div>
+              ) : selectedFeed ? (
+                <div>
+                  <div className="flex items-start gap-3">
+                    <SourceMark feed={selectedFeed} className="size-10 rounded-xl text-sm" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <h1 className="font-heading text-xl font-semibold tracking-tight">
+                          {feedName(selectedFeed)}
+                        </h1>
+                        <FeedStatusPill feed={selectedFeed} />
+                      </div>
+                      <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                        {formatDomain(selectedFeed.url)} · {selectedFeed.item_count}{' '}
+                        {selectedFeed.item_count === 1 ? 'story' : 'stories'}
+                        {selectedFeed.last_fetched_at &&
+                          ` · last fetched ${timeAgo(selectedFeed.last_fetched_at)}`}
+                        {selectedFeed.category?.trim() && ` · ${selectedFeed.category.trim()}`}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleFetchNow(selectedFeed.id)}
+                        disabled={fetchingIds.has(selectedFeed.id) || !selectedFeed.enabled}
+                        aria-busy={fetchingIds.has(selectedFeed.id)}
+                      >
+                        <RefreshCw
+                          className={cn(
+                            'size-3.5',
+                            fetchingIds.has(selectedFeed.id) && 'animate-spin'
+                          )}
+                          aria-hidden
+                        />
+                        Fetch now
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={() => openEditDialog(selectedFeed)}
+                        aria-label="Edit feed"
+                        disabled={togglingIds.has(selectedFeed.id)}
+                      >
+                        <Edit2 className="size-3.5" aria-hidden />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={() => handleToggleFeed(selectedFeed.id, !selectedFeed.enabled)}
+                        aria-label={selectedFeed.enabled ? 'Disable feed' : 'Enable feed'}
+                        disabled={togglingIds.has(selectedFeed.id)}
+                      >
+                        {selectedFeed.enabled ? (
+                          <XCircle className="size-3.5 text-muted-foreground" aria-hidden />
+                        ) : (
+                          <CheckCircle className="size-3.5 text-success" aria-hidden />
+                        )}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={() => openDeleteDialog(selectedFeed)}
+                        aria-label="Delete feed"
+                        className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        disabled={fetchingIds.has(selectedFeed.id) || togglingIds.has(selectedFeed.id)}
+                      >
+                        <Trash2 className="size-3.5" aria-hidden />
+                      </Button>
+                    </div>
+                  </div>
+                  {selectedFeed.error_message && (
+                    <div className="mt-2.5 flex items-start gap-1.5 rounded-lg border border-destructive/20 bg-destructive/5 px-2.5 py-1.5 text-[11px] leading-relaxed text-destructive">
+                      <AlertTriangle className="mt-0.5 size-3 shrink-0" aria-hidden />
+                      <span>{selectedFeed.error_message}</span>
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          </header>
+
+          {/* Article list */}
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+            <div className="mx-auto w-full max-w-[900px] px-4 py-4 sm:px-6 sm:py-5">
+              {itemsLoading ? (
+                <div className="animate-pulse overflow-hidden rounded-xl border border-border/80 bg-card">
+                  {Array.from({ length: 5 }).map((_, index) => (
+                    <div key={index} className="flex gap-3.5 border-b border-border/60 px-4 py-3.5 last:border-b-0 sm:px-5">
+                      <div className="h-[72px] w-[108px] shrink-0 rounded-lg bg-muted" />
+                      <div className="min-w-0 flex-1 py-1">
+                        <div className="h-2 w-24 rounded bg-muted" />
+                        <div className="mt-2 h-3.5 w-full rounded bg-muted" />
+                        <div className="mt-1.5 h-3.5 w-4/5 rounded bg-muted" />
+                        <div className="mt-2.5 h-2.5 w-full rounded bg-muted" />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : itemsError ? (
+                <ErrorState
+                  title="Couldn't load stories"
+                  description="The articles for this source just couldn't be fetched right now."
+                  onRetry={loadItems}
+                />
+              ) : feeds.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-border bg-card/50 p-8 text-center">
+                  <div className="mx-auto grid size-11 place-items-center rounded-full bg-secondary">
+                    <Rss className="size-5 text-muted-foreground" aria-hidden />
+                  </div>
+                  <h2 className="mt-4 font-heading text-xl">No sources yet</h2>
+                  <p className="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-muted-foreground">
+                    Add your first RSS feed to start pulling stories into your Story Queue.
+                  </p>
+                  <Button variant="brand" size="sm" className="mt-4" onClick={() => setAddDialogOpen(true)}>
+                    <Plus className="size-3.5" aria-hidden />
+                    Add your first feed
+                  </Button>
+                </div>
+              ) : sections.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-border bg-card/50 px-6 py-12 text-center">
+                  <Newspaper className="mx-auto size-5 text-faint/60" aria-hidden />
+                  <p className="mt-2 text-sm font-medium">
+                    {isAll ? 'No stories yet' : 'No stories from this source yet'}
+                  </p>
+                  <p className="mx-auto mt-1 max-w-sm text-xs leading-relaxed text-muted-foreground">
+                    Pull the latest articles now, or wait for the next scheduled refresh.
+                  </p>
+                  {!isAll && selectedFeed?.enabled && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-4"
+                      onClick={() => handleFetchNow(selectedFeed.id)}
+                      disabled={fetchingIds.has(selectedFeed.id)}
+                      aria-busy={fetchingIds.has(selectedFeed.id)}
+                    >
+                      <RefreshCw
+                        className={cn('size-3.5', fetchingIds.has(selectedFeed.id) && 'animate-spin')}
+                        aria-hidden
+                      />
+                      Fetch now
+                    </Button>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <div className="flex flex-col">
+                    {sections.map(section => (
+                      <section key={section.key} className="mt-4 first:mt-0">
+                        <h2 className="px-1 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-faint">
+                          {section.label}
+                        </h2>
+                        <div className="divide-y divide-border/60 overflow-hidden rounded-xl border border-border/80 bg-card paper-shadow-sm">
+                          {section.rows.map(item => (
+                            <ArticleRow
+                              key={item.id}
+                              item={item}
+                              showSource={isAll}
+                              onDraft={item => void draftInCompose(item)}
+                              drafting={draftingId === item.id}
+                            />
+                          ))}
+                        </div>
+                      </section>
+                    ))}
+                  </div>
+                  <footer className="mt-4">
+                    {hasMore ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void loadMore()}
+                        disabled={loadingMore}
+                        aria-busy={loadingMore}
+                        className="w-full"
+                      >
+                        {loadingMore ? (
+                          <RefreshCw className="size-3.5 animate-spin" aria-hidden />
+                        ) : (
+                          <ChevronDown className="size-3.5" aria-hidden />
+                        )}
+                        {loadingMore ? 'Loading…' : 'Load more stories'}
+                      </Button>
+                    ) : (
+                      <p className="py-1 text-center text-[10.5px] text-muted-foreground">
+                        All stories loaded
+                      </p>
+                    )}
+                    <p className="mt-1.5 text-center text-[10px] tabular-nums text-muted-foreground">
+                      {items.length} loaded · {headerTotal} total
+                    </p>
+                  </footer>
+                </>
+              )}
+            </div>
+          </div>
+        </section>
       </div>
+
+      <AddFeedDialog
+        open={addDialogOpen}
+        onClose={() => setAddDialogOpen(false)}
+        onSubmit={handleAddFeed}
+        submitting={submitting}
+        categories={categories}
+      />
+      <EditFeedDialog
+        open={editDialogOpen}
+        onClose={() => {
+          setEditDialogOpen(false);
+          setEditingFeed(null);
+        }}
+        feed={editingFeed}
+        onSubmit={handleEditFeed}
+        submitting={submitting}
+        categories={categories}
+      />
+      <DeleteConfirmDialog
+        open={deleteDialogOpen}
+        onClose={() => {
+          setDeleteDialogOpen(false);
+          setDeletingFeedId(null);
+        }}
+        onConfirm={confirmDelete}
+        confirming={submitting}
+        feedTitle={
+          feeds.find(feed => feed.id === deletingFeedId)?.title ?? 'this feed'
+        }
+      />
     </AppFrame>
+  );
+}
+
+export default function SourcesPage() {
+  // useSearchParams opts the page out of prerendering without a boundary.
+  return (
+    <Suspense fallback={null}>
+      <SourcesPageInner />
+    </Suspense>
   );
 }

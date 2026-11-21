@@ -129,6 +129,56 @@ export async function clearSeededLiveStreams(): Promise<void> {
   await db()`DELETE FROM live_streams WHERE title LIKE ${`${SEED_MARKER}%`}`;
 }
 
+const SOURCES_FEED_HOST = "https://e2e-sources.test/";
+
+/**
+ * Seed two feeds with categories plus a few news_items for the Sources page
+ * regression spec: "Tech" holds two feeds, one feed is uncategorized, one
+ * story carries a thumbnail URL, and the rest have no image (monogram
+ * fallback). All rows are namespaced under e2e-sources.test for cleanup.
+ */
+export async function seedSourcesRedesignData(): Promise<{
+  vergeFeedId: number;
+  soloFeedId: number;
+}> {
+  const sql = db();
+  const owner = await ownerContext();
+  const runId = randomUUID();
+
+  const feeds = (await sql`
+    INSERT INTO feeds (workspace_id, url, title, category, enabled)
+    VALUES
+      (${owner.workspace_id}, ${`${SOURCES_FEED_HOST}verge/rss.xml`}, 'E2E Verge', 'Tech', true),
+      (${owner.workspace_id}, ${`${SOURCES_FEED_HOST}solo/rss.xml`}, 'E2E Solo', NULL, true)
+    RETURNING id
+  `) as unknown as { id: number }[];
+  const [vergeFeedId, soloFeedId] = feeds.map((feed) => feed.id);
+
+  await sql`
+    INSERT INTO news_items
+      (feed_id, workspace_id, guid, link, title, summary, image_url, published_at, created_at, dedup_hash)
+    VALUES
+      (${vergeFeedId}, ${owner.workspace_id}, ${`e2e-${runId}-1`},
+       ${`${SOURCES_FEED_HOST}one`}, 'E2E sources story one', 'Seeded summary one.',
+       ${`${SOURCES_FEED_HOST}img/one.jpg`}, now(), now(), ${`e2e-${runId}-h1`}),
+      (${vergeFeedId}, ${owner.workspace_id}, ${`e2e-${runId}-2`},
+       ${`${SOURCES_FEED_HOST}two`}, 'E2E sources story two', NULL,
+       NULL, now() - (1 * interval '1 day'), now() - (1 * interval '1 day'), ${`e2e-${runId}-h2`}),
+      (${soloFeedId}, ${owner.workspace_id}, ${`e2e-${runId}-3`},
+       ${`${SOURCES_FEED_HOST}three`}, 'E2E solo story', 'Seeded solo summary.',
+       NULL, now(), now(), ${`e2e-${runId}-h3`})
+  `;
+
+  return { vergeFeedId, soloFeedId };
+}
+
+/** Remove exactly what seedSourcesRedesignData wrote. */
+export async function clearSeededSourcesRedesignData(): Promise<void> {
+  const sql = db();
+  await sql`DELETE FROM news_items WHERE link LIKE ${`${SOURCES_FEED_HOST}%`}`;
+  await sql`DELETE FROM feeds WHERE url LIKE ${`${SOURCES_FEED_HOST}%`}`;
+}
+
 /** The columns live_streams carries, as reported by information_schema. */
 export async function liveStreamsColumns(): Promise<string[]> {
   const rows = (await db()`

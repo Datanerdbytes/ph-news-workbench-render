@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
-import { requireOwner, unauthorized } from '@/lib/session';
+import { requireOwner, requireWorkspace, unauthorized } from '@/lib/session';
 import { feedParser, ingestFeed, resolveFeedUrl, describeFeedError, FeedFetchError } from '@/lib/feeds';
 import { randomUUID } from 'crypto';
 
@@ -9,6 +9,7 @@ type FeedRow = {
   workspace_id: string;
   url: string;
   title: string | null;
+  category: string | null;
   last_fetched_at: string | null;
   error_message: string | null;
   enabled: boolean;
@@ -16,8 +17,17 @@ type FeedRow = {
   item_count: number;
 };
 
+const MAX_CATEGORY_LENGTH = 60;
+
+/** Sidebar group label. Blank clears the category; length-capped for tidy sidebar rows. */
+function normalizeCategory(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, MAX_CATEGORY_LENGTH) : null;
+}
+
 export async function GET(request: Request) {
-  const access = await requireOwner(request);
+  const access = await requireWorkspace(request);
   if (!access) return unauthorized();
   if (access instanceof NextResponse) return access;
 
@@ -28,6 +38,7 @@ export async function GET(request: Request) {
         f.workspace_id,
         f.url,
         f.title,
+        f.category,
         f.last_fetched_at,
         f.error_message,
         f.enabled,
@@ -64,6 +75,7 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const { url } = body;
+    const category = normalizeCategory(body.category);
 
     if (!url || typeof url !== 'string') {
       return NextResponse.json({ error: 'Feed URL is required' }, { status: 400 });
@@ -139,9 +151,9 @@ export async function POST(request: Request) {
 
     // Insert the new feed
     const result = await sql`
-      INSERT INTO feeds (workspace_id, url, title, enabled, created_at)
-      VALUES (${access.workspace.id}, ${resolvedUrl}, ${feedTitle}, true, now())
-      RETURNING id, workspace_id, url, title, last_fetched_at, error_message, enabled, created_at
+      INSERT INTO feeds (workspace_id, url, title, category, enabled, created_at)
+      VALUES (${access.workspace.id}, ${resolvedUrl}, ${feedTitle}, ${category}, true, now())
+      RETURNING id, workspace_id, url, title, category, last_fetched_at, error_message, enabled, created_at
     `;
 
     const newFeed = result[0];

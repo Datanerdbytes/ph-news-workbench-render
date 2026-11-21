@@ -12,6 +12,7 @@ import { sql } from "@/lib/db";
 import {
   describeFeedError,
   extractFeedLink,
+  extractItemImage,
   feedParser,
   ingestFeed,
   resolveFeedUrl,
@@ -107,7 +108,7 @@ describe("ingestFeed", () => {
       (call[0] as TemplateStringsArray).join(" ").includes("INSERT INTO news_items")
     );
 
-    // First item: full fields, pubDate converted to a Date.
+    // First item: full fields, pubDate converted to a Date, no image in the payload.
     expect(inserts[0].slice(1)).toEqual([
       7,
       "ws1",
@@ -115,6 +116,7 @@ describe("ingestFeed", () => {
       "https://example.com/story-a",
       "Story A",
       "snippet",
+      null,
       new Date(item.pubDate),
       JSON.stringify(item),
       createHash("sha256")
@@ -123,9 +125,26 @@ describe("ingestFeed", () => {
     ]);
 
     // Second item: no guid (falls back to the link) and no pubDate.
-    const [, , guid, , , , pubDate] = inserts[1].slice(1);
+    const [, , guid, , , , , pubDate] = inserts[1].slice(1);
     expect(guid).toBe("https://example.com/story-b");
     expect(pubDate).toBeNull();
+  });
+
+  it("extracts the thumbnail at ingest and stores it with the item", async () => {
+    const withImage = {
+      link: "https://example.com/story-a",
+      title: "Story A",
+      enclosure: { url: "https://cdn.example.com/cover.jpg", type: "image/jpeg" },
+    };
+    parseURL.mockResolvedValue({ title: "Feed", items: [withImage] });
+    useDb([[{ id: 1 }]]);
+
+    await ingestFeed(feed, { correlationId: "c1", trigger: "cron" });
+
+    const insert = sqlMock.mock.calls.find((call) =>
+      (call[0] as TemplateStringsArray).join(" ").includes("INSERT INTO news_items")
+    );
+    expect(insert!.slice(1)[6]).toBe("https://cdn.example.com/cover.jpg");
   });
 
   it("records a user-facing error on the feed row and rethrows the raw one", async () => {
@@ -194,6 +213,110 @@ describe("extractFeedLink", () => {
 
   it("returns null for pages without a feed link", () => {
     expect(extractFeedLink(`<link rel="stylesheet" href="/s.css">`, "https://example.com/")).toBeNull();
+  });
+});
+
+describe("extractItemImage", () => {
+  it("prefers an image enclosure", () => {
+    expect(
+      extractItemImage({
+        link: "https://example.com/story",
+        enclosure: { url: "https://cdn.example.com/cover.jpg", type: "image/jpeg" },
+      })
+    ).toBe("https://cdn.example.com/cover.jpg");
+  });
+
+  it("accepts an enclosure with an image extension and no type", () => {
+    expect(
+      extractItemImage({
+        link: "https://example.com/story",
+        enclosure: { url: "https://cdn.example.com/cover.png?w=800" },
+      })
+    ).toBe("https://cdn.example.com/cover.png?w=800");
+  });
+
+  it("ignores non-image enclosures and falls through to the content image", () => {
+    const payload = {
+      link: "https://example.com/story",
+      enclosure: { url: "https://cdn.example.com/episode.mp3", type: "audio/mpeg" },
+      "content:encoded": '<p>hi <img src="https://cdn.example.com/lead.webp"></p>',
+    };
+    expect(extractItemImage(payload)).toBe("https://cdn.example.com/lead.webp");
+  });
+
+  it("picks the first image in a media:content array, skipping video", () => {
+    expect(
+      extractItemImage({
+        link: "https://example.com/story",
+        "media:content": [
+          { $: { url: "https://cdn.example.com/clip.mp4", type: "video/mp4" } },
+          { $: { url: "https://cdn.example.com/photo.jpg", medium: "image" } },
+        ],
+      })
+    ).toBe("https://cdn.example.com/photo.jpg");
+  });
+
+  it("trusts media:thumbnail without type or extension", () => {
+    expect(
+      extractItemImage({
+        link: "https://example.com/story",
+        "media:thumbnail": [{ $: { url: "https://cdn.example.com/thumb" } }],
+      })
+    ).toBe("https://cdn.example.com/thumb");
+  });
+
+  it("digs into media:group", () => {
+    expect(
+      extractItemImage({
+        link: "https://example.com/story",
+        "media:group": [
+          { "media:thumbnail": [{ $: { url: "https://cdn.example.com/group.jpg" } }] },
+        ],
+      })
+    ).toBe("https://cdn.example.com/group.jpg");
+  });
+
+  it("resolves relative and protocol-relative srcs against the item link", () => {
+    expect(
+      extractItemImage({
+        link: "https://example.com/story",
+        content: '<img src="/img/lead.jpg">',
+      })
+    ).toBe("https://example.com/img/lead.jpg");
+    expect(
+      extractItemImage({
+        link: "https://example.com/story",
+        content: '<img src="//cdn.example.com/lead.jpg">',
+      })
+    ).toBe("https://cdn.example.com/lead.jpg");
+  });
+
+  it("skips data URIs and unresolvable srcs", () => {
+    const payload = {
+      content: '<img src="data:image/gif;base64,R0lGOD"><img src="/x.jpg">',
+    };
+    expect(extractItemImage(payload)).toBeNull();
+    expect(
+      extractItemImage({
+        link: "https://example.com/story",
+        content: '<img src="data:image/gif;base64,R0lGOD"><img src="/x.jpg">',
+      })
+    ).toBe("https://example.com/x.jpg");
+  });
+
+  it("decodes entities in content img srcs", () => {
+    expect(
+      extractItemImage({
+        link: "https://example.com/story",
+        "content:encoded": '<img src="https://cdn.example.com/a.jpg?w=1&amp;h=2">',
+      })
+    ).toBe("https://cdn.example.com/a.jpg?w=1&h=2");
+  });
+
+  it("returns null when there is no usable image", () => {
+    expect(extractItemImage({ link: "https://example.com/story", title: "No image" })).toBeNull();
+    expect(extractItemImage(null)).toBeNull();
+    expect(extractItemImage("junk")).toBeNull();
   });
 });
 

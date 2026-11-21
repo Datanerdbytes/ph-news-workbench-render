@@ -13,6 +13,17 @@ export const feedParser = new Parser({
   headers: { ...FEED_HEADERS },
   timeout: FEED_TIMEOUT_MS,
   maxRedirects: 5,
+  // rss-parser drops every tag it is not told to keep, so list the Media RSS
+  // tags explicitly — they are the thumbnail sources for the source browser.
+  // keepArray so we can pick the first entry that is actually an image (the
+  // first media:content of a feed is often a video).
+  customFields: {
+    item: [
+      ['media:content', 'media:content', { keepArray: true }],
+      ['media:thumbnail', 'media:thumbnail', { keepArray: true }],
+      ['media:group', 'media:group', { keepArray: true }],
+    ],
+  },
 });
 
 /** Error carrying a user-facing message about why a feed URL could not be read. */
@@ -131,6 +142,120 @@ export function extractFeedLink(html: string, baseUrl: string): string | null {
   return null;
 }
 
+const IMAGE_EXT_RE = /\.(jpe?g|png|webp|gif|avif|jfif)(?:[?#]|$)/i;
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : value !== undefined && value !== null ? [value] : [];
+}
+
+/** Attributes of an xml2js node (its `$` object), when present. */
+function xmlAttrs(node: unknown): Record<string, unknown> | null {
+  return asRecord(asRecord(node)?.$);
+}
+
+function isHttpUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url);
+}
+
+/**
+ * Decide whether a media-tag URL points at an image. Trust the declared
+ * type/medium; fall back to the file extension because many feeds omit both.
+ */
+function looksLikeImageUrl(url: string, attrs: Record<string, unknown> | null): boolean {
+  const type = typeof attrs?.type === 'string' ? attrs.type : '';
+  if (type.startsWith('image/')) return true;
+  if (attrs?.medium === 'image') return true;
+  return IMAGE_EXT_RE.test(url);
+}
+
+/**
+ * Resolve a candidate image URL to an absolute http(s) URL. Skips data:/blob:
+ * URIs (base64 payloads would bloat the column and never lazy-load well) and
+ * relative paths we cannot anchor to a base URL.
+ */
+function toAbsoluteImageUrl(url: string, base: string | null): string | null {
+  const cleaned = decodeHtmlAttr(url.trim());
+  if (!cleaned || /^data:|^blob:|^javascript:/i.test(cleaned)) return null;
+  try {
+    const resolved = new URL(cleaned, base ?? undefined);
+    return isHttpUrl(resolved.toString()) ? resolved.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** First image URL in an HTML fragment (the feed's own content markup). */
+function firstHtmlImage(html: string, base: string | null): string | null {
+  for (const match of html.matchAll(/<img\b[^>]*>/gi)) {
+    const src = match[0].match(/\bsrc\s*=\s*["']([^"']+)["']/i)?.[1];
+    if (!src) continue;
+    const resolved = toAbsoluteImageUrl(src, base);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+/**
+ * Pull the thumbnail URL out of an RSS/Atom item (the same shape rss-parser
+ * emits, as stored in news_items.raw_payload). Preference order: the feed's
+ * explicit <enclosure>, then Media RSS tags (media:content, media:thumbnail,
+ * media:group), then the first <img> of the item's HTML content. Returns null
+ * when the item carries no usable image.
+ */
+export function extractItemImage(payload: unknown): string | null {
+  const item = asRecord(payload);
+  if (!item) return null;
+  const base = typeof item.link === 'string' && item.link ? item.link : null;
+
+  const enclosure = asRecord(item.enclosure);
+  if (enclosure && typeof enclosure.url === 'string' && looksLikeImageUrl(enclosure.url, enclosure)) {
+    const resolved = toAbsoluteImageUrl(enclosure.url, base);
+    if (resolved) return resolved;
+  }
+
+  const collectMediaUrls = (nodes: unknown[], thumbnailOnly: boolean): string | null => {
+    for (const node of nodes) {
+      const attrs = xmlAttrs(node);
+      const url = typeof attrs?.url === 'string' ? attrs.url : null;
+      if (!url) continue;
+      if (!thumbnailOnly && !looksLikeImageUrl(url, attrs)) continue;
+      const resolved = toAbsoluteImageUrl(url, base);
+      if (resolved) return resolved;
+    }
+    return null;
+  };
+
+  const fromMediaTags =
+    collectMediaUrls(asArray(item['media:content']), false) ??
+    collectMediaUrls(asArray(item['media:thumbnail']), true) ??
+    null;
+  if (fromMediaTags) return fromMediaTags;
+
+  // media:group nests the same tags one level down (YouTube-style feeds).
+  for (const group of asArray(item['media:group'])) {
+    const rec = asRecord(group);
+    if (!rec) continue;
+    const nested =
+      collectMediaUrls(asArray(rec['media:content']), false) ??
+      collectMediaUrls(asArray(rec['media:thumbnail']), true);
+    if (nested) return nested;
+  }
+
+  for (const key of ['content:encoded', 'content', 'summary']) {
+    if (typeof item[key] !== 'string') continue;
+    const resolved = firstHtmlImage(item[key] as string, base);
+    if (resolved) return resolved;
+  }
+
+  return null;
+}
+
 /**
  * Fetch the given URL once and work out what should actually be parsed.
  * Returns the URL unchanged when it already serves XML; when it is an HTML
@@ -196,10 +321,11 @@ export async function ingestFeed(
       const title = item.title ?? '';
       const guid = item.guid ?? link;
       const dedupHash = crypto.createHash('sha256').update(`${link}|${title}`).digest('hex');
+      const imageUrl = extractItemImage(item);
 
       const res = await sql`
-        INSERT INTO news_items (feed_id, workspace_id, guid, link, title, summary, published_at, raw_payload, dedup_hash)
-        VALUES (${feed.id}, ${feed.workspace_id}, ${guid}, ${link}, ${title}, ${item.contentSnippet ?? ''}, ${item.pubDate ? new Date(item.pubDate) : null}, ${JSON.stringify(item)}, ${dedupHash})
+        INSERT INTO news_items (feed_id, workspace_id, guid, link, title, summary, image_url, published_at, raw_payload, dedup_hash)
+        VALUES (${feed.id}, ${feed.workspace_id}, ${guid}, ${link}, ${title}, ${item.contentSnippet ?? ''}, ${imageUrl}, ${item.pubDate ? new Date(item.pubDate) : null}, ${JSON.stringify(item)}, ${dedupHash})
         ON CONFLICT (workspace_id, dedup_hash) DO NOTHING
         RETURNING id
       `;
