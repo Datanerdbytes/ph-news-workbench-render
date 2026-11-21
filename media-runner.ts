@@ -137,6 +137,8 @@ type TrackedPump = {
   workspaceId: string;
   /** True once the DB row has been confirmed `running` for this pump. */
   dbRunning: boolean;
+  /** Ownership is reserved before asynchronous native setup starts. */
+  starting?: boolean;
 };
 
 const RECONCILE_INTERVAL_MS = 3_000;
@@ -201,6 +203,7 @@ export async function reconcileOrphanedPumps(sql: RunnerSql): Promise<number> {
 export function createRunnerServer(deps: RunnerDeps) {
   /** Stream id → workspace: the pumps this process is responsible for. */
   const registry = new Map<string, TrackedPump>();
+  let shuttingDown = false;
   let reconciling = false;
   let reconcileTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -215,6 +218,7 @@ export function createRunnerServer(deps: RunnerDeps) {
     reconciling = true;
     try {
       for (const [id, tracked] of registry) {
+        if (tracked.starting) continue;
         try {
           const status = deps.manager.status(id);
           if (status.running || status.retrying) {
@@ -263,6 +267,7 @@ export function createRunnerServer(deps: RunnerDeps) {
   }
 
   async function handleStart(request: IncomingMessage): Promise<HttpResponse> {
+    if (shuttingDown) return { status: 503, body: { error: SHUTDOWN_ERROR } };
     const body = (await readJson(request)) as {
       workspaceId?: unknown;
       streamId?: unknown;
@@ -326,25 +331,42 @@ export function createRunnerServer(deps: RunnerDeps) {
       };
     }
 
+    if (shuttingDown) return { status: 503, body: { error: SHUTDOWN_ERROR } };
     const manager = deps.manager;
-    if (manager.status(stream.id).running) {
+    const id = String(stream.id);
+    const status = manager.status(stream.id);
+    if (registry.get(id)?.starting || status.running || status.retrying) {
       return {
         status: 409,
         body: { error: 'The pump is already running for this stream.' },
       };
     }
 
-    const outcome = await manager.start({
-      id: stream.id,
-      source: stream.source_url,
-      // 'staged' rows (DASH-only sources, no playable URL) are piped through
-      // yt-dlp feeders; everything else takes the ffprobe path.
-      mode: parseSourceMode(stream.source_mode) ?? 'direct',
-      // Never logged or returned — the manager redacts it everywhere it lands.
-      dest: ingestUrl,
-    });
-
+    const tracked: TrackedPump = { workspaceId, dbRunning: false, starting: true };
+    registry.set(id, tracked);
+    let outcome;
+    try {
+      outcome = await manager.start({
+        id: stream.id,
+        source: stream.source_url,
+        // 'staged' rows (DASH-only sources, no playable URL) are piped through
+        // yt-dlp feeders; everything else takes the ffprobe path.
+        mode: parseSourceMode(stream.source_mode) ?? 'direct',
+        // Never logged or returned — the manager redacts it everywhere it lands.
+        dest: ingestUrl,
+      });
+    } catch (error) {
+      if (registry.get(id) === tracked) registry.delete(id);
+      throw error;
+    }
+    tracked.starting = false;
+    if (shuttingDown) {
+      manager.stop(id, { force: true });
+      if (registry.get(id) === tracked) registry.delete(id);
+      return { status: 503, body: { error: SHUTDOWN_ERROR } };
+    }
     if (!outcome.ok) {
+      if (registry.get(id) === tracked) registry.delete(id);
       if (outcome.reason === 'gate_disabled') {
         return { status: 400, body: { error: outcome.error } };
       }
@@ -363,11 +385,6 @@ export function createRunnerServer(deps: RunnerDeps) {
       return { status: 502, body: { error: outcome.error } };
     }
 
-    registry.set(String(stream.id), {
-      workspaceId,
-      dbRunning: false,
-    });
-
     const updated = (await deps.sql`
       UPDATE live_streams
       SET pump_status = 'running', pump_started_at = now(), pump_error = NULL,
@@ -377,8 +394,7 @@ export function createRunnerServer(deps: RunnerDeps) {
     `) as unknown as { pump_started_at: string | Date | null }[];
 
     // The start write landed — the reconciler only backfills it if it hadn't.
-    const tracked = registry.get(String(stream.id));
-    if (tracked) tracked.dbRunning = true;
+    if (registry.get(id) === tracked) tracked.dbRunning = true;
 
     log({ event: 'pump_started', streamId: stream.id, workspaceId });
     return {
@@ -569,6 +585,7 @@ export function createRunnerServer(deps: RunnerDeps) {
     },
     /** Terminal write for every pump this process owns (shutdown path). */
     async markOwnPumpsFailed(error: string): Promise<void> {
+      shuttingDown = true;
       const ids = [...registry.keys()];
       // Stop detached media groups before any network I/O: the Mac's stop
       // script may terminate this server while the database is unavailable.

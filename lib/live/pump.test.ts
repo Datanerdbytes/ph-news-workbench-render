@@ -74,6 +74,7 @@ type FakeChild = EventEmitter & {
   stdout: EventEmitter;
   stderr: EventEmitter;
   pid: number;
+  exitCode?: number;
 };
 
 function makeFakeChild(): FakeChild {
@@ -146,7 +147,6 @@ function useSpawns(
     probeFails?: boolean;
     failingFeederCommands?: string[];
     mkfifoFails?: boolean;
-    beforeFeederRegistered?: () => void;
   } = {}
 ): {
   ffmpegKids: FakeChild[];
@@ -178,7 +178,6 @@ function useSpawns(
       ffmpegKids.push(kid);
     } else {
       feederKids.push(kid);
-      options.beforeFeederRegistered?.();
       if (options.failingFeederCommands?.includes(command)) {
         setTimeout(() => {
           kid.emit(
@@ -810,6 +809,42 @@ describe('PumpManager publisher leg', () => {
     expect(manager.status(49)).toMatchObject({ running: false, retrying: false });
   });
 
+  it.each(['force stop', 'settled attempt'] as const)('handles a feeder whose guarded spawn resolves after %s', async (ending) => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { feederKids, ffmpegKids } = useSpawns();
+    const spawn = spawnMock.getMockImplementation()!;
+    let release!: () => void;
+    spawnMock.mockImplementation((command: string, ...args: unknown[]) => {
+      const child = spawn(command, ...args);
+      if (command === 'ffmpeg' || command === 'mkfifo' || command === 'ffprobe') return child;
+      // guardedSpawn is asynchronous: stop after the OS child exists but
+      // before the manager receives and registers it.
+      return new Promise((resolve) => {
+        release = () => {
+          resolve(child);
+          setTimeout(() => child.emit('spawn'), 0);
+        };
+      });
+    });
+    const starting = manager.start({ id: 51, source: FB_REPLAY, mode: 'staged', dest: DEST });
+    await flushChildEvents();
+    expect(feederKids).toHaveLength(1);
+    if (ending === 'force stop') {
+      manager.stop(51, { force: true });
+    } else {
+      feederKids[0].exitCode = 0;
+      closeChild(ffmpegKids[1], 0);
+    }
+    release();
+    await flushChildEvents();
+    await starting;
+    const signals = processKillMock.mock.calls.filter(([child]) => child === feederKids[0]);
+    expect(signals).toEqual(ending === 'force stop' ? [[feederKids[0], 'SIGKILL']] : []);
+    expect(feederKids).toHaveLength(1);
+    expect(manager.status(51)).toMatchObject({ running: false, retrying: false });
+  });
+
   it.each(['direct', 'staged'] as const)('force stop kills every %s media process group immediately', async (mode) => {
     stubGateOn();
     vi.useFakeTimers();
@@ -826,21 +861,6 @@ describe('PumpManager publisher leg', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(processKillMock).toHaveBeenCalledTimes(signals);
     expect(ffmpegKids).toHaveLength(2);
-  });
-
-  it('force stop kills a staged feeder that registers after teardown', async () => {
-    stubGateOn();
-    vi.useFakeTimers();
-    const { feederKids } = useSpawns({
-      beforeFeederRegistered: () => manager.stop(51, { force: true }),
-    });
-
-    await startPump({ id: 51, source: FB_REPLAY, mode: 'staged', dest: DEST });
-
-    expect(feederKids).toHaveLength(1);
-    expect(processKillMock.mock.calls.filter(([child]) => child === feederKids[0]))
-      .toEqual([[feederKids[0], 'SIGKILL']]);
-    expect(manager.status(51)).toMatchObject({ running: false, retrying: false });
   });
 
   it('a dead publisher quotes the source side that explains it, not just the exit code', async () => {
