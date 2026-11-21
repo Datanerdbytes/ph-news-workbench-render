@@ -809,6 +809,31 @@ describe('PumpManager publisher leg', () => {
     expect(manager.status(49)).toMatchObject({ running: false, retrying: false });
   });
 
+  it.each([false, true])('force stop kills an in-flight probe (spawn pending: %s)', async (pending) => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids } = useSpawns();
+    const spawn = spawnMock.getMockImplementation()!;
+    const probe = makeFakeChild();
+    let release!: () => void;
+    spawnMock.mockImplementation((command: string, ...args: unknown[]) => {
+      if (command !== 'ffprobe') return spawn(command, ...args);
+      return pending ? new Promise((resolve) => { release = () => resolve(probe); }) : probe;
+    });
+    const starting = manager.start({ id: 52, source: LIVE_HLS, dest: DEST });
+    await flushChildEvents();
+    manager.stop(52, { force: true });
+    if (pending) release();
+    await flushChildEvents();
+    closeChild(probe, 1);
+    await starting;
+    expect(processKillMock).toHaveBeenCalledWith(probe, 'SIGKILL');
+    expect(ffmpegKids).toHaveLength(0);
+    const signals = processKillMock.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(processKillMock).toHaveBeenCalledTimes(signals);
+  });
+
   it.each(['force stop', 'settled attempt'] as const)('handles a feeder whose guarded spawn resolves after %s', async (ending) => {
     stubGateOn();
     vi.useFakeTimers();

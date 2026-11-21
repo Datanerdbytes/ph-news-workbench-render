@@ -27,6 +27,11 @@ case "$*" in
 esac
 `);
   stub('lsof', 'echo 99999999\n');
+  // Linux CI does not ship the macOS lockf utility. Model lock acquisition
+  // so the script's ordering and owner recheck can be exercised there too.
+  stub('lockf', `printf '%s\\n' 'lock acquired' >> "$RUNNER_TEST_CALLS"
+if [ "\$RUNNER_TEST_REPLACE_ON_LOCK" = yes ]; then echo 4343 > "$TS_DIR/runner.pid"; fi
+`);
   const run = (args: string[] = [], extra: Record<string, string> = {}) => spawnSync('sh', [script, ...args], {
     env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, TS_DIR: join(root, 'state'), RUNNER_TEST_CALLS: calls, ...extra },
     encoding: 'utf8', timeout: 5000,
@@ -67,6 +72,18 @@ describe('runner startup publication cleanup', () => {
       const result = host.run(['watch', '4242']);
       expect(result.status).toBe(0);
       expect(readFileSync(host.calls, 'utf8').includes('funnel --https=443 off')).toBe(!replacement);
+    } finally { rmSync(host.root, { recursive: true, force: true }); }
+  });
+
+  it('rechecks runner ownership after acquiring the publication lock', () => {
+    const host = fakeHost();
+    try {
+      writeFileSync(join(host.root, 'state/runner.pid'), '4242');
+      host.stub('ps', 'exit 1\n');
+      const result = host.run(['watch', '4242'], { RUNNER_TEST_REPLACE_ON_LOCK: 'yes' });
+      expect(result.status).toBe(0);
+      expect(readFileSync(host.calls, 'utf8')).toContain('lock acquired');
+      expect(readFileSync(host.calls, 'utf8')).not.toContain('funnel --https=443 off');
     } finally { rmSync(host.root, { recursive: true, force: true }); }
   });
 });

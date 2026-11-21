@@ -28,6 +28,14 @@ TAILSCALED="$(command -v tailscaled || echo /opt/homebrew/opt/tailscale/bin/tail
 RUNNER_PORT="${RUNNER_PORT:-8080}"
 HOSTNAME_TS="${TS_HOSTNAME:-ph-news-runner}"
 
+acquire_lifecycle_lock() {
+  # macOS lockf locks the open file description; the shell keeps fd 9 until
+  # exit. The kernel releases it even on SIGKILL, without a stale PID lock.
+  mkdir -p "$TS_DIR"
+  exec 9>"$TS_DIR/lifecycle.lock"
+  lockf -s 9
+}
+
 runner_pid() {
   cat "$RUNNER_PID_FILE" 2>/dev/null || true
 }
@@ -107,6 +115,10 @@ stop_all() {
   echo "stopped."
 }
 
+if [ "${1:-}" != watch ]; then
+  acquire_lifecycle_lock
+fi
+
 if [ "${1:-}" = "stop" ]; then
   stop_all
   exit 0
@@ -136,6 +148,9 @@ if [ "${1:-}" = watch ]; then
   while [ "$(runner_pid)" = "$watched_pid" ] && is_runner "$watched_pid"; do
     sleep 1
   done
+  acquire_lifecycle_lock
+  # Startup/stop and watcher withdrawal share this lock. Recheck the owner
+  # after acquiring it, since another startup may have replaced the runner.
   if [ "$(runner_pid)" = "$watched_pid" ]; then
     withdraw_funnel || { echo "could not withdraw Funnel after runner exit" >&2; exit 1; }
   fi
@@ -160,7 +175,7 @@ if ! "$TS_BIN" --socket="$TS_SOCK" status >/dev/null 2>&1; then
   # nohup: the daemon must outlive the terminal that launched it.
   nohup "$TAILSCALED" --tun=userspace-networking \
     --statedir="$TS_DIR" --socket="$TS_SOCK" --port=41641 \
-    >>"$TS_DIR/tailscaled.log" 2>&1 &
+    >>"$TS_DIR/tailscaled.log" 2>&1 9>&- &
   # First run needs a browser login; the URL is printed by `tailscale up`.
   sleep 5
   if ! "$TS_BIN" --socket="$TS_SOCK" status >/dev/null 2>&1; then
@@ -194,10 +209,10 @@ else
     echo "starting runner on :${RUNNER_PORT}…"
     # Load tsx into Node so $! is the actual server, with no launcher child.
     PORT="$RUNNER_PORT" nohup node --env-file=.env.runner --import tsx "$RUNNER_ENTRY" \
-      >>"$TS_DIR/runner.log" 2>&1 &
+      >>"$TS_DIR/runner.log" 2>&1 9>&- &
     RUNNER_PID=$!
     echo "$RUNNER_PID" >"$RUNNER_PID_FILE"
-    nohup caffeinate -i -s -w "$RUNNER_PID" >/dev/null 2>&1 &
+    nohup caffeinate -i -s -w "$RUNNER_PID" >/dev/null 2>&1 9>&- &
   fi
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 3
@@ -222,7 +237,7 @@ fi
 echo "exposing https://$FUNNEL_HOST …"
 # Install the supervisor before publication, including when reusing a runner.
 TS_DIR="$TS_DIR" nohup sh "$PWD/scripts/start-runner.sh" watch "$RUNNER_PID" \
-  >>"$TS_DIR/runner.log" 2>&1 &
+  >>"$TS_DIR/runner.log" 2>&1 9>&- &
 "$TS_BIN" --socket="$TS_SOCK" funnel --bg "$RUNNER_PORT" >/dev/null
 "$TS_BIN" --socket="$TS_SOCK" funnel status
 
