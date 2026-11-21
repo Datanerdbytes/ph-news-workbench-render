@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Copy, Play, Radio, RefreshCw, Square, MessageSquare } from 'lucide-react';
 import { toast } from 'sonner';
 import { AssistantChat } from '@/components/assistant-chat';
@@ -78,6 +78,9 @@ function toLocalInput(value: string | null) {
 // replay VODs) have no playable URL at all, so create keeps the original
 // pasted link and flags mode:'staged' — the pump pipes it through yt-dlp.
 const DIRECT_SOURCE_PATTERN = /^https?:\/\/\S+\.(mp4|webm)(?:[?#]|$)/i;
+// Includes the companion's extraction/transport budget and a margin for
+// Render's proxy. A lost response must not leave Preview disabled forever.
+const PREVIEW_TIMEOUT_MS = 90_000;
 
 export default function LivePage() {
   const [streams, setStreams] = useState<Stream[]>([]);
@@ -98,6 +101,15 @@ export default function LivePage() {
     null
   );
   const [resolveError, setResolveError] = useState('');
+  const previewRequest = useRef<AbortController | null>(null);
+
+  const cancelPreview = useCallback(() => {
+    const controller = previewRequest.current;
+    previewRequest.current = null;
+    controller?.abort();
+  }, []);
+
+  useEffect(() => cancelPreview, [cancelPreview]);
 
   const load = useCallback(async (refresh = false) => {
     setLoading(true);
@@ -174,15 +186,29 @@ export default function LivePage() {
   async function previewSource() {
     const url = sourceUrl.trim();
     if (!url) return;
+    cancelPreview();
+    const controller = new AbortController();
+    previewRequest.current = controller;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, PREVIEW_TIMEOUT_MS);
     setResolving(true);
     setResolveError('');
+    // Unmount an old/failed player so retrying an unchanged playable URL
+    // starts a fresh media request instead of reusing the failed instance.
+    setResolvedSource(null);
     try {
       const res = await fetch('/api/live/resolve', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ url }),
+        signal: controller.signal,
       });
       const data = await res.json().catch(() => null);
+      if (controller.signal.aborted) throw new Error('Preview was cancelled.');
+      if (previewRequest.current !== controller) return;
       if (!res.ok) {
         throw new Error(data?.error ?? 'The video link could not be resolved.');
       }
@@ -192,16 +218,23 @@ export default function LivePage() {
         setTitle(String(data.title).slice(0, 200));
       }
     } catch (error) {
+      if (previewRequest.current !== controller) return;
       setResolvedSource(null);
       // The resolve API's message is already friendly — show it as-is and
       // keep Preview usable as the retry.
       setResolveError(
-        error instanceof Error
-          ? error.message
-          : 'The video link could not be resolved.'
+        timedOut
+          ? 'The video link took too long to resolve. Try previewing it again.'
+          : error instanceof Error
+            ? error.message
+            : 'The video link could not be resolved.'
       );
     } finally {
-      setResolving(false);
+      clearTimeout(timer);
+      if (previewRequest.current === controller) {
+        previewRequest.current = null;
+        setResolving(false);
+      }
     }
   }
 
@@ -395,6 +428,8 @@ export default function LivePage() {
                   id="live-source-url"
                   value={sourceUrl}
                   onChange={(event) => {
+                    cancelPreview();
+                    setResolving(false);
                     setSourceUrl(event.target.value);
                     setResolveError('');
                     setResolvedSource(null);

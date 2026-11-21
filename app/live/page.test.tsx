@@ -234,3 +234,95 @@ describe('live pump status refresh', () => {
     expect(toast.error).not.toHaveBeenCalled();
   });
 });
+
+
+describe('live source resolution deadline', () => {
+  const source = {
+    playableUrl: 'https://example.com/live.mp4',
+    mode: 'direct', title: 'Live source', isLive: true, extractor: 'test',
+  };
+
+  async function startPreview() {
+    render(<LivePage />);
+    await flush();
+    fireEvent.change(screen.getByLabelText('Source URL'), {
+      target: { value: 'https://example.com/live' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    await flush();
+  }
+
+  it('leaves Resolving and allows a retry if the deployed request never finishes', async () => {
+    fetchMock.mockResolvedValueOnce(response([]));
+    fetchMock.mockImplementationOnce((_url, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+    }));
+    render(<LivePage />);
+    await flush();
+    fireEvent.change(screen.getByLabelText('Source URL'), {
+      target: { value: 'https://example.com/live' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    await flush();
+    expect(screen.getByRole('button', { name: 'Resolving…' })).toBeDisabled();
+    await advance(90_000);
+    expect(screen.getByRole('button', { name: 'Retry preview' })).toBeEnabled();
+    expect(screen.getByRole('alert')).toHaveTextContent(/took too long/i);
+  });
+
+  it('bounds a stalled response body and succeeds on retry', async () => {
+    fetchMock.mockResolvedValueOnce(response([]));
+    fetchMock.mockImplementationOnce(async (_url, init) => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"title":'));
+        init?.signal?.addEventListener('abort', () => controller.error(init.signal?.reason), { once: true });
+      },
+    })));
+    await startPreview();
+    await advance(90_000);
+    expect(screen.getByRole('alert')).toHaveTextContent(/took too long/i);
+
+    fetchMock.mockResolvedValueOnce(Response.json(source));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry preview' }));
+    await flush();
+    expect(document.querySelector('video')?.getAttribute('src')).toBe(source.playableUrl);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('unmounts the previous player while re-resolving the same source', async () => {
+    fetchMock.mockResolvedValueOnce(response([]));
+    fetchMock.mockResolvedValueOnce(Response.json(source));
+    await startPreview();
+    const previousVideo = document.querySelector('video');
+    expect(previousVideo).not.toBeNull();
+
+    fetchMock.mockResolvedValueOnce(Response.json(source));
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    expect(document.querySelector('video')).toBeNull();
+    await flush();
+    expect(document.querySelector('video')).not.toBe(previousVideo);
+    expect(document.querySelector('video')?.getAttribute('src')).toBe(source.playableUrl);
+  });
+
+  it('cancels an obsolete resolve so its late result cannot replace a newer source', async () => {
+    fetchMock.mockResolvedValueOnce(response([]));
+    let finish!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    await startPreview();
+    const signal = fetchMock.mock.calls[1][1]?.signal;
+
+    fireEvent.change(screen.getByLabelText('Source URL'), {
+      target: { value: 'https://example.com/new' },
+    });
+    expect(signal?.aborted).toBe(true);
+    expect(screen.getByRole('button', { name: 'Preview' })).toBeEnabled();
+    fetchMock.mockResolvedValueOnce(Response.json(source));
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    await flush();
+
+    finish(Response.json({ ...source, playableUrl: 'https://example.com/obsolete.mp4' }));
+    await flush();
+    expect(document.querySelector('video')?.getAttribute('src')).toBe(source.playableUrl);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+});
