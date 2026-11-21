@@ -1191,9 +1191,7 @@ function ComposeWorkspace() {
                             ~{formatCost(stats.estimatedCost)}
                           </span>
                         </>
-                      ) : (
-                        <span>No generation yet</span>
-                      )}
+                      ) : null}
                     </div>
 
                     <div className="flex flex-col items-end gap-1">
@@ -1265,7 +1263,6 @@ function ComposeWorkspace() {
                             selected?.status === 'published'
                           }
                           title={publishHint}
-                          aria-describedby="publish-hint"
                         >
                           <FacebookMark className="size-4" />
                           {publishButtonLabel(baking, bakePct, publishing)}
@@ -1427,12 +1424,6 @@ function ComposeWorkspace() {
                           </Button>
                         </div>
                       )}
-                      <p
-                        id="publish-hint"
-                        className="text-[10px] text-muted-foreground"
-                      >
-                        {publishHint}
-                      </p>
                     </div>
                   </div>
                 </section>

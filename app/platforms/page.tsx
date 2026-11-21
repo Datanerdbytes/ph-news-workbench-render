@@ -6,8 +6,6 @@ import {
   Check,
   Lock,
   Minus,
-  RefreshCw,
-  ShieldCheck,
 } from "lucide-react";
 import { AppFrame } from "@/components/app-frame";
 import { PlatformMark, type PlatformKind } from "@/components/platform-mark";
@@ -292,16 +290,6 @@ export default function PlatformsPage() {
               Channels
             </p>
             <h1 className="page-title mt-1.5">Platforms</h1>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-[10.5px] font-medium text-muted-foreground">
-              <RefreshCw className="size-3.5 text-faint" aria-hidden />
-              Live status · refreshes on navigation
-            </span>
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-[10.5px] font-medium text-muted-foreground">
-              <ShieldCheck className="size-3.5 text-success" aria-hidden />
-              Tokens stored server-side
-            </span>
           </div>
         </div>
 

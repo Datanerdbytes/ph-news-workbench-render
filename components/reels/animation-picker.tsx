@@ -23,10 +23,10 @@ export type SlotSelection = Record<PresetSlot, string | null>;
 /** Per-slot loop toggles: repeat the attached animation through the reel. */
 export type SlotLoops = Record<PresetSlot, boolean>;
 
-const SLOT_META: { key: PresetSlot; label: string; empty: string }[] = [
-  { key: 'start', label: 'Start', empty: 'Pick an animation that opens the reel.' },
-  { key: 'middle', label: 'Middle', empty: 'Pick an animation for mid-reel.' },
-  { key: 'end', label: 'End', empty: 'Pick an animation that closes the reel.' },
+const SLOT_META: { key: PresetSlot; label: string }[] = [
+  { key: 'start', label: 'Start' },
+  { key: 'middle', label: 'Middle' },
+  { key: 'end', label: 'End' },
 ];
 
 /**
@@ -185,7 +185,7 @@ export function AnimationPicker({
 
   return (
     <div>
-      <FieldLabel hint="Baked in when you post">Animations</FieldLabel>
+      <FieldLabel>Animations</FieldLabel>
 
       <div className="mt-1.5 flex flex-wrap gap-1.5">
         {SLOT_META.map(({ key, label }) => {
@@ -282,12 +282,6 @@ export function AnimationPicker({
           );
         })}
       </div>
-
-      {!slots[activeSlot] && (
-        <p className="text-[10.5px] leading-relaxed text-muted-foreground">
-          {SLOT_META.find((meta) => meta.key === activeSlot)?.empty}
-        </p>
-      )}
 
       <div className="mt-2 grid gap-2">
         {SLOT_ORDER.map((slot) => {

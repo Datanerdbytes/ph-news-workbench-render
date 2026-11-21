@@ -268,10 +268,6 @@ export default function AnalyticsPage() {
           <div>
             <p className="eyebrow">Insights</p>
             <h1 className="page-title mt-1">Analytics</h1>
-            <p className="mt-1 text-[12px] text-muted-foreground">
-              Publishing activity from the last {range} days, pulled from this
-              workspace.
-            </p>
           </div>
           <div className="flex items-center gap-2">
             <div
