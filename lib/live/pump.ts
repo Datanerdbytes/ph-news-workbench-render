@@ -396,6 +396,7 @@ const FFMPEG_BANNER_LINE =
 
 /** How much source stderr a retry log line carries. */
 const RETRY_LOG_STDERR_CHARS = 200;
+const FFMPEG_PROGRESS_LINE = /^\s*(?:(?:frame|fps)\s*=\s*\d|time\s*=\s*(?:N\/A|-?\d+:))/i;
 
 /**
  * How long the publisher's death waits for the source side to report its own
@@ -513,6 +514,9 @@ type PumpProc = {
    * has to name it even when the publisher said nothing on stderr.
    */
   publisherExitCode: number | null;
+  publisherClosed: boolean;
+  finishSourceClose: (() => void) | null;
+  sourceCloseTimer: ReturnType<typeof setTimeout> | null;
   /**
    * Pending grace timer after the publisher died: the source side usually
    * reports the real reason a beat later. Cleared on teardown so it can never
@@ -573,7 +577,7 @@ export class PumpManager {
     const existing = this.procs.get(key);
     if (
       existing &&
-      (existing.running || existing.retryTimer !== null || existing.starting)
+      (existing.running || existing.retryTimer !== null || existing.starting || existing.finishSourceClose)
     ) {
       return {
         ok: false,
@@ -610,6 +614,9 @@ export class PumpManager {
       tail: '',
       publisherTail: '',
       publisherExitCode: null,
+      publisherClosed: false,
+      finishSourceClose: null,
+      sourceCloseTimer: null,
       publisherSettleTimer: null,
       retryTimer: null,
       killTimer: null,
@@ -673,6 +680,7 @@ export class PumpManager {
     // setup checks it between steps and aborts instead of spawning orphaned
     // children (this also closes the direct path's probe-window race).
     proc.stopping = true;
+    proc.finishSourceClose?.();
     this.clearPublisherSettleTimer(proc);
     if (proc.retryTimer) {
       clearTimeout(proc.retryTimer);
@@ -726,6 +734,8 @@ export class PumpManager {
     for (const proc of this.procs.values()) {
       if (proc.retryTimer) clearTimeout(proc.retryTimer);
       if (proc.killTimer) clearTimeout(proc.killTimer);
+      if (proc.sourceCloseTimer) clearTimeout(proc.sourceCloseTimer);
+      proc.finishSourceClose = null;
       this.clearPublisherSettleTimer(proc);
     }
     this.procs.clear();
@@ -741,6 +751,7 @@ export class PumpManager {
     // as the reason attempt 4 failed).
     proc.publisherTail = '';
     proc.publisherExitCode = null;
+    proc.publisherClosed = false;
     proc.attemptSettled = false;
     if (proc.attempts === 1) {
       this.log(proc, 'started', { transcode: proc.params.needsTranscode });
@@ -823,23 +834,57 @@ export class PumpManager {
    * which is a no-op for direct pumps (no feeders, no fifos).
    */
   private attachFfmpegHandlers(proc: PumpProc, child: ChildProcess): void {
+    const attempt = proc.attempts;
     child.once('close', (code: number | null) => {
-      // First death of the attempt settles it; every later close is a no-op.
-      if (!this.markAttemptSettled(proc)) return;
+      if (proc.attempts !== attempt || proc.attemptSettled) return;
       proc.child = null;
-      proc.running = false;
+      // A successful source exit cannot erase a publisher failure.
+      if (!proc.stopping && code === 0 && proc.publisherExitCode) {
+        this.failAttempt(
+          proc,
+          `the RTMPS publisher exited with code ${proc.publisherExitCode}`,
+          proc.publisherExitCode,
+          'publisher'
+        );
+        return;
+      }
+      this.markAttemptSettled(proc);
+      const publisher = proc.publisher;
+      // The source can see EPIPE before the publisher's stderr has drained.
+      // Give the close callback a bounded window before recording the final
+      // failure, or when the publisher may already have caused this exit.
+      const waitForPublisher =
+        !proc.stopping && !proc.fatalError && publisher && !proc.publisherClosed &&
+        (publisher.exitCode != null ||
+          (code !== 0 && (proc.retries >= RETRY_BACKOFF_MS.length || /broken pipe/i.test(proc.tail))));
       if (proc.killTimer) {
         clearTimeout(proc.killTimer);
         proc.killTimer = null;
       }
       this.teardownStagedAttempt(proc);
-      this.settleAttempt(proc, code);
+      if (!waitForPublisher) {
+        this.settleAttempt(proc, code);
+        return;
+      }
+      // Keep the slot reserved until the final status or retry is decided.
+      proc.finishSourceClose = () => {
+        proc.finishSourceClose = null;
+        if (proc.sourceCloseTimer) clearTimeout(proc.sourceCloseTimer);
+        proc.sourceCloseTimer = null;
+        // Node exposes the exit code before close if stdio has not drained.
+        proc.publisherExitCode ??= publisher.exitCode ?? null;
+        const exitCode = code === 0 ? proc.publisherExitCode || 0 : code;
+        this.settleAttempt(proc, exitCode);
+      };
+      proc.sourceCloseTimer = setTimeout(proc.finishSourceClose, PUBLISHER_SETTLE_GRACE_MS);
+      proc.sourceCloseTimer.unref?.();
     });
 
     // Nothing reads ffmpeg's stdout; a data listener puts the pipe in
     // flowing mode so it can never backpressure the encoder.
     child.stdout?.on('data', () => {});
     child.stderr?.on('data', (chunk: Buffer) => {
+      if (proc.attempts !== attempt) return;
       const text = redactStreamKey(chunk.toString(), proc.params.dest);
       this.appendStderr(proc, 'source', text);
       if (proc.attemptSettled || proc.stopping) return;
@@ -853,6 +898,7 @@ export class PumpManager {
       }
     });
     child.once('error', (error: Error) => {
+      if (proc.attempts !== attempt) return;
       // Spawn failures emit 'error' (pid undefined) and then 'close'; the
       // close handler owns the terminal decision. A mid-run error on a live
       // process is only recorded — its own close follows.
@@ -872,17 +918,21 @@ export class PumpManager {
    * and settles the attempt as a clean stop.
    */
   private attachPublisherHandlers(proc: PumpProc, publisher: ChildProcess): void {
+    const attempt = proc.attempts;
     publisher.stdout?.on('data', () => {});
     publisher.stderr?.on('data', (chunk: Buffer) => {
+      if (proc.attempts !== attempt) return;
       const text = redactStreamKey(chunk.toString(), proc.params.dest);
       this.appendStderr(proc, 'publisher', text);
     });
     publisher.once('close', (code: number | null) => {
-      // Recorded before the settled check: a publisher that died first is the
-      // cause of the source's "Broken pipe", so its exit code is evidence even
-      // when the source side has already won the settlement race. The identity
-      // check keeps a late close from a previous attempt out of this one.
-      if (proc.publisher === publisher) proc.publisherExitCode = code;
+      if (proc.attempts !== attempt) return;
+      proc.publisherClosed = true;
+      proc.publisherExitCode = code;
+      if (proc.finishSourceClose) {
+        proc.finishSourceClose();
+        return;
+      }
       if (proc.attemptSettled || proc.stopping) return;
       if (code === 0) return;
       // The publisher reads the flv fifo, so it is the FIRST to die when the
@@ -904,6 +954,7 @@ export class PumpManager {
       proc.publisherSettleTimer.unref?.();
     });
     publisher.once('error', (error: Error) => {
+      if (proc.attempts !== attempt || proc.attemptSettled || proc.stopping) return;
       proc.lastError = `could not start the RTMPS publisher: ${redactStreamKey(error.message, proc.params.dest)}`;
       this.log(proc, 'publisher_error', { error: proc.lastError });
     });
@@ -940,6 +991,7 @@ export class PumpManager {
     this.clearPublisherSettleTimer(proc);
     proc.publisherTail = '';
     proc.publisherExitCode = null;
+    proc.publisherClosed = false;
     proc.attemptSettled = false;
     if (proc.attempts === 1) {
       this.log(proc, 'started', { mode: 'staged' });
@@ -1436,8 +1488,10 @@ export class PumpManager {
    */
   private quoteStderr(tail: string, max: number): string {
     const clean = tail
-      .split('\n')
-      .filter((line) => line.trim() && !FFMPEG_BANNER_LINE.test(line))
+      .split(/\r\n?|\n/)
+      .filter((line) =>
+        line.trim() && !FFMPEG_BANNER_LINE.test(line) && !FFMPEG_PROGRESS_LINE.test(line)
+      )
       .join('\n')
       .trim();
     if (clean.length <= max) return clean;

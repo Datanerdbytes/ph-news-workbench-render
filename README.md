@@ -175,11 +175,16 @@ the sandbox's namespace probes, so no container is needed; the only missing
 piece is a public URL, which Tailscale Funnel provides (free, no card, stable
 `https://<machine>.<tailnet>.ts.net` hostname).
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:3e7548f3c5adc11426e2fe8f25ec73a14ddef2e42efeaaf3051096fbe2a3f8c1 -->
+
+Create `.env.runner` in the repository root with the production Neon
+`DATABASE_URL`, `BETTER_AUTH_SECRET`, and `MEDIA_RUNNER_TOKEN` used by the
+deployed app.
+
 ```bash
 brew install tailscale                # one-time
-cp .env.example .env.runner           # then fill with PRODUCTION values:
-                                      # DATABASE_URL (Neon), BETTER_AUTH_SECRET,
-                                      # MEDIA_RUNNER_TOKEN — not the local Docker ones
 ./scripts/start-runner.sh             # tailscaled + funnel + runner under caffeinate
 ./scripts/start-runner.sh stop        # tear everything down
 # Render env: MEDIA_RUNNER_URL=https://<machine>.<tailnet>.ts.net
@@ -192,7 +197,9 @@ cannot issue its cert without that toggle.
 Operational notes:
 
 - The Mac must be awake and online for the whole broadcast. The script wraps
-  the runner in `caffeinate -s`; closing the lid still suspends it.
+  the runner in `caffeinate -i -s`; closing the lid still suspends it.
+
+<!-- /coderabbit-ai-generated:v1 -->
 - `tailscaled` runs in userspace mode (no root, no TUN device). It must be
   started with `--statedir` or `tailscale cert` fails with `no
   TailscaleVarRoot`.

@@ -22,55 +22,99 @@ cd "$(dirname "$0")/.."
 TS_DIR="${TS_DIR:-$HOME/.local/share/tailscale-local}"
 TS_SOCK="$TS_DIR/tailscaled.sock"
 RUNNER_PID_FILE="$TS_DIR/runner.pid"
-CAFFEINATE_PID_FILE="$TS_DIR/caffeinate.pid"
+RUNNER_ENTRY="$PWD/media-runner.ts"
 TS_BIN="$(command -v tailscale || echo /opt/homebrew/bin/tailscale)"
 TAILSCALED="$(command -v tailscaled || echo /opt/homebrew/opt/tailscale/bin/tailscaled)"
 RUNNER_PORT="${RUNNER_PORT:-8080}"
 HOSTNAME_TS="${TS_HOSTNAME:-ph-news-runner}"
 
-is_up() {
-  # The runner answers /healthz only when its sandbox bootstrapped.
-  curl -fsS -m 5 "http://127.0.0.1:$RUNNER_PORT/healthz" >/dev/null 2>&1
+runner_pid() {
+  cat "$RUNNER_PID_FILE" 2>/dev/null || true
 }
 
-# Stops the runner and its caffeinate, using the PID files written at start.
-# The pattern fallback names `.env.runner`, so it can never touch a local-dev
-# runner started with `npm run media-runner` (which uses .env.local).
+process_args() {
+  case "$1" in
+    ''|*[!0-9]*|0*) return 1 ;;
+  esac
+  # A zombie has exited even if its parent has not reaped it yet.
+  args="$(ps -ww -p "$1" -o stat= -o args= 2>/dev/null)" || return 1
+  printf '%s\n' "$args" | awk '
+    NF && $1 !~ /^Z/ { sub(/^[[:space:]]*[^[:space:]]+[[:space:]]+/, ""); print; found = 1 }
+    END { exit !found }
+  '
+}
+
+is_runner() {
+  args="$(process_args "$1")" || return 1
+  case "$args" in
+    "node --env-file=.env.runner --import tsx $RUNNER_ENTRY"|*/"node --env-file=.env.runner --import tsx $RUNNER_ENTRY") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+listener_pid() {
+  lsof -nP -t -iTCP:"$RUNNER_PORT" -sTCP:LISTEN 2>/dev/null || true
+}
+
+is_up() {
+  is_runner "$1" && [ "$(listener_pid)" = "$1" ] || return 1
+  body="$(curl -fsS -m 5 "http://127.0.0.1:$RUNNER_PORT/healthz" 2>/dev/null)" || return 1
+  printf '%s' "$body" | node -e '
+    try {
+      const data = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+      process.exitCode = data?.sandbox === "ready" ? 0 : 1;
+    } catch { process.exitCode = 1; }
+  '
+}
+
 stop_runner() {
-  pid="$(cat "$RUNNER_PID_FILE" 2>/dev/null || true)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+  pid="$(runner_pid)"
+  if is_runner "$pid"; then
     kill "$pid" 2>/dev/null || true
     for _ in 1 2 3 4 5; do
-      kill -0 "$pid" 2>/dev/null || break
+      is_runner "$pid" || break
       sleep 1
     done
-    kill -9 "$pid" 2>/dev/null || true
+    if is_runner "$pid"; then
+      kill -9 "$pid" 2>/dev/null || true
+      for _ in 1 2 3 4 5; do
+        is_runner "$pid" || break
+        sleep 1
+      done
+    fi
   fi
-  pkill -f "tsx --env-file=.env.runner media-runner.ts" 2>/dev/null || true
+  if is_runner "$pid" || process_args "$pid" >/dev/null; then
+    echo "could not confirm runner PID $pid exited; keeping $RUNNER_PID_FILE" >&2
+    return 1
+  fi
   rm -f "$RUNNER_PID_FILE"
-
-  # caffeinate is its own process, so the runner's death does not leave the
-  # Mac pinned awake.
-  cpid="$(cat "$CAFFEINATE_PID_FILE" 2>/dev/null || true)"
-  if [ -n "$cpid" ] && kill -0 "$cpid" 2>/dev/null; then
-    kill "$cpid" 2>/dev/null || true
-  fi
-  rm -f "$CAFFEINATE_PID_FILE"
 }
 
 stop_all() {
   echo "stopping runner…"
-  stop_runner
+  runner_stopped=0
+  stop_runner || runner_stopped=$?
   echo "stopping funnel…"
   "$TS_BIN" --socket="$TS_SOCK" funnel --https=443 off 2>/dev/null || true
   echo "stopping tailscaled…"
-  pkill -f "tailscaled --tun=userspace-networking" 2>/dev/null || true
+  for daemon_pid in $(pgrep -u "$(id -u)" -x tailscaled || true); do
+    daemon_args="$(process_args "$daemon_pid")" || continue
+    case " $daemon_args " in
+      *" --socket=$TS_SOCK "*) kill "$daemon_pid" 2>/dev/null || true ;;
+    esac
+  done
+  [ "$runner_stopped" -eq 0 ] || return "$runner_stopped"
   echo "stopped."
 }
 
 if [ "${1:-}" = "stop" ]; then
   stop_all
   exit 0
+fi
+
+if ! command -v lsof >/dev/null; then
+  echo "lsof is required to verify the runner listener" >&2
+  exit 1
 fi
 
 if [ ! -f .env.runner ]; then
@@ -98,21 +142,33 @@ fi
 #    idle-sleeping (which would freeze the ffmpeg pump mid-broadcast). They are
 #    separate processes so `stop` can end both cleanly, and caffeinate waits on
 #    the runner's PID (-w) so a crash never leaves the Mac pinned awake.
-if is_up; then
+RUNNER_PID="$(runner_pid)"
+if is_up "$RUNNER_PID"; then
   echo "runner already healthy on :$RUNNER_PORT"
 else
-  echo "starting runner on :${RUNNER_PORT}…"
-  nohup ./node_modules/.bin/tsx --env-file=.env.runner media-runner.ts \
-    >>"$TS_DIR/runner.log" 2>&1 &
-  RUNNER_PID=$!
-  echo "$RUNNER_PID" >"$RUNNER_PID_FILE"
-  nohup caffeinate -s -w "$RUNNER_PID" >/dev/null 2>&1 &
-  echo $! >"$CAFFEINATE_PID_FILE"
+  listener="$(listener_pid)"
+  if [ -n "$listener" ] && [ "$listener" != "$RUNNER_PID" ]; then
+    echo "port $RUNNER_PORT is occupied by an unmanaged listener; stop it or choose another RUNNER_PORT" >&2
+    exit 1
+  fi
+  if ! is_runner "$RUNNER_PID"; then
+    if process_args "$RUNNER_PID" >/dev/null || [ -n "$listener" ]; then
+      echo "cannot verify the previous runner; stop it before restarting" >&2
+      exit 1
+    fi
+    echo "starting runner on :${RUNNER_PORT}…"
+    # Load tsx into Node so $! is the actual server, with no launcher child.
+    PORT="$RUNNER_PORT" nohup node --env-file=.env.runner --import tsx "$RUNNER_ENTRY" \
+      >>"$TS_DIR/runner.log" 2>&1 &
+    RUNNER_PID=$!
+    echo "$RUNNER_PID" >"$RUNNER_PID_FILE"
+    nohup caffeinate -i -s -w "$RUNNER_PID" >/dev/null 2>&1 &
+  fi
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 3
-    is_up && break
+    is_up "$RUNNER_PID" && break
   done
-  if ! is_up; then
+  if ! is_up "$RUNNER_PID"; then
     echo "runner did not become healthy — see $TS_DIR/runner.log" >&2
     stop_runner
     exit 1

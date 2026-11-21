@@ -24,11 +24,23 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { connect } from "node:net";
 
-// The preload runs before Next has loaded .env.local, so fall back to
-// reading the file directly — but never let a missing file kill the host
-// process; a preload failure aborts Node before any code runs.
+// Next's CLI has not loaded its env files yet. Use the same loader and mode
+// before capturing a connection string for the local pool.
+const require = createRequire(import.meta.url);
+const nextMode = process.env.NEON_LOCAL_NEXT_MODE;
 let dbUrl = process.env.DATABASE_URL;
-if (!dbUrl) {
+if (nextMode === "development" || nextMode === "production") {
+  try {
+    const { loadEnvConfig } = createRequire(require.resolve("next/package.json"))("@next/env");
+    loadEnvConfig(process.cwd(), nextMode === "development");
+    dbUrl = process.env.DATABASE_URL;
+  } catch {
+    // Let Next report any environment-loading failure itself.
+    dbUrl = undefined;
+  }
+} else if (dbUrl === undefined) {
+  // Standalone workers use Node's --env-file; retain the local fallback for
+  // invocations that preload this module without that flag.
   try {
     dbUrl =
       readFileSync(new URL("../.env.local", import.meta.url), "utf8")
@@ -115,7 +127,7 @@ if (isLocal) {
     }
   };
 
-  const cjs = createRequire(import.meta.url)("@neondatabase/serverless");
+  const cjs = require("@neondatabase/serverless");
   const cjsConfig = cjs.neonConfig;
   cjsConfig.wsProxy = neonConfig.wsProxy;
   cjsConfig.useSecureWebSocket = false;
