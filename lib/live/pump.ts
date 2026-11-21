@@ -1065,6 +1065,10 @@ export class PumpManager {
       proc.child = child;
       proc.running = true;
       this.attachFfmpegHandlers(proc, child);
+      if (proc.stopping || proc.attemptSettled) {
+        this.teardownStagedAttempt(proc);
+        return;
+      }
 
       // (3)+(4) Video write-end, then the video feeder AT ONCE — its bytes
       // are what lets ffmpeg's probe of v.fifo complete (and with it the
@@ -1200,6 +1204,10 @@ export class PumpManager {
       // stop() racing this window finds it in the attempt's process list.
       proc.feeders.push(child);
       this.watchFeeder(proc, child, kind);
+      if (proc.attemptSettled || proc.stopping) {
+        signalProcessTree(child, 'SIGKILL');
+        throw new Error(`the ${kind} feeder could not start`);
+      }
       const outcome = await new Promise<'spawned' | Error>((resolve) => {
         child.once('error', (error: Error) => resolve(error));
         child.once('spawn', () => resolve('spawned'));
@@ -1214,6 +1222,7 @@ export class PumpManager {
       if (proc.attemptSettled || proc.stopping) {
         // The child died instantly (its close settled the attempt) or the
         // pump is being stopped — no point trying the next candidate.
+        signalProcessTree(child, 'SIGKILL');
         throw new Error(`the ${kind} feeder could not start`);
       }
       return child;

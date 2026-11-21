@@ -112,6 +112,13 @@ if [ "${1:-}" = "stop" ]; then
   exit 0
 fi
 
+# A background Funnel rule survives a previous invocation. Withdraw it on
+# every failed start so an unrelated replacement listener is never published.
+withdraw_funnel() {
+  "$TS_BIN" --socket="$TS_SOCK" funnel --https=443 off >/dev/null 2>&1
+}
+trap 'withdraw_funnel || true' 0
+
 if ! command -v lsof >/dev/null; then
   echo "lsof is required to verify the runner listener" >&2
   exit 1
@@ -142,6 +149,10 @@ fi
 #    idle-sleeping (which would freeze the ffmpeg pump mid-broadcast). They are
 #    separate processes so `stop` can end both cleanly, and caffeinate waits on
 #    the runner's PID (-w) so a crash never leaves the Mac pinned awake.
+if ! withdraw_funnel; then
+  echo "could not withdraw the previous Funnel rule; refusing startup" >&2
+  exit 1
+fi
 RUNNER_PID="$(runner_pid)"
 if is_up "$RUNNER_PID"; then
   echo "runner already healthy on :$RUNNER_PORT"
@@ -201,5 +212,7 @@ for _ in 1 2 3; do
 done
 if [ -z "$published" ]; then
   echo "the funnel is configured but not answering yet — TLS/DERP can take a minute after tailscaled restarts" >&2
+  exit 1
 fi
+trap - 0
 echo "point Render's MEDIA_RUNNER_URL at https://$FUNNEL_HOST"

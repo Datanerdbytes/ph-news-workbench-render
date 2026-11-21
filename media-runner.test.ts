@@ -537,6 +537,44 @@ describe('POST /pump/stop', () => {
 });
 
 describe('reconcileOnce', () => {
+  it('continues reconciling other pumps when one terminal write keeps failing', async () => {
+    const { runner, queries } = makeServer((text, values) => {
+      if (text.includes('UPDATE') && values.includes('7')) throw new Error('pump 7 write failed');
+      return [];
+    });
+    runner.registry.set('7', { workspaceId: 'ws-1', dbRunning: true });
+    runner.registry.set('8', { workspaceId: 'ws-1', dbRunning: true });
+    await runner.reconcileOnce();
+    expect(runner.registry.has('7')).toBe(true);
+    expect(runner.registry.has('8')).toBe(false);
+    expect(queries.some((query) => query.values.includes('8'))).toBe(true);
+  });
+
+  it('owns a starting pump during shutdown and refuses subsequent starts', async () => {
+    let finishStart!: (value: PumpStartResult) => void;
+    startMock.mockImplementation(() => new Promise<PumpStartResult>((resolve) => { finishStart = resolve; }));
+    const { runner, queries } = makeServer((text) =>
+      text.includes('FROM live_streams') ? STREAM_ROW() : []
+    );
+    const port = await listen(runner);
+    const request = client(port, '/pump/start', { token: TOKEN, body: { workspaceId: 'ws-1', streamId: '7' } });
+    try {
+      await vi.waitFor(() => expect(startMock).toHaveBeenCalled());
+      await runner.markOwnPumpsFailed('shutting down');
+      finishStart({ ok: true });
+      expect((await request).status).toBe(503);
+      expect(stopMock).toHaveBeenCalledWith('7', { force: true });
+      expect(queries.some((query) => query.text.includes("SET pump_status = 'running'"))).toBe(false);
+      const next = await client(port, '/pump/start', { token: TOKEN, body: { workspaceId: 'ws-1', streamId: '7' } });
+      expect(next.status).toBe(503);
+      expect(startMock).toHaveBeenCalledTimes(1);
+    } finally {
+      finishStart?.({ ok: true });
+      await request;
+      await runner.close();
+    }
+  });
+
   it.each([
     { state: 'failed', error: 'Source stderr: HTTP error 403 Forbidden' },
     { state: 'stopped', error: null },
@@ -629,7 +667,7 @@ describe('reconcileOnce', () => {
       running: false,
       startedAt: new Date(),
       error: null as string | null,
-      retrying: true,
+      retrying: false,
     };
     statusMock.mockImplementation(() => managerStatus);
     const { runner, queries } = makeServer((text) =>
@@ -641,6 +679,7 @@ describe('reconcileOnce', () => {
         token: TOKEN,
         body: { workspaceId: 'ws-1', streamId: '7' },
       });
+      managerStatus.retrying = true;
       const before = queries.length;
       await runner.reconcileOnce();
       expect(
