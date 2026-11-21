@@ -348,6 +348,24 @@ describe('GET /api/live/preview in runner mode', () => {
     expect(fetchPublicSourceMock).not.toHaveBeenCalled();
   });
 
+  it('returns a secured generic 502 when runner media fails classification', async () => {
+    runnerStreamRequestMock.mockResolvedValueOnce(
+      jsonResponse('Unexpected runner content', { 'content-type': 'text/html' })
+    );
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await GET(previewRequest(MANIFEST_URL));
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({
+      error: 'The stream could not be reached for preview.',
+    });
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('content-security-policy')).toContain('sandbox');
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(fetchPublicSourceMock).not.toHaveBeenCalled();
+  });
+
   it('maps a runner 5xx to the generic 502', async () => {
     runnerStreamRequestMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ error: 'runner boom' }), { status: 500 })

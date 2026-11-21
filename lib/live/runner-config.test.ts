@@ -40,6 +40,26 @@ describe('runnerMode', () => {
   });
 });
 
+it.each([
+  'http://media-runner.example',
+  'http://127.0.0.1:8080',
+  'file:///media-runner',
+  'not a URL',
+])('rejects invalid or insecure runner URL %s before either request', async (url) => {
+  process.env.MEDIA_RUNNER_URL = url;
+  const body = { url: 'https://media.example/video' };
+  const error = 'The media runner URL must be a valid HTTPS URL.';
+
+  await expect(runnerRequest('/resolve', body)).resolves.toEqual({
+    kind: 'unreachable',
+    error,
+  });
+  await expect(
+    runnerStreamRequest('/preview-media', body, new AbortController().signal)
+  ).rejects.toThrow(error);
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
 describe('runnerRequest', () => {
   it('posts JSON with the bearer token and returns the response verbatim', async () => {
     fetchMock.mockResolvedValueOnce(
@@ -60,10 +80,11 @@ describe('runnerRequest', () => {
     });
     const [url, init] = fetchMock.mock.calls[0] as [
       string,
-      { headers: Record<string, string>; body: string; method: string },
+      RequestInit & { headers: Record<string, string>; body: string },
     ];
     expect(url).toBe(`${BASE}/pump/start`);
     expect(init.method).toBe('POST');
+    expect(init.redirect).toBe('error');
     expect(init.headers.authorization).toBe(`Bearer ${TOKEN}`);
     expect(init.headers['content-type']).toBe('application/json');
     expect(JSON.parse(init.body)).toEqual({
@@ -200,9 +221,10 @@ describe('runnerStreamRequest', () => {
     expect(await response.text()).toBe('#EXTM3U\nseg0.ts\n');
     const [url, init] = fetchMock.mock.calls[0] as [
       string,
-      { headers: Record<string, string>; body: string; signal: AbortSignal },
+      RequestInit & { headers: Record<string, string>; body: string },
     ];
     expect(url).toBe(`${BASE}/preview-media`);
+    expect(init.redirect).toBe('error');
     expect(init.headers.authorization).toBe(`Bearer ${TOKEN}`);
     expect(JSON.parse(init.body)).toEqual({
       url: 'https://manifest.example/live.m3u8',

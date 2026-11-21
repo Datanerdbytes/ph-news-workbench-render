@@ -48,7 +48,7 @@ export async function GET(request: Request): Promise<Response> {
     if (runnerMode()) {
       const viaRunner = await previewViaRunner(target, request.signal);
       if (viaRunner) {
-        return classifyAndStream(viaRunner.upstream, viaRunner.finalUrl);
+        return await classifyAndStream(viaRunner.upstream, viaRunner.finalUrl);
       }
       // A runner without the media relay keeps the direct-egress path below.
     }

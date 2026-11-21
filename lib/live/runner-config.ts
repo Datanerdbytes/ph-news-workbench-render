@@ -19,6 +19,15 @@ export function runnerBaseUrl(): string {
     .replace(/\/+$/, '');
 }
 
+function requireHttpsRunnerBaseUrl(): string {
+  const base = runnerBaseUrl();
+  if (!base) throw new Error('The media runner URL is not configured.');
+  if (!URL.canParse(base) || new URL(base).protocol !== 'https:') {
+    throw new Error('The media runner URL must be a valid HTTPS URL.');
+  }
+  return base;
+}
+
 export function runnerToken(): string {
   return (process.env.MEDIA_RUNNER_TOKEN ?? '').trim();
 }
@@ -52,18 +61,15 @@ export async function runnerRequest(
   path: string,
   body: unknown
 ): Promise<RunnerOutcome> {
-  const base = runnerBaseUrl();
-  const token = runnerToken();
-  if (!base) {
-    return { kind: 'unreachable', error: 'The media runner URL is not configured.' };
-  }
-  if (!token) {
-    return { kind: 'unreachable', error: 'The media runner token is not configured.' };
-  }
-
   try {
+    const base = requireHttpsRunnerBaseUrl();
+    const token = runnerToken();
+    if (!token) throw new Error('The media runner token is not configured.');
+
     const response = await fetch(`${base}${path}`, {
       method: 'POST',
+      // A redirect could resend the POST body over HTTP.
+      redirect: 'error',
       headers: {
         authorization: `Bearer ${token}`,
         'content-type': 'application/json',
@@ -113,13 +119,13 @@ export async function runnerStreamRequest(
   body: unknown,
   signal: AbortSignal
 ): Promise<Response> {
-  const base = runnerBaseUrl();
+  const base = requireHttpsRunnerBaseUrl();
   const token = runnerToken();
-  if (!base) throw new Error('The media runner URL is not configured.');
   if (!token) throw new Error('The media runner token is not configured.');
 
   return fetch(`${base}${path}`, {
     method: 'POST',
+    redirect: 'error',
     headers: {
       authorization: `Bearer ${token}`,
       'content-type': 'application/json',
