@@ -19,6 +19,15 @@ export function runnerBaseUrl(): string {
     .replace(/\/+$/, '');
 }
 
+function requireHttpsRunnerBaseUrl(): string {
+  const base = runnerBaseUrl();
+  if (!base) throw new Error('The media runner URL is not configured.');
+  if (!URL.canParse(base) || new URL(base).protocol !== 'https:') {
+    throw new Error('The media runner URL must be a valid HTTPS URL.');
+  }
+  return base;
+}
+
 export function runnerToken(): string {
   return (process.env.MEDIA_RUNNER_TOKEN ?? '').trim();
 }
@@ -38,6 +47,10 @@ const RUNNER_TIMEOUT_MS = 60_000;
 // yt-dlp itself has a 60s extraction budget. Give /resolve a little room
 // for the companion's setup and the round trip instead of racing that limit.
 const RESOLVE_RUNNER_TIMEOUT_MS = 75_000;
+// Media relays stream for the length of the request (segments are MBs); the
+// deadline still bounds each one so a wedged runner can never hold the
+// browser's player open forever.
+const RUNNER_STREAM_TIMEOUT_MS = 90_000;
 
 /**
  * POSTs JSON to one worker endpoint with the bearer token. Never throws —
@@ -48,18 +61,15 @@ export async function runnerRequest(
   path: string,
   body: unknown
 ): Promise<RunnerOutcome> {
-  const base = runnerBaseUrl();
-  const token = runnerToken();
-  if (!base) {
-    return { kind: 'unreachable', error: 'The media runner URL is not configured.' };
-  }
-  if (!token) {
-    return { kind: 'unreachable', error: 'The media runner token is not configured.' };
-  }
-
   try {
+    const base = requireHttpsRunnerBaseUrl();
+    const token = runnerToken();
+    if (!token) throw new Error('The media runner token is not configured.');
+
     const response = await fetch(`${base}${path}`, {
       method: 'POST',
+      // A redirect could resend the POST body over HTTP.
+      redirect: 'error',
       headers: {
         authorization: `Bearer ${token}`,
         'content-type': 'application/json',
@@ -92,3 +102,36 @@ export async function runnerRequest(
 /** The stable 502 the live routes render when the worker cannot be reached. */
 export const RUNNER_UNREACHABLE_ERROR =
   'The media runner is unreachable right now. Try again shortly.';
+
+/**
+ * POSTs JSON to one worker endpoint and returns the RAW response — body
+ * streaming, never buffered. Used by the preview proxy's media relay: the
+ * caller pipes `response.body` straight through to the browser, so any
+ * `await response.text()` here would buffer whole segments into memory.
+ *
+ * The caller's signal and a fixed deadline are combined, so a browser
+ * disconnect (hls.js aborting a segment load) tears down the runner request
+ * even mid-stream. Transport failures throw — the caller maps them onto its
+ * own error contract.
+ */
+export async function runnerStreamRequest(
+  path: string,
+  body: unknown,
+  signal: AbortSignal
+): Promise<Response> {
+  const base = requireHttpsRunnerBaseUrl();
+  const token = runnerToken();
+  if (!token) throw new Error('The media runner token is not configured.');
+
+  return fetch(`${base}${path}`, {
+    method: 'POST',
+    redirect: 'error',
+    headers: {
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(body ?? {}),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(RUNNER_STREAM_TIMEOUT_MS)]),
+    cache: 'no-store',
+  });
+}

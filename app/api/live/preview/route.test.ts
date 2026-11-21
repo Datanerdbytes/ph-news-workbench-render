@@ -1,8 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { requireWorkspaceMock, fetchPublicSourceMock } = vi.hoisted(() => ({
+const {
+  requireWorkspaceMock,
+  fetchPublicSourceMock,
+  runnerModeMock,
+  runnerStreamRequestMock,
+} = vi.hoisted(() => ({
   requireWorkspaceMock: vi.fn(),
   fetchPublicSourceMock: vi.fn(),
+  runnerModeMock: vi.fn(),
+  runnerStreamRequestMock: vi.fn(),
 }));
 
 vi.mock('@/lib/session', () => ({
@@ -16,6 +23,14 @@ vi.mock('@/lib/session', () => ({
 // headers), not the transport itself (covered by public-fetch tests).
 vi.mock('@/lib/live/public-fetch', () => ({
   fetchPublicSource: fetchPublicSourceMock,
+}));
+
+// Runner mode is controlled per-test; the default (off) keeps every legacy
+// test on the direct-egress path.
+vi.mock('@/lib/live/runner-config', () => ({
+  runnerMode: runnerModeMock,
+  runnerStreamRequest: runnerStreamRequestMock,
+  RUNNER_UNREACHABLE_ERROR: 'The media runner is unreachable right now.',
 }));
 // The REAL public-network policy runs here (DNS mocked) — redirect hops
 // and initial URLs get the production validation, including port and
@@ -49,6 +64,10 @@ beforeEach(() => {
   requireWorkspaceMock.mockReset();
   requireWorkspaceMock.mockResolvedValue(SESSION);
   fetchPublicSourceMock.mockReset();
+  runnerModeMock.mockReset();
+  // Off by default — only the runner-mode describe turns it on.
+  runnerModeMock.mockReturnValue(false);
+  runnerStreamRequestMock.mockReset();
   // Default the SSRF guard open — each test narrows it on purpose.
   lookupMock.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
 });
@@ -234,5 +253,130 @@ describe('GET /api/live/preview', () => {
 
     expect(res.status).toBe(502);
     expect(await res.json()).toMatchObject({ error: expect.any(String) });
+  });
+});
+
+describe('GET /api/live/preview in runner mode', () => {
+  function runnerResponse(
+    body: string,
+    headers: Record<string, string> = {}
+  ): Response {
+    return new Response(body, { status: 200, headers });
+  }
+
+  beforeEach(() => {
+    runnerModeMock.mockReturnValue(true);
+  });
+
+  it('relays the playlist through the runner and rewrites URIs against the final URL', async () => {
+    const finalUrl = 'https://final.example/live/master.m3u8';
+    runnerStreamRequestMock.mockResolvedValueOnce(
+      runnerResponse('#EXTM3U\nhttps://final.example/seg0.ts\n', {
+        'content-type': 'application/vnd.apple.mpegurl',
+        'x-final-url': encodeURIComponent(finalUrl),
+      })
+    );
+
+    const res = await GET(previewRequest(MANIFEST_URL));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('application/vnd.apple.mpegurl');
+    expect(res.headers.get('content-security-policy')).toContain('sandbox');
+    expect(await res.text()).toContain(
+      `/api/live/preview?url=${encodeURIComponent('https://final.example/seg0.ts')}`
+    );
+    // The relay replaces direct egress entirely in runner mode.
+    expect(fetchPublicSourceMock).not.toHaveBeenCalled();
+    expect(runnerStreamRequestMock).toHaveBeenCalledWith(
+      '/preview-media',
+      { url: MANIFEST_URL },
+      expect.any(AbortSignal)
+    );
+  });
+
+  it('falls back to the direct path when the runner predates the relay', async () => {
+    runnerStreamRequestMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'Not found.' }), { status: 404 })
+    );
+    fetchPublicSourceMock.mockResolvedValueOnce(
+      jsonResponse('#EXTM3U\nseg0.ts\n', {
+        'content-type': 'application/vnd.apple.mpegurl',
+      })
+    );
+
+    const res = await GET(previewRequest(MANIFEST_URL));
+
+    expect(res.status).toBe(200);
+    expect(fetchPublicSourceMock).toHaveBeenCalledTimes(1);
+    expect(await res.text()).toContain(
+      `/api/live/preview?url=${encodeURIComponent('https://manifest.example/live/seg0.ts')}`
+    );
+  });
+
+  it('maps a runner policy rejection to the route 400 contract', async () => {
+    runnerStreamRequestMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          error: 'Links on non-standard ports cannot be previewed.',
+        }),
+        { status: 400 }
+      )
+    );
+
+    const res = await GET(previewRequest(MANIFEST_URL));
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      error: 'Links on non-standard ports cannot be previewed.',
+    });
+    expect(fetchPublicSourceMock).not.toHaveBeenCalled();
+  });
+
+  it('maps an unreachable runner to 502 with the stable message in the log', async () => {
+    runnerStreamRequestMock.mockRejectedValueOnce(new TypeError('fetch failed'));
+    const logSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await GET(previewRequest(MANIFEST_URL));
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({
+      error: 'The stream could not be reached for preview.',
+    });
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('media runner is unreachable')
+    );
+    expect(fetchPublicSourceMock).not.toHaveBeenCalled();
+  });
+
+  it('returns a secured generic 502 when runner media fails classification', async () => {
+    runnerStreamRequestMock.mockResolvedValueOnce(
+      jsonResponse('Unexpected runner content', { 'content-type': 'text/html' })
+    );
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await GET(previewRequest(MANIFEST_URL));
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({
+      error: 'The stream could not be reached for preview.',
+    });
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('content-security-policy')).toContain('sandbox');
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(fetchPublicSourceMock).not.toHaveBeenCalled();
+  });
+
+  it('maps a runner 5xx to the generic 502', async () => {
+    runnerStreamRequestMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'runner boom' }), { status: 500 })
+    );
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await GET(previewRequest(MANIFEST_URL));
+
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.error).toBe('The stream could not be reached for preview.');
+    expect(body.error).not.toContain('runner boom');
   });
 });

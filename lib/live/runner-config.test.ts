@@ -7,6 +7,7 @@ import {
   RUNNER_UNREACHABLE_ERROR,
   runnerMode,
   runnerRequest,
+  runnerStreamRequest,
 } from './runner-config';
 
 const BASE = 'https://media-runner.fly.dev';
@@ -39,6 +40,26 @@ describe('runnerMode', () => {
   });
 });
 
+it.each([
+  'http://media-runner.example',
+  'http://127.0.0.1:8080',
+  'file:///media-runner',
+  'not a URL',
+])('rejects invalid or insecure runner URL %s before either request', async (url) => {
+  process.env.MEDIA_RUNNER_URL = url;
+  const body = { url: 'https://media.example/video' };
+  const error = 'The media runner URL must be a valid HTTPS URL.';
+
+  await expect(runnerRequest('/resolve', body)).resolves.toEqual({
+    kind: 'unreachable',
+    error,
+  });
+  await expect(
+    runnerStreamRequest('/preview-media', body, new AbortController().signal)
+  ).rejects.toThrow(error);
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
 describe('runnerRequest', () => {
   it('posts JSON with the bearer token and returns the response verbatim', async () => {
     fetchMock.mockResolvedValueOnce(
@@ -59,10 +80,11 @@ describe('runnerRequest', () => {
     });
     const [url, init] = fetchMock.mock.calls[0] as [
       string,
-      { headers: Record<string, string>; body: string; method: string },
+      RequestInit & { headers: Record<string, string>; body: string },
     ];
     expect(url).toBe(`${BASE}/pump/start`);
     expect(init.method).toBe('POST');
+    expect(init.redirect).toBe('error');
     expect(init.headers.authorization).toBe(`Bearer ${TOKEN}`);
     expect(init.headers['content-type']).toBe('application/json');
     expect(JSON.parse(init.body)).toEqual({
@@ -173,5 +195,72 @@ describe('runnerRequest', () => {
 
   it('exposes the stable unreachable message used by the routes', () => {
     expect(RUNNER_UNREACHABLE_ERROR).toMatch(/media runner is unreachable/i);
+  });
+});
+
+describe('runnerStreamRequest', () => {
+  it('posts JSON with the bearer token and returns the RAW response', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response('#EXTM3U\nseg0.ts\n', {
+        status: 200,
+        headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+      })
+    );
+
+    const response = await runnerStreamRequest(
+      '/preview-media',
+      { url: 'https://manifest.example/live.m3u8' },
+      new AbortController().signal
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe(
+      'application/vnd.apple.mpegurl'
+    );
+    // Body is streamable, never buffered.
+    expect(await response.text()).toBe('#EXTM3U\nseg0.ts\n');
+    const [url, init] = fetchMock.mock.calls[0] as [
+      string,
+      RequestInit & { headers: Record<string, string>; body: string },
+    ];
+    expect(url).toBe(`${BASE}/preview-media`);
+    expect(init.redirect).toBe('error');
+    expect(init.headers.authorization).toBe(`Bearer ${TOKEN}`);
+    expect(JSON.parse(init.body)).toEqual({
+      url: 'https://manifest.example/live.m3u8',
+    });
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('combines the caller signal so a browser abort reaches the runner', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('x', { status: 200 }));
+    const controller = new AbortController();
+    controller.abort();
+
+    await runnerStreamRequest('/preview-media', {}, controller.signal);
+
+    const [, init] = fetchMock.mock.calls[0] as [
+      string,
+      { signal: AbortSignal },
+    ];
+    expect(init.signal.aborted).toBe(true);
+  });
+
+  it('throws when the runner URL is not configured', async () => {
+    delete process.env.MEDIA_RUNNER_URL;
+
+    await expect(
+      runnerStreamRequest('/preview-media', {}, new AbortController().signal)
+    ).rejects.toThrow('The media runner URL is not configured.');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('throws when the runner token is not configured', async () => {
+    delete process.env.MEDIA_RUNNER_TOKEN;
+
+    await expect(
+      runnerStreamRequest('/preview-media', {}, new AbortController().signal)
+    ).rejects.toThrow('The media runner token is not configured.');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

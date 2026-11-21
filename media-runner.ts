@@ -3,6 +3,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from 'node:http';
+import { Readable } from 'node:stream';
 import { neon } from '@neondatabase/serverless';
 import { decryptToken } from './lib/facebook-token';
 import {
@@ -26,8 +27,11 @@ import {
 } from './lib/live/resolve';
 import {
   NetworkPolicyError,
+  assertPublicSourceUrl,
+  MAX_SOURCE_URL_LENGTH,
   validateSourceUrl,
 } from './lib/live/public-network';
+import { fetchPublicSource } from './lib/live/public-fetch';
 import { localRuntimeEnabled } from './lib/reels/media';
 import { runnerToken } from './lib/live/runner-config';
 import { withWorkspaceLiveLock } from './lib/live/workspace-lock';
@@ -36,7 +40,10 @@ import { withWorkspaceLiveLock } from './lib/live/workspace-lock';
 // work when the web runtime cannot run the sandbox (Render). The web app
 // proxies resolve and pump control here over HTTPS with a shared bearer
 // token; this process runs yt-dlp/ffprobe/ffmpeg inside the verified
-// isolation sandbox and owns every live_streams.pump_status write.
+// isolation sandbox and owns every live_streams.pump_status write. It also
+// relays the live PREVIEW's media fetches (/preview-media): googlevideo
+// binds videoplayback URLs to the network that resolved them, so the bytes
+// must leave from here, not from the web runtime's egress.
 //
 // Run with: npx tsx --env-file=.env.local media-runner.ts
 // Deployed on Fly.io via Dockerfile.worker + fly.worker.toml.
@@ -88,6 +95,27 @@ async function findStream(
 /** readText parity with lib/publishing/request: string → trim → cap. */
 function readText(value: unknown, max = 5000): string {
   return typeof value === 'string' ? value.trim().slice(0, max) : '';
+}
+
+/** Redirect-hop budget for /preview-media — mirrors the web preview route. */
+const PREVIEW_MAX_REDIRECTS = 3;
+
+function isRedirectStatus(status: number): boolean {
+  return (
+    status === 301 ||
+    status === 302 ||
+    status === 303 ||
+    status === 307 ||
+    status === 308
+  );
+}
+
+async function cancelBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Draining a rejected body is best-effort only.
+  }
 }
 
 type HttpResponse = { status: number; body: unknown };
@@ -526,6 +554,117 @@ export function createRunnerServer(deps: RunnerDeps) {
     }
   }
 
+  /**
+   * POST /preview-media — the web preview proxy's egress relay. googlevideo
+   * binds videoplayback URLs to the IP that requested them (and a CDN edge
+   * host answers DNS per region), so a segment the resolver's network can
+   * stream is refused to the web runtime's egress with a 403 no matter how
+   * it is dialed. The pump already owns this position (ffmpeg pulls the
+   * source here); this endpoint gives the PREVIEW the same one: the web
+   * route hands over a policy-checked URL and pipes the bytes it gets back
+   * to the browser.
+   *
+   * The request URL still runs the full public-source policy here — this is
+   * the runner's own SSRF boundary, identical to the web route's direct
+   * path. Only status/content-type/final-URL and the raw body cross back;
+   * classification (playlist vs binary, active-content sniffing) stays the
+   * web route's job so there is exactly one place that decides what may be
+   * served to a browser.
+   */
+  async function handlePreviewMedia(
+    request: IncomingMessage,
+    response: ServerResponse
+  ): Promise<void> {
+    const body = (await readJson(request)) as { url?: unknown } | null;
+    const url = readText(body?.url, MAX_SOURCE_URL_LENGTH);
+    if (!url) {
+      json(response, 400, { error: 'A stream URL is required to preview.' });
+      return;
+    }
+
+    // Cancel the upstream fetch when the web side hangs up (hls.js aborts
+    // segment loads constantly) — 'close' also fires after a normal end, so
+    // only abort while the response is still being written.
+    const controller = new AbortController();
+    response.on('close', () => {
+      if (!response.writableEnded) controller.abort();
+    });
+
+    try {
+      // Manual redirects, every hop re-validated through the policy — the
+      // same loop the web route runs for its own direct egress.
+      let current = await assertPublicSourceUrl(url);
+      let redirects = 0;
+      let upstream: Response;
+      for (;;) {
+        upstream = await fetchPublicSource(current, {
+          signal: controller.signal,
+        });
+        if (!isRedirectStatus(upstream.status)) break;
+        await cancelBody(upstream);
+        if (redirects >= PREVIEW_MAX_REDIRECTS) {
+          throw new NetworkPolicyError(
+            'This link redirects too many times to preview.'
+          );
+        }
+        redirects += 1;
+        const location = upstream.headers.get('location');
+        if (!location) {
+          throw new NetworkPolicyError(
+            'This link redirects without a destination, so it cannot be previewed.'
+          );
+        }
+        let next: string;
+        try {
+          next = new URL(location, current).href;
+        } catch {
+          throw new NetworkPolicyError(
+            'This link redirects to an invalid destination, so it cannot be previewed.'
+          );
+        }
+        current = await assertPublicSourceUrl(next);
+      }
+
+      if (!upstream.ok || !upstream.body) {
+        await cancelBody(upstream);
+        json(response, 502, {
+          error: 'The stream could not be reached for preview.',
+        });
+        return;
+      }
+
+      response.writeHead(200, {
+        'content-type':
+          upstream.headers.get('content-type') ?? 'application/octet-stream',
+        // The playlist rewriter needs the post-redirect URL to resolve
+        // relative URIs; encoded so odd bytes can never break the header.
+        'x-final-url': encodeURIComponent(current),
+        'cache-control': 'no-store',
+      });
+      const nodeStream = Readable.fromWeb(
+        upstream.body as import('node:stream/web').ReadableStream<Uint8Array>
+      );
+      nodeStream.on('error', () => response.destroy());
+      nodeStream.pipe(response);
+    } catch (error) {
+      if (response.headersSent || response.destroyed) {
+        response.destroy();
+        return;
+      }
+      if (error instanceof NetworkPolicyError) {
+        json(response, 400, { error: error.message });
+        return;
+      }
+      log({
+        event: 'preview_media_failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+      json(response, 502, {
+        error: 'The stream could not be reached for preview.',
+      });
+    }
+  }
+
   async function handle(
     request: IncomingMessage,
     response: ServerResponse
@@ -552,6 +691,12 @@ export function createRunnerServer(deps: RunnerDeps) {
 
     let outcome: HttpResponse;
     try {
+      if (path === '/preview-media' && request.method === 'POST') {
+        // Streaming relay: writes its own headers and pipes bytes, so it
+        // bypasses the JSON-outcome contract entirely.
+        await handlePreviewMedia(request, response);
+        return;
+      }
       if (path === '/resolve' && request.method === 'POST') {
         outcome = await handleResolve(request);
       } else if (path === '/pump/start' && request.method === 'POST') {
@@ -561,7 +706,8 @@ export function createRunnerServer(deps: RunnerDeps) {
       } else if (
         (path === '/resolve' ||
           path === '/pump/start' ||
-          path === '/pump/stop') &&
+          path === '/pump/stop' ||
+          path === '/preview-media') &&
         request.method !== 'POST'
       ) {
         outcome = { status: 405, body: { error: 'Method not allowed.' } };
