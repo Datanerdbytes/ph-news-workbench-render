@@ -792,6 +792,40 @@ describe('PumpManager publisher leg', () => {
     expect(ffmpegKids).toHaveLength(4);
   });
 
+  it('keeps deferred settlement nonterminal and cancels its retry when stopped', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
+    await startPump({ id: 49, source: LIVE_HLS, dest: DEST });
+
+    stderrLine(ffmpegKids[1], 'Error writing trailer: Broken pipe\n');
+    closeChild(ffmpegKids[1], 1);
+    expect(manager.status(49)).toMatchObject({ running: false, retrying: true });
+
+    manager.stop(49);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(ffmpegKids).toHaveLength(2);
+    expect(manager.status(49)).toMatchObject({ running: false, retrying: false });
+  });
+
+  it.each(['direct', 'staged'] as const)('force stop kills every %s media process group immediately', async (mode) => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids, feederKids } = useSpawns({ probe: PROBE_COPY });
+    await startPump({ id: 50, source: mode === 'staged' ? FB_REPLAY : LIVE_HLS, mode, dest: DEST });
+
+    manager.stop(50, { force: true });
+    expect(feederKids).toHaveLength(mode === 'staged' ? 2 : 0);
+    for (const child of [...ffmpegKids, ...feederKids]) {
+      expect(processKillMock).toHaveBeenCalledWith(child, 'SIGKILL');
+    }
+    expect(manager.status(50)).toMatchObject({ running: false, retrying: false });
+    const signals = processKillMock.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(processKillMock).toHaveBeenCalledTimes(signals);
+    expect(ffmpegKids).toHaveLength(2);
+  });
+
   it('a dead publisher quotes the source side that explains it, not just the exit code', async () => {
     stubGateOn();
     vi.useFakeTimers();

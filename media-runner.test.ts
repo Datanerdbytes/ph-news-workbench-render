@@ -646,6 +646,14 @@ describe('reconcileOnce', () => {
       expect(
         queries.slice(before).some((query) => query.text.includes('UPDATE'))
       ).toBe(false);
+      // Pending settlement is reported as retrying too: it must remain in
+      // the workspace registry so disconnect can cancel the eventual retry.
+      expect(runner.registry.has('7')).toBe(true);
+      await client(port, '/pump/stop', {
+        token: TOKEN,
+        body: { workspaceId: 'ws-1' },
+      });
+      expect(stopMock).toHaveBeenCalledWith('7');
     } finally {
       await runner.close();
     }
@@ -696,6 +704,32 @@ describe('reconcileOnce', () => {
     } finally {
       await runner.close();
     }
+  });
+});
+
+describe('shutdown cleanup', () => {
+  it.each(['rejects', 'stalls'])('kills owned pumps before a database write that %s', async (failure) => {
+    let stoppedBeforeWrite = false;
+    let rejectWrite!: (error: Error) => void;
+    const blockedWrite = new Promise<unknown[]>((_, reject) => { rejectWrite = reject; });
+    const { fn } = fakeSql();
+    const runner = createRunnerServer({
+      sql: (strings, ...values) => {
+        stoppedBeforeWrite = stopMock.mock.calls.some(
+          ([id, options]) => id === '7' && options?.force === true
+        );
+        return failure === 'rejects'
+          ? Promise.reject(new Error('fetch failed'))
+          : blockedWrite.then(() => fn(strings, ...values));
+      },
+      manager: fakeManager(),
+      resolveVideo: resolveVideoMock,
+    });
+    runner.registry.set('7', { workspaceId: 'ws-1', dbRunning: true });
+    const shutdown = runner.markOwnPumpsFailed('shutting down').catch((error: Error) => error);
+    if (failure === 'stalls') rejectWrite(new Error('fetch failed'));
+    expect(await shutdown).toMatchObject({ message: 'fetch failed' });
+    expect(stoppedBeforeWrite).toBe(true);
   });
 });
 

@@ -567,6 +567,9 @@ export function createRunnerServer(deps: RunnerDeps) {
     /** Terminal write for every pump this process owns (shutdown path). */
     async markOwnPumpsFailed(error: string): Promise<void> {
       const ids = [...registry.keys()];
+      // Stop detached media groups before any network I/O: the Mac's stop
+      // script may terminate this server while the database is unavailable.
+      for (const id of ids) deps.manager.stop(id, { force: true });
       await markPumpsFailed(
         deps.sql,
         ids,
@@ -574,7 +577,6 @@ export function createRunnerServer(deps: RunnerDeps) {
         error
       );
       for (const id of ids) {
-        deps.manager.stop(id);
         registry.delete(id);
       }
     },

@@ -673,7 +673,7 @@ export class PumpManager {
     return { ok: true };
   }
 
-  stop(id: number | string): PumpStopResult {
+  stop(id: number | string, options: { force?: boolean } = {}): PumpStopResult {
     const proc = this.procs.get(String(id));
     if (!proc) return { ok: true, wasRunning: false };
     // Mark stopping even while a start/setup is still in flight: the staged
@@ -685,6 +685,15 @@ export class PumpManager {
     if (proc.retryTimer) {
       clearTimeout(proc.retryTimer);
       proc.retryTimer = null;
+    }
+    if (options.force) {
+      // Host shutdown cannot depend on a DB write or an unref'ed grace timer:
+      // detached media groups must be signalled before the server can exit.
+      const wasRunning = proc.running || proc.starting;
+      if (proc.killTimer) clearTimeout(proc.killTimer);
+      proc.killTimer = null;
+      this.teardownStagedAttempt(proc);
+      return { ok: true, wasRunning };
     }
     if (!proc.running && !proc.starting && proc.retryTimer === null) {
       return { ok: true, wasRunning: false };
@@ -725,7 +734,9 @@ export class PumpManager {
       running: proc.running,
       startedAt: proc.startedAt,
       error: proc.lastError,
-      retrying: proc.retryTimer !== null,
+      // Deferred publisher evidence still owns the stream and can schedule
+      // a retry. The runner must retain it for workspace-wide stop handling.
+      retrying: proc.retryTimer !== null || proc.finishSourceClose !== null,
     };
   }
 
