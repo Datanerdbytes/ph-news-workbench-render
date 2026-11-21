@@ -11,6 +11,9 @@ const stmts = [
   'CREATE INDEX IF NOT EXISTS verification_identifier_idx ON verification(identifier)',
 ];
 (async () => {
-  for (const s of stmts) { await sql.unsafe(s); console.log('ok'); }
+  for (const s of stmts) { await sql.query(s); console.log('ok'); }
   console.log('done');
-})().catch(e=>console.error(e.message));
+})().catch((error) => {
+  console.error(error.message);
+  process.exitCode = 1;
+});

@@ -85,7 +85,7 @@ console.log("→ migrate-auth.js");
 
 const schema = readFileSync(join(root, "lib", "schema.sql"), "utf8");
 for (const statement of statements(schema)) {
-  await sql.unsafe(statement);
+  await sql.query(statement);
 }
 console.log("→ lib/schema.sql");
 
