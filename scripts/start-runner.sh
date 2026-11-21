@@ -12,7 +12,7 @@
 # would keep the Mac awake and reachable without anyone asking.
 #
 # Prerequisites (one-time):
-#   brew install tailscale
+#   brew install tailscale python
 #   .env.runner must exist with production DATABASE_URL, BETTER_AUTH_SECRET
 #   and MEDIA_RUNNER_TOKEN (see docs/deployment.md).
 set -eu
@@ -28,14 +28,23 @@ TAILSCALED="$(command -v tailscaled || echo /opt/homebrew/opt/tailscale/bin/tail
 RUNNER_PORT="${RUNNER_PORT:-8080}"
 HOSTNAME_TS="${TS_HOSTNAME:-ph-news-runner}"
 
-# Use the path-and-command interface supported by older macOS releases.
-# lockf owns the lock and closes its descriptor in the executed child, so
-# detached runner/daemon/supervisor processes cannot retain the lifecycle lock.
+if ! command -v python3 >/dev/null; then
+  echo "python3 is required for the runner lifecycle lock (brew install python)" >&2
+  exit 1
+fi
+LOCK_HELPER="$PWD/scripts/run-with-runner-lock.py"
+START_SCRIPT="$PWD/scripts/start-runner.sh"
+
 if [ "${1:-}" = --locked ]; then
   shift
+  # Run the startup EXIT cleanup before the shell releases the lock. Shell
+  # traps wait for a foreground command to return before processing signals.
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 elif [ "${1:-}" != watch ]; then
   mkdir -p "$TS_DIR"
-  exec lockf -k "$TS_DIR/lifecycle.lock" sh "$PWD/scripts/start-runner.sh" --locked "$@"
+  exec python3 "$LOCK_HELPER" "$TS_DIR/lifecycle.lock" "$START_SCRIPT" "$@"
 fi
 
 runner_pid() {
@@ -139,7 +148,7 @@ withdraw_funnel() {
   "$TS_BIN" --socket="$TS_SOCK" funnel --https=443 off >/dev/null 2>&1
 }
 
-# This command is executed under lockf. Startup may have replaced the runner
+# This command holds the lifecycle lock. Startup may have replaced the runner
 # while its supervisor waited for the lock, so check ownership here.
 if [ "${1:-}" = withdraw-if-owner ]; then
   if [ "$(runner_pid)" = "${2:?missing runner PID}" ]; then
@@ -156,7 +165,7 @@ if [ "${1:-}" = watch ]; then
     sleep 1
   done
   while :; do
-    if lockf -k "$TS_DIR/lifecycle.lock" sh "$PWD/scripts/start-runner.sh" --locked withdraw-if-owner "$watched_pid"; then
+    if python3 "$LOCK_HELPER" "$TS_DIR/lifecycle.lock" "$START_SCRIPT" withdraw-if-owner "$watched_pid"; then
       exit 0
     fi
     echo "could not withdraw Funnel after runner exit; retrying" >&2

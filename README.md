@@ -184,7 +184,7 @@ Create `.env.runner` in the repository root with the production Neon
 deployed app.
 
 ```bash
-brew install tailscale                # one-time
+brew install tailscale python         # one-time
 ./scripts/start-runner.sh             # tailscaled + funnel + runner under caffeinate
 ./scripts/start-runner.sh stop        # tear everything down
 # Render env: MEDIA_RUNNER_URL=https://<machine>.<tailnet>.ts.net
