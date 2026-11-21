@@ -537,6 +537,65 @@ describe('POST /pump/stop', () => {
 });
 
 describe('reconcileOnce', () => {
+  it('finishes the old terminal write before starting a replacement pump', async () => {
+    let release!: () => void;
+    let reads = 0;
+    const writes: string[] = [];
+    const runner = createRunnerServer({
+      manager: fakeManager(), resolveVideo: resolveVideoMock,
+      sql: (strings) => {
+        const text = strings.join('?');
+        if (text.includes('SELECT')) { reads += 1; return Promise.resolve(STREAM_ROW()); }
+        if (text.includes("SET pump_status = 'stopped'")) {
+          return new Promise((resolve) => { release = () => { writes.push('stopped'); resolve([]); }; });
+        }
+        writes.push('running');
+        return Promise.resolve([]);
+      },
+    });
+    startMock.mockResolvedValue({ ok: true });
+    runner.registry.set('7', { workspaceId: 'ws-1', dbRunning: true });
+    const port = await listen(runner);
+    const sweep = runner.reconcileOnce();
+    await vi.waitFor(() => expect(release).toBeDefined());
+    const starting = client(port, '/pump/start', { token: TOKEN, body: { workspaceId: 'ws-1', streamId: '7' } });
+    try {
+      await vi.waitFor(() => expect(reads).toBe(1));
+      expect(startMock).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await sweep;
+      expect((await starting).status).toBe(200);
+      await runner.close();
+    }
+    expect(writes).toEqual(['stopped', 'running']);
+    expect(runner.registry.has('7')).toBe(true);
+  });
+
+  it.each([false, true])('does not write running for a cancelled start (replacement: %s)', async (replacement) => {
+    let release!: (value: PumpStartResult) => void;
+    startMock.mockImplementationOnce(() => new Promise<PumpStartResult>((resolve) => { release = resolve; }));
+    startMock.mockResolvedValue({ ok: true });
+    const { runner, queries } = makeServer((text) => text.includes('SELECT') ? STREAM_ROW() : []);
+    const port = await listen(runner);
+    const starting = client(port, '/pump/start', { token: TOKEN, body: { workspaceId: 'ws-1', streamId: '7' } });
+    try {
+      await vi.waitFor(() => expect(release).toBeDefined());
+      expect((await client(port, '/pump/stop', { token: TOKEN, body: { workspaceId: 'ws-1' } })).status).toBe(200);
+      if (replacement) {
+        expect((await client(port, '/pump/start', { token: TOKEN, body: { workspaceId: 'ws-1', streamId: '7' } })).status).toBe(200);
+      }
+      release({ ok: true });
+      expect((await starting).status).toBe(409);
+      expect(queries.filter((query) => query.text.includes("SET pump_status = 'running'"))).toHaveLength(replacement ? 1 : 0);
+      expect(stopMock).toHaveBeenCalledTimes(1);
+    } finally {
+      release?.({ ok: true });
+      await starting;
+      await runner.close();
+    }
+  });
+
   it('continues reconciling other pumps when one terminal write keeps failing', async () => {
     const { runner, queries } = makeServer((text, values) => {
       if (text.includes('UPDATE') && values.includes('7')) throw new Error('pump 7 write failed');

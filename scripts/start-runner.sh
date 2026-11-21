@@ -115,8 +115,32 @@ fi
 # A background Funnel rule survives a previous invocation. Withdraw it on
 # every failed start so an unrelated replacement listener is never published.
 withdraw_funnel() {
+  config="$("$TS_BIN" --socket="$TS_SOCK" funnel status --json)" || return 1
+  has_handler="$(printf '%s' "$config" | node -e '
+    try {
+      const config = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+      if (config !== null && (typeof config !== "object" || Array.isArray(config))) process.exit(1);
+      const present = Object.entries(config?.Web || {}).some(([host, web]) =>
+        host.endsWith(":443") && web?.Handlers?.["/"]);
+      process.stdout.write(present ? "yes" : "no");
+    } catch { process.exit(1); }
+  ')" || return 1
+  [ "$has_handler" = yes ] || return 0
   "$TS_BIN" --socket="$TS_SOCK" funnel --https=443 off >/dev/null 2>&1
 }
+
+# Detached supervisor: withdraw publication if the verified server exits.
+# A newer runner PID owns its own publication, so an old supervisor leaves it.
+if [ "${1:-}" = watch ]; then
+  watched_pid="${2:?missing runner PID}"
+  while [ "$(runner_pid)" = "$watched_pid" ] && is_runner "$watched_pid"; do
+    sleep 1
+  done
+  if [ "$(runner_pid)" = "$watched_pid" ]; then
+    withdraw_funnel || { echo "could not withdraw Funnel after runner exit" >&2; exit 1; }
+  fi
+  exit 0
+fi
 trap 'withdraw_funnel || true' 0
 
 if ! command -v lsof >/dev/null; then
@@ -196,6 +220,9 @@ if [ -z "$FUNNEL_HOST" ]; then
   exit 1
 fi
 echo "exposing https://$FUNNEL_HOST …"
+# Install the supervisor before publication, including when reusing a runner.
+TS_DIR="$TS_DIR" nohup sh "$PWD/scripts/start-runner.sh" watch "$RUNNER_PID" \
+  >>"$TS_DIR/runner.log" 2>&1 &
 "$TS_BIN" --socket="$TS_SOCK" funnel --bg "$RUNNER_PORT" >/dev/null
 "$TS_BIN" --socket="$TS_SOCK" funnel status
 
@@ -212,6 +239,10 @@ for _ in 1 2 3; do
 done
 if [ -z "$published" ]; then
   echo "the funnel is configured but not answering yet — TLS/DERP can take a minute after tailscaled restarts" >&2
+  exit 1
+fi
+if ! is_up "$RUNNER_PID"; then
+  echo "runner lost readiness during publication" >&2
   exit 1
 fi
 trap - 0
