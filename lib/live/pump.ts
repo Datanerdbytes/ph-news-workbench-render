@@ -386,6 +386,14 @@ type StderrSide = 'source' | 'publisher';
 const SOURCE_EVIDENCE_CHARS = 600;
 const PUBLISHER_EVIDENCE_CHARS = 300;
 
+/**
+ * ffmpeg's version banner, printed to stderr by every process it starts. It is
+ * never the reason a pump failed, and on a short tail it can be most of the
+ * quoted evidence — so it is dropped before anything is recorded.
+ */
+const FFMPEG_BANNER_LINE =
+  /^\s*(ffmpeg version|built with|configuration:|lib(?:av|sw)(?:util|codec|format|device|filter|scale|resample)\s|--enable-)/i;
+
 /** How much source stderr a retry log line carries. */
 const RETRY_LOG_STDERR_CHARS = 200;
 
@@ -1397,25 +1405,45 @@ export class PumpManager {
    * its own reason (a rejected stream key, an ingest drop), the source side is
    * the one that becomes a symptom — it prints "Broken pipe" the moment the
    * fifo loses its reader and settles the attempt before the publisher's grace
-   * timer fires. So a publisher that exited non-zero is ALWAYS quoted, falling
-   * back to its exit code when it wrote nothing at all. Otherwise that failure
-   * would be recorded as a bare pipe error with no cause.
+   * timer fires. So a publisher that exited NON-ZERO is always quoted, falling
+   * back to its exit code when it wrote nothing at all. A publisher that exited
+   * 0 is not quoted at all: its stderr is only the version banner.
    */
   private failureEvidence(proc: PumpProc): string {
-    const source = proc.tail.trim().slice(-SOURCE_EVIDENCE_CHARS) || 'none';
-    const stderr = proc.publisherTail.trim().slice(-PUBLISHER_EVIDENCE_CHARS);
-    // A publisher that exited non-zero is always named, falling back to its
-    // exit code when it wrote nothing. Dropping it was the bug: with the
-    // publisher gone the source can only report the closed pipe.
-    const publisher =
-      stderr ||
-      (proc.publisherExitCode !== null && proc.publisherExitCode !== 0
-        ? `exited with code ${proc.publisherExitCode}`
-        : '');
+    const source = this.quoteStderr(proc.tail, SOURCE_EVIDENCE_CHARS) || 'none';
+    // Only a publisher that FAILED is quoted. A publisher that exited 0 wrote
+    // nothing but its banner, and quoting that would bury the source's error.
+    const publisherFailed =
+      proc.publisherExitCode !== null && proc.publisherExitCode !== 0;
+    const stderr = publisherFailed
+      ? this.quoteStderr(proc.publisherTail, PUBLISHER_EVIDENCE_CHARS)
+      : '';
+    // A failed publisher that said nothing still gets named: with the reader
+    // gone the source can only report the closed pipe.
+    const publisher = publisherFailed
+      ? stderr || `exited with code ${proc.publisherExitCode}`
+      : '';
     if (!publisher) return `Source stderr: ${source}`;
     // `Publisher stderr:` only when it really is stderr — an exit code is not.
     const label = stderr ? 'Publisher stderr' : 'Publisher';
     return `Source stderr: ${source} | ${label}: ${publisher}`;
+  }
+
+  /**
+   * The last `max` characters of a stderr tail, with the version banner dropped
+   * and the leading partial line removed, so recorded errors start on a whole
+   * line instead of mid-word.
+   */
+  private quoteStderr(tail: string, max: number): string {
+    const clean = tail
+      .split('\n')
+      .filter((line) => line.trim() && !FFMPEG_BANNER_LINE.test(line))
+      .join('\n')
+      .trim();
+    if (clean.length <= max) return clean;
+    const sliced = clean.slice(-max);
+    const firstBreak = sliced.indexOf('\n');
+    return firstBreak === -1 ? sliced : sliced.slice(firstBreak + 1);
   }
 
   private settleAttempt(proc: PumpProc, code: number | null): void {
@@ -1473,7 +1501,7 @@ export class PumpManager {
     // A retry with no visible reason is what made the original outage so hard
     // to read from logs: quote the source side on every attempt, not just the
     // final failure.
-    const stderr = proc.tail.trim().slice(-RETRY_LOG_STDERR_CHARS);
+    const stderr = this.quoteStderr(proc.tail, RETRY_LOG_STDERR_CHARS);
     this.log(proc, 'retry', {
       delayMs: delay,
       retry: proc.retries,

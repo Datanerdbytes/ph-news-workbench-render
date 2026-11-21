@@ -870,6 +870,81 @@ describe('PumpManager publisher leg', () => {
     expect(status.error).toContain('Publisher: exited with code 1');
   });
 
+  it('does not quote a publisher that exited 0 and printed only its banner', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
+    await startPump({ id: 47, source: LIVE_HLS, dest: DEST });
+
+    for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt += 1) {
+      const publisher = ffmpegKids[attempt * 2];
+      const source = ffmpegKids[attempt * 2 + 1];
+      // Every ffmpeg writes this to stderr on startup; it is never the reason.
+      stderrLine(
+        publisher,
+        'ffmpeg version 8.0.1 Copyright (c) 2000-2025 the FFmpeg developers\n' +
+          '  libavutil      61.  1.102 / 61.  1.102\n'
+      );
+      closeChild(publisher, 0);
+      stderrLine(source, '[https @ 0x1] HTTP error 404 Not Found\n');
+      closeChild(source, 1);
+      await vi.advanceTimersByTimeAsync(
+        attempt < RETRY_BACKOFF_MS.length ? RETRY_BACKOFF_MS[attempt] : 60_000
+      );
+      await flushChildEvents();
+    }
+
+    const status = manager.status(47);
+    expect(status.error).toContain('404 Not Found');
+    expect(status.error).not.toContain('Publisher');
+    expect(status.error).not.toContain('ffmpeg version');
+  });
+
+  it('strips the ffmpeg version banner from quoted stderr', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
+    await startPump({ id: 48, source: LIVE_HLS, dest: DEST });
+
+    for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt += 1) {
+      const publisher = ffmpegKids[attempt * 2];
+      const source = ffmpegKids[attempt * 2 + 1];
+      closeChild(publisher, 0);
+      // The real shape: the banner arrives first, the error last, and on a
+      // short tail the banner would otherwise fill most of the quote.
+      stderrLine(
+        source,
+        'ffmpeg version 8.0.1 Copyright (c) 2000-2025 the FFmpeg developers\n' +
+          '  built with Apple clang version 17.0.0\n' +
+          '  configuration: --prefix=/opt/homebrew\n' +
+          '  libavutil      61.  1.102 / 61.  1.102\n' +
+          '  libswscale     10.  1.102 / 10.  1.102\n' +
+          '  libswresample   7.  1.102 /  7.  1.102\n' +
+          '  --enable-videotoolbox --enable-neon\n' +
+          '[https @ 0x1] HTTP error 404 Not Found\n'
+      );
+      closeChild(source, 1);
+      await vi.advanceTimersByTimeAsync(
+        attempt < RETRY_BACKOFF_MS.length ? RETRY_BACKOFF_MS[attempt] : 60_000
+      );
+      await flushChildEvents();
+    }
+
+    const status = manager.status(48);
+    expect(status.error).toContain('404 Not Found');
+    for (const banner of [
+      'ffmpeg version',
+      'built with',
+      'configuration:',
+      'libavutil',
+      'libswscale',
+      'libswresample',
+      '--enable-',
+    ]) {
+      expect(status.error).not.toContain(banner);
+    }
+  });
+
   it('does not quote an earlier attempt publisher error in a later failure', async () => {
     stubGateOn();
     vi.useFakeTimers();
