@@ -64,6 +64,7 @@ import {
   isFacebookIngestUrl,
   REDACTED_KEY,
   redactStreamKey,
+  PUBLISHER_SETTLE_GRACE_MS,
   RETRY_BACKOFF_MS,
   STOP_GRACE_MS,
   type VideoStreams,
@@ -731,6 +732,11 @@ describe('PumpManager publisher leg', () => {
 
     closeChild(ffmpegKids[0], 1);
 
+    // The publisher's death waits one grace beat for the source side to say
+    // why, so nothing is killed yet.
+    expect(processKillMock).not.toHaveBeenCalledWith(ffmpegKids[1], 'SIGKILL');
+    await vi.advanceTimersByTimeAsync(PUBLISHER_SETTLE_GRACE_MS);
+
     // The dead publisher settles the attempt; the sandboxed source is killed.
     expect(processKillMock).toHaveBeenCalledWith(ffmpegKids[1], 'SIGKILL');
     expect(processKillMock).toHaveBeenCalledWith(ffmpegKids[0], 'SIGKILL');
@@ -769,6 +775,64 @@ describe('PumpManager publisher leg', () => {
     const status = manager.status(42);
     expect(status.running).toBe(false);
     expect(status.error).toBeNull();
+  });
+
+  it('a dead publisher quotes the source side that explains it, not just the exit code', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
+    await startPump({ id: 43, source: LIVE_HLS, dest: DEST });
+
+    // Every attempt: the publisher dies first because the flv fifo stays
+    // empty, then the source reports the actual cause a beat later. This is
+    // the Fly.io failure shape — a sandbox network denial surfaced only as
+    // "the RTMPS publisher exited with code 1".
+    for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt += 1) {
+      const publisher = ffmpegKids[attempt * 2];
+      const source = ffmpegKids[attempt * 2 + 1];
+      closeChild(publisher, 1);
+      stderrLine(
+        source,
+        'https://manifest.googlevideo.com/api/manifest: Server returned 403 Forbidden (access denied)\n'
+      );
+      closeChild(source, 1);
+      await vi.advanceTimersByTimeAsync(
+        attempt < RETRY_BACKOFF_MS.length ? RETRY_BACKOFF_MS[attempt] : 60_000
+      );
+      await flushChildEvents();
+    }
+
+    const status = manager.status(43);
+    expect(status.error).toContain('403 Forbidden');
+    expect(status.error).toContain('Source stderr:');
+    // The source explained the failure, so the publisher's exit code — a
+    // symptom — is not even needed.
+    expect(status.error).not.toContain('Publisher stderr:');
+  });
+
+  it('labels the publisher tail when the source side dies without a word', async () => {
+    stubGateOn();
+    vi.useFakeTimers();
+    const { ffmpegKids } = useSpawns({ probe: PROBE_COPY });
+    await startPump({ id: 44, source: LIVE_HLS, dest: DEST });
+
+    for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt += 1) {
+      const publisher = ffmpegKids[attempt * 2];
+      const source = ffmpegKids[attempt * 2 + 1];
+      stderrLine(publisher, 'rtmp://live-api-s.facebook.com:443: I/O error\n');
+      closeChild(publisher, 1);
+      await vi.advanceTimersByTimeAsync(PUBLISHER_SETTLE_GRACE_MS);
+      closeChild(source, 1);
+      await vi.advanceTimersByTimeAsync(
+        attempt < RETRY_BACKOFF_MS.length ? RETRY_BACKOFF_MS[attempt] : 60_000
+      );
+      await flushChildEvents();
+    }
+
+    const status = manager.status(44);
+    expect(status.error).toContain('Source stderr: none');
+    expect(status.error).toContain('Publisher stderr:');
+    expect(status.error).toContain('I/O error');
   });
 });
 

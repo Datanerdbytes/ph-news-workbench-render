@@ -371,6 +371,32 @@ const MKFIFO_BIN = 'mkfifo';
 /** Upper bound for the stderr tail kept per pump — recorded errors quote it. */
 const STDERR_TAIL_CHARS = 8_000;
 
+/**
+ * Which end of the chain a stderr line came from. The source side is the
+ * sandboxed ffmpeg plus its yt-dlp feeders; the publisher is the unsandboxed
+ * RTMPS leg. They are kept in separate tails because the publisher normally
+ * dies as a consequence of the source side, and mixing them buried the cause.
+ */
+type StderrSide = 'source' | 'publisher';
+
+/**
+ * How much of each tail a recorded error quotes. The source gets the larger
+ * share: when both sides speak, the source is the explanation.
+ */
+const SOURCE_EVIDENCE_CHARS = 600;
+const PUBLISHER_EVIDENCE_CHARS = 300;
+
+/** How much source stderr a retry log line carries. */
+const RETRY_LOG_STDERR_CHARS = 200;
+
+/**
+ * How long the publisher's death waits for the source side to report its own
+ * failure. Long enough for ffmpeg's dying words to arrive (it prints them as
+ * it exits), short enough that a genuine publisher-only failure still retries
+ * promptly.
+ */
+export const PUBLISHER_SETTLE_GRACE_MS = 750;
+
 /** Transient failures are retried with this backoff (2s, 4s, 8s), then given up. */
 export const RETRY_BACKOFF_MS = [2_000, 4_000, 8_000] as const;
 
@@ -458,7 +484,22 @@ type PumpProc = {
   attemptSettled: boolean;
   fatalError: string | null;
   lastError: string | null;
+  /**
+   * Stderr of the SOURCE side — the sandboxed ffmpeg and, in staged mode, its
+   * yt-dlp feeders. Kept apart from the publisher's because the publisher
+   * usually dies as a CONSEQUENCE of the source side (it reads the flv fifo,
+   * so an empty fifo kills it within seconds), and its noise used to crowd
+   * the real cause out of the quoted tail.
+   */
   tail: string;
+  /** Stderr of the unsandboxed RTMPS publisher. Quoted second, never first. */
+  publisherTail: string;
+  /**
+   * Pending grace timer after the publisher died: the source side usually
+   * reports the real reason a beat later. Cleared on teardown so it can never
+   * settle the NEXT attempt.
+   */
+  publisherSettleTimer: ReturnType<typeof setTimeout> | null;
   retryTimer: ReturnType<typeof setTimeout> | null;
   killTimer: ReturnType<typeof setTimeout> | null;
 };
@@ -548,6 +589,8 @@ export class PumpManager {
       fatalError: null,
       lastError: null,
       tail: '',
+      publisherTail: '',
+      publisherSettleTimer: null,
       retryTimer: null,
       killTimer: null,
     };
@@ -610,6 +653,7 @@ export class PumpManager {
     // setup checks it between steps and aborts instead of spawning orphaned
     // children (this also closes the direct path's probe-window race).
     proc.stopping = true;
+    this.clearPublisherSettleTimer(proc);
     if (proc.retryTimer) {
       clearTimeout(proc.retryTimer);
       proc.retryTimer = null;
@@ -662,6 +706,7 @@ export class PumpManager {
     for (const proc of this.procs.values()) {
       if (proc.retryTimer) clearTimeout(proc.retryTimer);
       if (proc.killTimer) clearTimeout(proc.killTimer);
+      this.clearPublisherSettleTimer(proc);
     }
     this.procs.clear();
   }
@@ -670,6 +715,7 @@ export class PumpManager {
 
   private async spawnAttempt(proc: PumpProc): Promise<void> {
     proc.attempts += 1;
+    this.clearPublisherSettleTimer(proc);
     proc.attemptSettled = false;
     if (proc.attempts === 1) {
       this.log(proc, 'started', { transcode: proc.params.needsTranscode });
@@ -770,7 +816,7 @@ export class PumpManager {
     child.stdout?.on('data', () => {});
     child.stderr?.on('data', (chunk: Buffer) => {
       const text = redactStreamKey(chunk.toString(), proc.params.dest);
-      proc.tail = (proc.tail + text).slice(-STDERR_TAIL_CHARS);
+      this.appendStderr(proc, 'source', text);
       if (proc.attemptSettled || proc.stopping) return;
       const fatal = FATAL_STDERR_SIGNATURES.find((signature) =>
         text.toLowerCase().includes(signature.toLowerCase())
@@ -786,7 +832,7 @@ export class PumpManager {
       // close handler owns the terminal decision. A mid-run error on a live
       // process is only recorded — its own close follows.
       const text = redactStreamKey(error.message, proc.params.dest);
-      proc.tail = (proc.tail + text).slice(-STDERR_TAIL_CHARS);
+      this.appendStderr(proc, 'source', text);
       if (!child.pid) {
         proc.lastError = `could not start ffmpeg: ${text}`;
       }
@@ -804,16 +850,28 @@ export class PumpManager {
     publisher.stdout?.on('data', () => {});
     publisher.stderr?.on('data', (chunk: Buffer) => {
       const text = redactStreamKey(chunk.toString(), proc.params.dest);
-      proc.tail = (proc.tail + text).slice(-STDERR_TAIL_CHARS);
+      this.appendStderr(proc, 'publisher', text);
     });
     publisher.once('close', (code: number | null) => {
       if (proc.attemptSettled || proc.stopping) return;
       if (code === 0) return;
-      this.failAttempt(
-        proc,
-        `the RTMPS publisher exited with code ${code}`,
-        code ?? 1
-      );
+      // The publisher reads the flv fifo, so it is the FIRST to die when the
+      // source produces nothing: its exit code says nothing about why. Give
+      // the source side a beat to report its own failure (a sandbox denial, an
+      // HTTP 403, a dead manifest) so that message is what gets recorded
+      // instead of the symptom. If the source settles first, this no-ops.
+      if (proc.publisherSettleTimer) clearTimeout(proc.publisherSettleTimer);
+      proc.publisherSettleTimer = setTimeout(() => {
+        proc.publisherSettleTimer = null;
+        if (proc.attemptSettled || proc.stopping) return;
+        this.failAttempt(
+          proc,
+          `the RTMPS publisher exited with code ${code}`,
+          code ?? 1,
+          'publisher'
+        );
+      }, PUBLISHER_SETTLE_GRACE_MS);
+      proc.publisherSettleTimer.unref?.();
     });
     publisher.once('error', (error: Error) => {
       proc.lastError = `could not start the RTMPS publisher: ${redactStreamKey(error.message, proc.params.dest)}`;
@@ -849,6 +907,7 @@ export class PumpManager {
    */
   private async spawnStagedAttempt(proc: PumpProc): Promise<void> {
     proc.attempts += 1;
+    this.clearPublisherSettleTimer(proc);
     proc.attemptSettled = false;
     if (proc.attempts === 1) {
       this.log(proc, 'started', { mode: 'staged' });
@@ -1072,8 +1131,8 @@ export class PumpManager {
   }
 
   /**
-   * Feeder lifecycle: stderr joins the redacted tail and the watchdog (a
-   * bot-check/sign-in error can never succeed on retry → fatal, no retry);
+   * Feeder lifecycle: stderr joins the redacted source tail and the watchdog
+   * (a bot-check/sign-in error can never succeed on retry → fatal, no retry);
    * a non-zero exit is treated like a crashed ffmpeg and triggers the
    * existing retry path. An exit 0 is normal — the source finished (a VOD
    * broadcasts once through) and ffmpeg EOFs on its own.
@@ -1085,7 +1144,7 @@ export class PumpManager {
   ): void {
     child.stderr?.on('data', (chunk: Buffer) => {
       const text = redactStreamKey(chunk.toString(), proc.params.dest);
-      proc.tail = (proc.tail + text).slice(-STDERR_TAIL_CHARS);
+      this.appendStderr(proc, 'source', text);
       if (proc.attemptSettled || proc.stopping) return;
       const fatal = this.feederFatalSignature(proc.tail);
       if (fatal) {
@@ -1100,7 +1159,7 @@ export class PumpManager {
       // close follows.
       if (!child.pid) return;
       const text = redactStreamKey(error.message, proc.params.dest);
-      proc.tail = (proc.tail + text).slice(-STDERR_TAIL_CHARS);
+      this.appendStderr(proc, 'source', text);
     });
     child.once('close', (code: number | null) => {
       // Never-spawned candidates (pid undefined) are the handshake's business.
@@ -1134,14 +1193,25 @@ export class PumpManager {
   }
 
   /**
-   * A feeder died mid-stream: kill the rest of the attempt, then settle it
-   * through the same state machine as a crashed ffmpeg (retry with backoff,
-   * budget capped at RETRY_BACKOFF_MS.length).
+   * A child of the attempt died mid-stream (a feeder, or the publisher): kill
+   * the rest of the attempt, then settle it through the same state machine as
+   * a crashed ffmpeg (retry with backoff, budget capped at
+   * RETRY_BACKOFF_MS.length). `side` decides which stderr tail the message
+   * joins and which log event names it, so a publisher death never looks like
+   * a source failure.
    */
-  private failAttempt(proc: PumpProc, message: string, code: number): void {
+  private failAttempt(
+    proc: PumpProc,
+    message: string,
+    code: number,
+    side: StderrSide = 'source'
+  ): void {
     if (!this.markAttemptSettled(proc)) return;
-    this.log(proc, 'feeder_failed', { error: message, code });
-    proc.tail = (proc.tail + message).slice(-STDERR_TAIL_CHARS);
+    this.log(proc, side === 'publisher' ? 'publisher_failed' : 'feeder_failed', {
+      error: message,
+      code,
+    });
+    this.appendStderr(proc, side, `\n${message}\n`);
     proc.running = false;
     if (proc.killTimer) {
       clearTimeout(proc.killTimer);
@@ -1202,6 +1272,7 @@ export class PumpManager {
   private teardownStagedAttempt(proc: PumpProc): void {
     proc.starting = false;
     proc.running = false;
+    this.clearPublisherSettleTimer(proc);
     const pending = proc.pendingOpens;
     proc.pendingOpens = [];
     // Every fifo a pending write-end open could be blocking on: the flv
@@ -1273,6 +1344,41 @@ export class PumpManager {
     }
   }
 
+  /**
+   * Appends redacted stderr to the tail for `side`. Every writer goes through
+   * here so the two tails can never be mixed by accident.
+   */
+  private appendStderr(proc: PumpProc, side: StderrSide, text: string): void {
+    if (side === 'publisher') {
+      proc.publisherTail = (proc.publisherTail + text).slice(-STDERR_TAIL_CHARS);
+      return;
+    }
+    proc.tail = (proc.tail + text).slice(-STDERR_TAIL_CHARS);
+  }
+
+  /** Drops a pending publisher grace timer (teardown, stop, new attempt). */
+  private clearPublisherSettleTimer(proc: PumpProc): void {
+    if (!proc.publisherSettleTimer) return;
+    clearTimeout(proc.publisherSettleTimer);
+    proc.publisherSettleTimer = null;
+  }
+
+  /**
+   * The stderr evidence quoted by a recorded failure. The source side leads
+   * because it explains the failure: the publisher reads the flv fifo, so when
+   * the sandboxed ffmpeg produces nothing the publisher exits first and its
+   * "exited with code 1" is a symptom, not the cause. The publisher tail is
+   * appended only when it says something, and it is labelled so the two can't
+   * be confused again.
+   */
+  private failureEvidence(proc: PumpProc): string {
+    const source = proc.tail.trim().slice(-SOURCE_EVIDENCE_CHARS) || 'none';
+    const publisher = proc.publisherTail.trim().slice(-PUBLISHER_EVIDENCE_CHARS);
+    return publisher
+      ? `Source stderr: ${source} | Publisher stderr: ${publisher}`
+      : `Source stderr: ${source}`;
+  }
+
   private settleAttempt(proc: PumpProc, code: number | null): void {
     if (proc.stopping) {
       this.log(proc, 'stopped', { code, reason: 'user_stop' });
@@ -1290,9 +1396,7 @@ export class PumpManager {
     }
     if (proc.retries >= RETRY_BACKOFF_MS.length) {
       proc.lastError = redactStreamKey(
-        `ffmpeg exited with code ${code} after ${RETRY_BACKOFF_MS.length} retries. Last stderr: ${
-          proc.tail.trim().slice(-400) || 'none'
-        }`,
+        `ffmpeg exited with code ${code} after ${RETRY_BACKOFF_MS.length} retries. ${this.failureEvidence(proc)}`,
         proc.params.dest
       );
       this.log(proc, 'failed', {
@@ -1327,7 +1431,15 @@ export class PumpManager {
       });
     }, delay);
     proc.retryTimer.unref?.();
-    this.log(proc, 'retry', { delayMs: delay, retry: proc.retries });
+    // A retry with no visible reason is what made the original outage so hard
+    // to read from logs: quote the source side on every attempt, not just the
+    // final failure.
+    const stderr = proc.tail.trim().slice(-RETRY_LOG_STDERR_CHARS);
+    this.log(proc, 'retry', {
+      delayMs: delay,
+      retry: proc.retries,
+      ...(stderr ? { stderr } : {}),
+    });
   }
 
   private async probeSource(
