@@ -88,9 +88,16 @@ every production deploy a manual step.
 | Name | Scope | Used by |
 | --- | --- | --- |
 | `CRON_SECRET` | repository | `keep-alive.yml` — the hourly feed ingest |
-| `E2E_OWNER_EMAIL`, `E2E_OWNER_PASSWORD`, `E2E_BETTER_AUTH_SECRET`, `E2E_SIGNUP_INVITE_CODE` | the protected `e2e` environment | the Playwright job in `ci.yml` |
-| `NEON_API_KEY` | the protected `e2e` environment | creates and deletes the ephemeral `ci-e2e-run-*` branch the e2e job runs against |
-| `E2E_DATABASE_URL` (optional) | the protected `e2e` environment | when set and healthy, the e2e job reuses this database instead of provisioning a fresh branch |
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:4c69199779f2544879fd2c41e35fb33314e6b0c72917dd370e4941e880111ddf -->
+
+| `E2E_OWNER_EMAIL`, `E2E_OWNER_PASSWORD`, `E2E_BETTER_AUTH_SECRET`, `E2E_SIGNUP_INVITE_CODE` | `e2e` | the Playwright job in `trusted-e2e.yml` |
+| `NEON_API_KEY` | `e2e-db-management` only | creates and deletes temporary Neon branches |
+| `E2E_DATABASE_URL` (optional) | `e2e-db-management` | uses a healthy test database instead of creating a branch |
+| `E2E_DB_HANDOFF_KEY` | `e2e-db-management` and `e2e` | encrypts the database URL between jobs |
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ## Required Render configuration
 
@@ -176,35 +183,44 @@ queued deploy is normal and not a failure.
 branch. The optional *commit* input deploys a specific commit sha instead of
 the branch head — useful for redeploying the commit that is already live.
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:b00f335f20815727cefbde4ea8e2c90bf0f435eb0d2b8051fc16f08ed3b3f616 -->
+
 ### The e2e database
 
-The e2e job runs against an ephemeral Neon branch: unless the optional
-`E2E_DATABASE_URL` override is set and healthy, the job creates
-`ci-e2e-run-<run id>` from the production branch, wipes the schema production
-copied along, seeds it fresh (see `scripts/prepare-e2e-db.mjs`), and deletes
-the branch when the job finishes — success or failure. Neon's free plan
-deletes non-primary branches seven days after creation, but a branch that
-lives for the duration of one job never gets that old, so nothing expires
-under CI and there is nothing to renew by hand.
+CI builds and scans the production image. For same-repository PRs to `main`,
+the base workflow `trusted-e2e.yml` runs Playwright against the image for the
+exact PR merge commit. The required E2E job in `ci.yml` waits for that result.
+Keep the existing E2E check required.
 
-This needs one secret in the protected `e2e` environment: `NEON_API_KEY`,
-created in the Neon console under Account → API keys. It authorizes the
-branch create/delete calls against project `aged-rain-00317126`. If the
-provisioning step says the key is missing, add it and re-run the check.
+#### One-time rollout
 
-Two things worth knowing:
+1. Create `e2e-db-management` and restrict deployment to the **branch** `main`
+   only. Set `NEON_PROJECT_ID` and `NEON_PARENT_BRANCH_ID` as environment
+   variables for an isolated Neon test project, with a parent the test runner
+   can clone. Use a Neon key for that project. PR code receives the resulting
+   database login, so the project and any optional URL must contain only
+   disposable test data and must not share credentials with production.
+2. Put `NEON_API_KEY` and the optional `E2E_DATABASE_URL` in
+   `e2e-db-management` and remove them from `e2e` and other scopes accessible
+   from PR workflows. Add the **same** fresh `E2E_DB_HANDOFF_KEY` to both
+   environments; generate it with `openssl rand -hex 32`. Keep the Playwright
+   reviewer on `e2e`. Cleanup must be able to run without another approval,
+   so protect `e2e-db-management` by branch rather than requiring a reviewer
+   on it.
+3. Land `trusted-e2e.yml` and its scripts on `main` through a maintainer
+   bootstrap change before switching the required job in `ci.yml` to wait for
+   it. The PR copy cannot start a trusted run. Drain legacy database jobs
+   before the switch, then update the PR to trigger both workflows. For a
+   retry after cleanup, rerun **all jobs** in Trusted E2E so provisioning runs
+   again, then rerun the required CI check if it already completed.
 
-- `E2E_DATABASE_URL` is an optional override. When it points at a living
-  branch, the job reuses that database instead of provisioning — useful to
-  pin the suite to a specific branch. When it is stale, the job notices (its
-  `SELECT 1` probe fails) and provisions a fresh branch anyway, so leaving a
-  stale secret in place is harmless; deleting it entirely is also fine.
-- Do **not** reset `neondb_owner`'s password to fix an auth failure. It is a
-  project-wide credential and production's Render connection uses the same
-  one; resetting it breaks the deployed app. Connection strings the job
-  exports carry it, and they are masked in the job log.
+Provisioning reuses a healthy override; otherwise it creates a run-specific
+branch, resets its schema, and passes only an encrypted connection string to
+the Playwright job. The base checkout handles teardown even if provisioning
+or testing fails, provided creation returned a branch ID. If a runner is
+lost before cleanup, the next provisioner sweeps the orphan. The workflow
+queues runs so the sweep cannot delete an active run's branch.
 
-A leftover `ci-e2e-run-*` branch — a runner crashed mid-job, so the teardown
-step never ran — is swept automatically before the next run provisions its
-own branch. The legacy `ci-e2e` branch is never touched by the automation and
-can be deleted by hand once nothing points at it.
+<!-- /coderabbit-ai-generated:v1 -->

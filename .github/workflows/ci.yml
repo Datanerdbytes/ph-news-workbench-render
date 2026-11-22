@@ -13,7 +13,7 @@ name: CI
 #
 # Job layout: static analysis and the unit suite run in parallel because both
 # are cheap; the Docker build waits for both so a broken PR never burns build
-# minutes; the e2e job waits for the image because it runs against it.
+# minutes; the e2e gate waits for the trusted workflow's Playwright result.
 on:
   pull_request:
   workflow_call:
@@ -31,12 +31,6 @@ concurrency:
 
 permissions:
   contents: read
-
-env:
-  # The container publishes 7860 (see Dockerfile → EXPOSE). The Playwright
-  # suite and the container's BETTER_AUTH_URL must agree on this origin or
-  # sign-in fails with INVALID_ORIGIN.
-  APP_PORT: 7860
 
 jobs:
   static:
@@ -261,176 +255,38 @@ jobs:
   e2e:
     name: E2E against the production container
     needs: docker
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    env:
-      # The tag the docker job pushed for the commit this run verifies.
-      IMAGE_SHA: ${{ inputs.sha || github.sha }}
-    # The suite runs against an ephemeral Neon branch — a throwaway copy of
-    # the production branch, created from it by the provisioning step below
-    # (ci-e2e-run-<run id>), seeded fresh, and deleted by the last step. Neon's
-    # free plan deletes non-primary branches seven days after creation, so a
-    # persistent branch would keep expiring under CI; a branch created (and
-    # deleted) per run never gets the chance. The NEON_API_KEY authorizes
-    # those API calls.
-    #
-    # The E2E_* secrets and NEON_API_KEY live in the protected `e2e`
-    # environment instead of at repository scope: a pull request can rewrite
-    # this workflow, so repository secrets were readable by any pull request's
-    # own code. The environment's required reviewer has to approve every
-    # deployment before the secrets are released.
-    #
-    # Pull requests only. A push to main would sit waiting for that approval,
-    # and the pull request run already tested the exact merge commit that
-    # lands, so main loses no coverage.
-    #
-    # Same-repository pull requests only. A fork gets neither the E2E secrets
-    # nor an image in GHCR — the docker job builds a fork's image locally
-    # instead of publishing it — so the job could only fail there. A job that
-    # is skipped by its condition reports "Success", so the required check
-    # still passes for a fork; the maintainer runs the suite locally instead.
     if: >-
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository
-    environment: e2e
-    # One Neon branch, one suite at a time: two runs seeding and cleaning the
-    # same database at once would delete each other's fixtures. `queue: max`
-    # keeps several pull requests waiting instead of cancelling the pending
-    # one when a third arrives.
-    concurrency:
-      group: ${{ github.workflow }}-e2e-database
-      cancel-in-progress: false
-      queue: max
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
-      contents: read
-      # The image under test was pushed to GHCR by the docker job. The
-      # workflow-level permissions set every other scope to none, so this job
-      # would be denied the pull without asking for packages here.
-      packages: read
+      actions: read
     steps:
-      - uses: actions/checkout@v4
-        with:
-          # The commit this run verifies: the triggering commit by default,
-          # the resolved commit when deploy.yml calls this workflow.
-          ref: ${{ inputs.sha || github.sha }}
-          # The suite and the database script are the pull request's own
-          # code, so the checkout must not leave its token in .git/config.
-          persist-credentials: false
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
+      - name: Verify the trusted E2E result for this merge commit
         env:
-          HUSKY: '0'
-
-      - name: Cache the Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
-
-      # The app talks to Neon over its HTTP SQL API, so a stock postgres
-      # service container cannot back it — the suite's database must be a
-      # Neon branch. The override secret is used when it answers, otherwise
-      # this creates ci-e2e-run-<run id> from production, wipes the schema
-      # production copied along, and exports E2E_DATABASE_URL for the rest of
-      # the job. scripts/provision-e2e-db.mjs documents the trade-offs.
-      - name: Provision the E2E database
-        run: node scripts/provision-e2e-db.mjs ensure
-        env:
-          E2E_DATABASE_URL: ${{ secrets.E2E_DATABASE_URL }}
-          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
-          NEON_PROJECT_ID: aged-rain-00317126
-          NEON_PARENT_BRANCH_ID: br-bitter-pine-beii44p7
-          GITHUB_RUN_ID: ${{ github.run_id }}
-
-      # The base schema, the migrations, the owner account and its workspace,
-      # in the order the migrations depend on each other. The Facebook page
-      # token migration decrypts with this secret, so it has to be the same
-      # value the container runs with.
-      - name: Prepare the test database
-        run: node scripts/prepare-e2e-db.mjs
-        env:
-          DATABASE_URL: ${{ env.E2E_DATABASE_URL }}
-          OWNER_EMAIL: ${{ secrets.E2E_OWNER_EMAIL }}
-          OWNER_PASSWORD: ${{ secrets.E2E_OWNER_PASSWORD }}
-          BETTER_AUTH_SECRET: ${{ secrets.E2E_BETTER_AUTH_SECRET }}
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Same lowercased registry path the docker job pushed to.
-      - name: Resolve the image name
-        env:
-          REPOSITORY: ${{ github.repository }}
-        run: echo "IMAGE=ghcr.io/$(echo "$REPOSITORY" | tr '[:upper:]' '[:lower:]')/app" >> "$GITHUB_ENV"
-
-      - name: Pull the image under test
-        run: docker pull ${{ env.IMAGE }}:${{ env.IMAGE_SHA }}
-
-      - name: Start the container
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_TITLE: E2E PR ${{ github.event.number }} ${{ github.event.pull_request.head.sha }} ${{ github.event.pull_request.base.sha }}
+          EXPECTED_JOB: Playwright (${{ github.sha }})
         run: |
-          docker run -d --name app \
-            -p ${{ env.APP_PORT }}:7860 \
-            -e DATABASE_URL="${{ env.E2E_DATABASE_URL }}" \
-            -e BETTER_AUTH_SECRET="${{ secrets.E2E_BETTER_AUTH_SECRET }}" \
-            -e BETTER_AUTH_URL="http://localhost:${{ env.APP_PORT }}" \
-            -e BETTER_AUTH_TRUSTED_ORIGINS="http://localhost:${{ env.APP_PORT }}" \
-            -e SIGNUP_INVITE_CODE="${{ secrets.E2E_SIGNUP_INVITE_CODE }}" \
-            -e DISABLE_LOCAL_SCHEDULER=1 \
-            -e DISABLE_AUTH_RATE_LIMIT=1 \
-            ${{ env.IMAGE }}:${{ env.IMAGE_SHA }}
-
-      - name: Wait for the app to answer
-        run: |
-          for attempt in $(seq 1 60); do
-            if curl -fsS "http://localhost:${{ env.APP_PORT }}/login" > /dev/null; then
-              echo "app is up after ${attempt} attempts"
-              exit 0
+          # Only accept Actions metadata from this exact workflow and event.
+          # In particular, a missing, cancelled or skipped suite is not a pass.
+          for attempt in $(seq 1 345); do
+            if runs=$(gh api --method GET "repos/$REPO/actions/workflows/trusted-e2e.yml/runs" -f event=pull_request_target -F per_page=100); then
+              run=$(jq -c --arg title "$RUN_TITLE" '[.workflow_runs[] | select(.display_title == $title)] | first // {}' <<< "$runs")
+              if [[ $(jq -r .status <<< "$run") == completed ]]; then
+                id=$(jq -r .id <<< "$run")
+                jobs=$(gh api "repos/$REPO/actions/runs/$id/jobs")
+                if [[ $(jq -r .conclusion <<< "$run") == success ]] &&
+                   jq -e --arg name "$EXPECTED_JOB" '.jobs | any(.name == $name and .conclusion == "success")' <<< "$jobs" >/dev/null; then
+                  exit 0
+                fi
+                echo "::error::Trusted E2E run $id did not pass for this merge commit."
+                exit 1
+              fi
             fi
-            sleep 2
+            sleep 20
           done
-          echo "the container never became ready" >&2
-          docker logs app >&2
+          echo "::error::No completed trusted E2E run for this revision; see docs/deployment.md."
           exit 1
-
-      - name: Run the Playwright suite
-        run: npx playwright test
-        env:
-          PLAYWRIGHT_BASE_URL: http://localhost:${{ env.APP_PORT }}
-          DATABASE_URL: ${{ env.E2E_DATABASE_URL }}
-          OWNER_EMAIL: ${{ secrets.E2E_OWNER_EMAIL }}
-          OWNER_PASSWORD: ${{ secrets.E2E_OWNER_PASSWORD }}
-
-      - name: Upload the Playwright artifacts
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-report-${{ github.run_id }}
-          path: |
-            playwright-report/
-            test-results/
-          retention-days: 7
-
-      # Nothing else in the run needs the database, so the branch is deleted
-      # last, success or failure. A failed cleanup only warns — the next
-      # run's provisioning sweeps leftover ci-e2e-run-* branches first,
-      # because the job's concurrency group guarantees no other E2E run is
-      # using one.
-      - name: Delete the E2E database branch
-        if: always()
-        run: node scripts/provision-e2e-db.mjs teardown
-        env:
-          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
-          NEON_PROJECT_ID: aged-rain-00317126
-          NEON_BRANCH_ID: ${{ env.NEON_BRANCH_ID }}

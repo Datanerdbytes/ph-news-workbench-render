@@ -1,7 +1,7 @@
 // Resolves the database the E2E suite runs against.
 //
-// The "Provision the E2E database" step in .github/workflows/ci.yml runs this
-// script's ensure mode, and a final always() step runs teardown.
+// The trusted E2E workflow runs ensure and teardown on separate runners from
+// Playwright; the workflow-level concurrency lock spans all three jobs.
 //
 //   ensure — when the E2E_DATABASE_URL override is set and answers SELECT 1,
 //   that URL is reused as-is (the persistent ci-e2e branch, while it lives).
@@ -123,7 +123,7 @@ async function ensure() {
   if (!apiKey || !projectId || !parentId) {
     fail(
       "Neon provisioning needs NEON_API_KEY, NEON_PROJECT_ID and NEON_PARENT_BRANCH_ID " +
-        "in the `e2e` environment (see docs/deployment.md), or a healthy E2E_DATABASE_URL override",
+        "in the `e2e-db-management` environment (see docs/deployment.md), or a healthy E2E_DATABASE_URL override",
     );
   }
 
