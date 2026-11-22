@@ -35,7 +35,7 @@ export async function GET(request: Request) {
   const requested = Number(params.get('limit'));
   const limit =
     Number.isFinite(requested) && requested > 0
-      ? Math.min(Math.floor(requested), MAX_LIMIT)
+      ? Math.min(Math.max(1, Math.floor(requested)), MAX_LIMIT)
       : DEFAULT_LIMIT;
 
   try {

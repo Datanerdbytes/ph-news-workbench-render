@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -205,6 +206,58 @@ describe("SourcesPage", () => {
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: "All sources" })).toBeInTheDocument(),
     );
+  });
+
+  it("keeps archived stories visible after the last source is gone", async () => {
+    fetchMock.mockImplementation(async (url: string) =>
+      jsonResponse(url === "/api/sources"
+        ? { feeds: [] }
+        : { ...allItemsPayload, rows: [{ ...allItemsPayload.rows[0], feed_id: null, feed_title: null }] }),
+    );
+    render(<SourcesPage />);
+    expect(await screen.findByText("Story One")).toBeInTheDocument();
+    expect(screen.queryByText("No sources yet")).not.toBeInTheDocument();
+  });
+
+  it("ignores delayed pagination from an earlier visit to the same source", async () => {
+    let finishOldPage!: (response: Response) => void;
+    const oldPage = new Promise<Response>(resolve => { finishOldPage = resolve; });
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === "/api/sources") return jsonResponse(feedsPayload);
+      if (url === "/api/source-items?feed=7&before=30") return oldPage;
+      if (url === "/api/source-items?feed=7&before=20") return jsonResponse({
+        ...vergeItemsPayload, rows: [{ ...vergeItemsPayload.rows[0], id: 3, title: "Current next page" }],
+      });
+      if (url === "/api/source-items?feed=7") {
+        const visits = fetchMock.mock.calls.filter(([input]) => input === url).length;
+        return jsonResponse({ ...vergeItemsPayload, hasMore: true, nextCursor: visits === 1 ? 30 : 20 });
+      }
+      return jsonResponse({ rows: [] });
+    });
+
+    render(<SourcesPage />);
+    const sidebar = await screen.findByRole("navigation", { name: "Source list" });
+    const select = (name: RegExp) => fireEvent.click(within(sidebar).getByRole("button", { name }));
+    await within(sidebar).findByRole("button", { name: /The Verge/ });
+
+    select(/The Verge/);
+    fireEvent.click(await screen.findByRole("button", { name: "Load more stories" }));
+    expect(fetchMock).toHaveBeenCalledWith("/api/source-items?feed=7&before=30", expect.anything());
+    select(/All sources/);
+    await screen.findByText("No stories yet");
+    select(/The Verge/);
+    await screen.findByRole("button", { name: "Load more stories" });
+
+    await act(async () => {
+      finishOldPage(jsonResponse({
+        rows: [{ ...vergeItemsPayload.rows[0], id: 4, title: "Obsolete page" }],
+        hasMore: true,
+        nextCursor: 10,
+      }));
+    });
+    expect(screen.queryByText("Obsolete page")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Load more stories" }));
+    expect(await screen.findByText("Current next page")).toBeInTheDocument();
   });
 
   it("drafts a pending story via the compose deep link", async () => {

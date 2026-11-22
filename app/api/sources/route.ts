@@ -4,6 +4,8 @@ import { requireOwner, requireWorkspace, unauthorized } from '@/lib/session';
 import { feedParser, ingestFeed, resolveFeedUrl, describeFeedError, FeedFetchError } from '@/lib/feeds';
 import { randomUUID } from 'crypto';
 
+export const dynamic = 'force-dynamic';
+
 type FeedRow = {
   id: number;
   workspace_id: string;

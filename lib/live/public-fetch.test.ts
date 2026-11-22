@@ -86,6 +86,18 @@ describe('fetchPublicSource', () => {
     });
   });
 
+  it('does not dispatch when the request is aborted during DNS lookup', async () => {
+    let finishLookup!: (addresses: { address: string; family: number }[]) => void;
+    lookupMock.mockReturnValueOnce(new Promise(resolve => { finishLookup = resolve; }));
+    const controller = new AbortController();
+    const request = fetchPublicSource(URL_UNDER_TEST, { signal: controller.signal });
+    controller.abort();
+    await expect(request).rejects.toHaveProperty('name', 'AbortError');
+    finishLookup([{ address: '93.184.216.34', family: 4 }]);
+    await Promise.resolve();
+    expect(undiciFetchMock).not.toHaveBeenCalled();
+  });
+
   it('dials the validated numeric address while preserving hostname/SNI', async () => {
     const connector = vi.fn(
       (_options: object, callback: (error: Error | null) => void) =>

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
+vi.mock("./live/public-fetch", () => ({ fetchPublicSource: vi.fn() }));
 vi.mock("@/lib/db", () => ({ sql: vi.fn() }));
 vi.mock("rss-parser", () => ({
   default: class {
@@ -8,6 +9,7 @@ vi.mock("rss-parser", () => ({
   },
 }));
 
+import { fetchPublicSource } from "./live/public-fetch";
 import { sql } from "@/lib/db";
 import {
   describeFeedError,
@@ -43,10 +45,11 @@ const item = {
  * Queue one result per `INSERT INTO news_items` call: rows mean the item was
  * new (RETURNING id fired), an empty array means the dedup conflict skipped it.
  */
-function useDb(inserts: unknown[][] = []) {
+function useDb(inserts: unknown[][] = [], storedHashes: string[] = []) {
   const queue = [...inserts];
   sqlMock.mockImplementation(async (strings: TemplateStringsArray) => {
     const query = strings.join(" ");
+    if (query.includes("SELECT dedup_hash")) return storedHashes.map(dedup_hash => ({ dedup_hash }));
     if (query.includes("INSERT INTO news_items")) return queue.shift() ?? [];
     return [];
   });
@@ -57,8 +60,7 @@ beforeEach(() => {
   useDb();
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
-  // The og:image fallback fetches each image-less story's page; keep tests
-  // offline unless a case stubs its own response.
+  vi.mocked(fetchPublicSource).mockReset().mockRejectedValue(new Error("no article network in unit tests"));
   vi.stubGlobal(
     "fetch",
     vi.fn().mockRejectedValue(new Error("no network in unit tests")),
@@ -362,7 +364,7 @@ describe("ingestFeed og:image fallback", () => {
       title: "Feed",
       items: [{ link: "https://techcrunch.test/story", title: "Story" }],
     });
-    const fetchMock = vi.fn().mockResolvedValue(
+    vi.mocked(fetchPublicSource).mockResolvedValue(
       new Response(
         `<html><head><title>t</title>` +
           `<meta property="og:image" content="https://cdn.test/og.jpg?w=1&amp;h=2">` +
@@ -370,19 +372,33 @@ describe("ingestFeed og:image fallback", () => {
         { headers: { "content-type": "text/html; charset=utf-8" } },
       ),
     );
-    vi.stubGlobal("fetch", fetchMock);
     useDb([[{ id: 1 }]]);
 
     await ingestFeed(feed, { correlationId: "c1", trigger: "cron" });
 
-    expect(fetchMock).toHaveBeenCalledWith(
+    expect(fetchPublicSource).toHaveBeenCalledWith(
       "https://techcrunch.test/story",
-      expect.objectContaining({ redirect: "follow" }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     const insert = sqlMock.mock.calls.find((call) =>
       (call[0] as TemplateStringsArray).join(" ").includes("INSERT INTO news_items"),
     );
     expect(insert!.slice(1)[6]).toBe("https://cdn.test/og.jpg?w=1&h=2");
+  });
+
+  it("skips stored hashes in this workspace before looking up article images", async () => {
+    const freshItem = { link: "https://example.com/fresh", title: "Fresh" };
+    parseURL.mockResolvedValue({ items: [item, freshItem] });
+    const storedHash = createHash("sha256").update(`${item.link}|${item.title}`).digest("hex");
+    useDb([[{ id: 1 }]], [storedHash]);
+
+    await expect(ingestFeed(feed, { correlationId: "c1", trigger: "cron" }))
+      .resolves.toEqual({ ingested: 1, skipped: 1 });
+    expect(fetchPublicSource).toHaveBeenCalledTimes(1);
+    expect(fetchPublicSource).toHaveBeenCalledWith(freshItem.link, expect.anything());
+    const lookup = sqlMock.mock.calls.find(([strings]) => strings.join(" ").includes("SELECT dedup_hash"));
+    expect(lookup?.[0].join(" ")).toContain("WHERE workspace_id = ");
+    expect(lookup?.slice(1)).toEqual(["ws1", [storedHash, expect.any(String)]]);
   });
 
   it("does not fetch any page when the feed already provides images", async () => {
@@ -396,13 +412,11 @@ describe("ingestFeed og:image fallback", () => {
         },
       ],
     });
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
     useDb([[{ id: 1 }]]);
 
     await ingestFeed(feed, { correlationId: "c1", trigger: "cron" });
 
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchPublicSource).not.toHaveBeenCalled();
     const insert = sqlMock.mock.calls.find((call) =>
       (call[0] as TemplateStringsArray).join(" ").includes("INSERT INTO news_items"),
     );
@@ -414,13 +428,10 @@ describe("ingestFeed og:image fallback", () => {
       title: "Feed",
       items: [{ link: "https://example.com/story", title: "Story" }],
     });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(
-        new Response("<html><head><title>plain</title></head></html>", {
-          headers: { "content-type": "text/html" },
-        }),
-      ),
+    vi.mocked(fetchPublicSource).mockResolvedValue(
+      new Response("<html><head><title>plain</title></head></html>", {
+        headers: { "content-type": "text/html" },
+      }),
     );
     useDb([[{ id: 1 }]]);
 

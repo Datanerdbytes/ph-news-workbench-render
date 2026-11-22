@@ -1,10 +1,11 @@
 import Parser from 'rss-parser';
 import crypto from 'crypto';
 import { sql } from '@/lib/db';
+import { decodeHtmlAttr, fetchArticleImage, toAbsoluteImageUrl } from './article-image';
+
+export { extractArticleImage, fetchArticleImage } from './article-image';
 
 const FEED_TIMEOUT_MS = 15_000;
-const ARTICLE_TIMEOUT_MS = 8_000;
-const ARTICLE_MAX_BYTES = 128 * 1024; // og:image sits in <head>; no need for the whole page
 const OG_CONCURRENCY = 8;
 const FEED_HEADERS = {
   'User-Agent':
@@ -119,16 +120,6 @@ async function readBodyHead(res: Response, maxBytes = 256 * 1024): Promise<strin
   return text;
 }
 
-function decodeHtmlAttr(value: string): string {
-  return value
-    .replace(/&amp;/gi, '&')
-    .replace(/&#0*38;|&#x0*26;/gi, '&')
-    .replace(/&quot;/gi, '"')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&apos;/gi, "'");
-}
-
 export function extractFeedLink(html: string, baseUrl: string): string | null {
   for (const tag of html.matchAll(/<link\b[^>]*>/gi)) {
     const markup = tag[0];
@@ -162,10 +153,6 @@ function xmlAttrs(node: unknown): Record<string, unknown> | null {
   return asRecord(asRecord(node)?.$);
 }
 
-function isHttpUrl(url: string): boolean {
-  return /^https?:\/\//i.test(url);
-}
-
 /**
  * Decide whether a media-tag URL points at an image. Trust the declared
  * type/medium; fall back to the file extension because many feeds omit both.
@@ -175,22 +162,6 @@ function looksLikeImageUrl(url: string, attrs: Record<string, unknown> | null): 
   if (type.startsWith('image/')) return true;
   if (attrs?.medium === 'image') return true;
   return IMAGE_EXT_RE.test(url);
-}
-
-/**
- * Resolve a candidate image URL to an absolute http(s) URL. Skips data:/blob:
- * URIs (base64 payloads would bloat the column and never lazy-load well) and
- * relative paths we cannot anchor to a base URL.
- */
-function toAbsoluteImageUrl(url: string, base: string | null): string | null {
-  const cleaned = decodeHtmlAttr(url.trim());
-  if (!cleaned || /^data:|^blob:|^javascript:/i.test(cleaned)) return null;
-  try {
-    const resolved = new URL(cleaned, base ?? undefined);
-    return isHttpUrl(resolved.toString()) ? resolved.toString() : null;
-  } catch {
-    return null;
-  }
 }
 
 /** First image URL in an HTML fragment (the feed's own content markup). */
@@ -257,60 +228,6 @@ export function extractItemImage(payload: unknown): string | null {
   }
 
   return null;
-}
-
-/**
- * og:image (or twitter:image) from an article page's markup. Prefers the
- * plain og:image; the twitter variant and secure_url are fallbacks.
- */
-export function extractArticleImage(html: string): string | null {
-  let best: { rank: number; content: string } | null = null;
-  for (const markup of html.matchAll(/<meta\b[^>]*>/gi)) {
-    const tag = markup[0];
-    const key = tag
-      .match(/\b(?:property|name)\s*=\s*["']([^"']+)["']/i)?.[1]
-      ?.toLowerCase();
-    if (!key) continue;
-    const rank =
-      key === 'og:image'
-        ? 0
-        : key === 'twitter:image' || key === 'twitter:image:src'
-          ? 1
-          : key === 'og:image:secure_url'
-            ? 2
-            : -1;
-    if (rank === -1) continue;
-    const content = tag.match(/\bcontent\s*=\s*["']([^"']+)["']/i)?.[1];
-    if (!content) continue;
-    if (!best || rank < best.rank) best = { rank, content };
-    if (best.rank === 0) break;
-  }
-  return best?.content ?? null;
-}
-
-/**
- * Fetch the story's own page and pull its og:image (twitter:image fallback).
- * Never throws — feeds must keep ingesting when a site blocks bots, hangs,
- * or serves no image meta. Returns an absolute http(s) URL or null.
- */
-export async function fetchArticleImage(url: string): Promise<string | null> {
-  if (!/^https?:\/\//i.test(url)) return null;
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      headers: FEED_HEADERS,
-      redirect: 'follow',
-      signal: AbortSignal.timeout(ARTICLE_TIMEOUT_MS),
-    });
-  } catch {
-    return null;
-  }
-  if (!res.ok || !/text\/html/i.test(res.headers.get('content-type') ?? '')) {
-    return null;
-  }
-  const head = await readBodyHead(res, ARTICLE_MAX_BYTES);
-  const raw = extractArticleImage(head);
-  return raw ? toAbsoluteImageUrl(raw, url) : null;
 }
 
 /**
@@ -400,19 +317,28 @@ export async function ingestFeed(
       await sql`UPDATE feeds SET title = ${parsedFeed.title.trim()} WHERE id = ${feed.id}`;
     }
 
-    let ingested = 0;
-    let skipped = 0;
-
-    // Stories whose feed carries no image get one bounded og:image lookup of
-    // their own page (TechCrunch-style text-only feeds), batched in parallel
-    // so the ingest stays bounded by one timeout per batch.
-    const ogImages = await resolveOgImages(parsedFeed.items ?? []);
-
-    for (const item of parsedFeed.items ?? []) {
+    const candidates = (parsedFeed.items ?? []).map(item => {
       const link = item.link ?? '';
       const title = item.title ?? '';
-      const guid = item.guid ?? link;
       const dedupHash = crypto.createHash('sha256').update(`${link}|${title}`).digest('hex');
+      return { item, link, title, dedupHash };
+    });
+
+    // Leave stored stories to the separate thumbnail backfill. The insert's
+    // conflict guard still handles duplicates and concurrent ingests.
+    const hashes = [...new Set(candidates.map(({ dedupHash }) => dedupHash))];
+    const existing = hashes.length ? await sql`
+      SELECT dedup_hash FROM news_items
+      WHERE workspace_id = ${feed.workspace_id} AND dedup_hash = ANY(${hashes}::text[])
+    ` : [];
+    const storedHashes = new Set(existing.map(row => row.dedup_hash));
+    const newStories = candidates.filter(({ dedupHash }) => !storedHashes.has(dedupHash));
+    const ogImages = await resolveOgImages(newStories.map(({ item }) => item));
+
+    let ingested = 0;
+    let skipped = candidates.length - newStories.length;
+    for (const { item, link, title, dedupHash } of newStories) {
+      const guid = item.guid ?? link;
       const imageUrl = extractItemImage(item) ?? ogImages.get(link) ?? null;
 
       const res = await sql`

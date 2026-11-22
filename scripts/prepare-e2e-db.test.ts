@@ -25,8 +25,8 @@ globalThis.fetch = async (_url, options) => {
 afterEach(() => rmSync(queries, { force: true }));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
-function prepare(failOn: string) {
-  const result = spawnSync(process.execPath, ["scripts/prepare-e2e-db.mjs"], {
+function prepare(failOn: string, script = "scripts/prepare-e2e-db.mjs") {
+  const result = spawnSync(process.execPath, [script], {
     cwd: process.cwd(),
     encoding: "utf8",
     env: {
@@ -56,6 +56,14 @@ describe("E2E database preparation", () => {
     expect(statements.some((sql) => sql.includes("CREATE TABLE IF NOT EXISTS workspaces"))).toBe(true);
     expect(statements.some((sql) => sql.includes("CREATE TABLE IF NOT EXISTS download_jobs"))).toBe(true);
     expect(statements.at(-1)).toContain('INSERT INTO "user"');
+  });
+
+  it("exits unsuccessfully when the sources migration fails", () => {
+    const migrationDdl = "ALTER TABLE feeds ADD COLUMN IF NOT EXISTS category";
+    const { result, statements } = prepare(migrationDdl, "migrate-sources-redesign.mjs");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("synthetic database failure");
+    expect(statements).toEqual([expect.stringContaining(migrationDdl)]);
   });
 
   it("stops when authentication schema creation fails", () => {

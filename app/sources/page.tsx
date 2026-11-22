@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   AlertTriangle,
@@ -535,19 +535,24 @@ function SourcesPageInner() {
     selectedKey !== 'all' ? (feeds.find(feed => String(feed.id) === selectedKey) ?? null) : null;
   const effectiveKey =
     !feedsLoading && selectedKey !== 'all' && !selectedFeed ? 'all' : selectedKey;
-  // Mirror of the effective selection for stale-response guards. Kept in sync
-  // by an effect (declared before the fetch effect, so it always runs first)
-  // rather than during render.
   const selectedKeyRef = useRef(effectiveKey);
-  useEffect(() => {
+  const itemsGeneration = useRef<symbol | null>(null);
+  useLayoutEffect(() => {
     selectedKeyRef.current = effectiveKey;
+    return () => { itemsGeneration.current = null; };
   }, [effectiveKey]);
-  const selectedFeedId = effectiveKey === 'all' ? null : Number(effectiveKey);
 
   const loadItems = useCallback(async () => {
     const keyAtRequest = selectedKeyRef.current;
+    const generation = Symbol();
+    itemsGeneration.current = generation;
+    const isCurrent = () =>
+      keyAtRequest === selectedKeyRef.current && generation === itemsGeneration.current;
     setItemsLoading(true);
     setItemsError(false);
+    setLoadingMore(false);
+    setNextCursor(null);
+    setHasMore(false);
     try {
       const query =
         keyAtRequest === 'all' ? '' : `feed=${encodeURIComponent(keyAtRequest)}`;
@@ -556,27 +561,31 @@ function SourcesPageInner() {
       });
       if (!res.ok) throw new Error('Failed to load stories');
       const data = await res.json();
-      if (keyAtRequest !== selectedKeyRef.current) return;
+      if (!isCurrent()) return;
       setItems(data.rows ?? []);
       setNextCursor(typeof data.nextCursor === 'number' ? data.nextCursor : null);
       setHasMore(Boolean(data.hasMore));
     } catch {
-      if (keyAtRequest !== selectedKeyRef.current) return;
+      if (!isCurrent()) return;
       setItemsError(true);
     } finally {
-      if (keyAtRequest === selectedKeyRef.current) setItemsLoading(false);
+      if (isCurrent()) setItemsLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void loadItems();
-  }, [loadItems, selectedFeedId]);
+  }, [loadItems, effectiveKey]);
 
   const loadMore = useCallback(async () => {
-    if (!nextCursor || loadingMore) return;
+    if (!nextCursor || loadingMore || itemsLoading) return;
+    const keyAtRequest = selectedKeyRef.current;
+    const generation = itemsGeneration.current;
+    if (!generation) return;
+    const isCurrent = () =>
+      keyAtRequest === selectedKeyRef.current && generation === itemsGeneration.current;
     setLoadingMore(true);
     try {
-      const keyAtRequest = selectedKeyRef.current;
       const query =
         keyAtRequest === 'all'
           ? `before=${nextCursor}`
@@ -584,7 +593,7 @@ function SourcesPageInner() {
       const res = await fetch(`/api/source-items?${query}`, { cache: 'no-store' });
       if (!res.ok) throw new Error('Failed to load stories');
       const data = await res.json();
-      if (keyAtRequest !== selectedKeyRef.current) return;
+      if (!isCurrent()) return;
       setItems(prev => {
         const seen = new Set(prev.map(item => item.id));
         return [...prev, ...(data.rows ?? []).filter((item: SourceItem) => !seen.has(item.id))];
@@ -592,11 +601,11 @@ function SourcesPageInner() {
       setNextCursor(typeof data.nextCursor === 'number' ? data.nextCursor : null);
       setHasMore(Boolean(data.hasMore));
     } catch {
-      toast.error('Could not load more stories');
+      if (isCurrent()) toast.error('Could not load more stories');
     } finally {
-      setLoadingMore(false);
+      if (isCurrent()) setLoadingMore(false);
     }
-  }, [nextCursor, loadingMore]);
+  }, [nextCursor, loadingMore, itemsLoading]);
 
   const select = useCallback(
     (key: string) => {
@@ -1094,7 +1103,7 @@ function SourcesPageInner() {
                   description="The articles for this source just couldn't be fetched right now."
                   onRetry={loadItems}
                 />
-              ) : feeds.length === 0 ? (
+              ) : feeds.length === 0 && items.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-border bg-card/50 p-8 text-center">
                   <div className="mx-auto grid size-11 place-items-center rounded-full bg-secondary">
                     <Rss className="size-5 text-muted-foreground" aria-hidden />

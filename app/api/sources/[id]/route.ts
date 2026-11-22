@@ -4,6 +4,8 @@ import { requireOwner, requireWorkspace, unauthorized } from '@/lib/session';
 import { ingestFeed, describeFeedError } from '@/lib/feeds';
 import { randomUUID } from 'crypto';
 
+export const dynamic = 'force-dynamic';
+
 interface RouteParams {
   params: Promise<{ id: string }>;
 }

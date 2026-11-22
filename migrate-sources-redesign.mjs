@@ -1,4 +1,5 @@
 import { neon } from '@neondatabase/serverless';
+import { fetchArticleImage, toAbsoluteImageUrl } from './lib/article-image.ts';
 
 if (!process.env.DATABASE_URL) {
   throw new Error('DATABASE_URL is required');
@@ -29,24 +30,6 @@ function looksLikeImageUrl(url, attrs) {
   if (type.startsWith('image/')) return true;
   if (attrs?.medium === 'image') return true;
   return IMAGE_EXT_RE.test(url);
-}
-
-function toAbsoluteImageUrl(url, base) {
-  const cleaned = url
-    .trim()
-    .replace(/&amp;/gi, '&')
-    .replace(/&#0*38;|&#x0*26;/gi, '&')
-    .replace(/&quot;/gi, '"')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&apos;/gi, "'");
-  if (!cleaned || /^data:|^blob:|^javascript:/i.test(cleaned)) return null;
-  try {
-    const resolved = new URL(cleaned, base ?? undefined);
-    return /^https?:\/\//i.test(resolved.toString()) ? resolved.toString() : null;
-  } catch {
-    return null;
-  }
 }
 
 function firstHtmlImage(html, base) {
@@ -105,77 +88,7 @@ function extractItemImage(payload) {
   return null;
 }
 
-// og:image fallback (mirrors lib/feeds.ts#fetchArticleImage) — text-only feeds
-// like TechCrunch publish no image data at all, but their article pages carry
-// og:image in <head>.
-const ARTICLE_TIMEOUT_MS = 8000;
-const ARTICLE_MAX_BYTES = 128 * 1024;
 const OG_CONCURRENCY = 8;
-
-function extractArticleImage(html) {
-  let best = null;
-  for (const markup of html.matchAll(/<meta\b[^>]*>/gi)) {
-    const tag = markup[0];
-    const key = tag.match(/\b(?:property|name)\s*=\s*["']([^"']+)["']/i)?.[1]?.toLowerCase();
-    if (!key) continue;
-    const rank =
-      key === 'og:image'
-        ? 0
-        : key === 'twitter:image' || key === 'twitter:image:src'
-          ? 1
-          : key === 'og:image:secure_url'
-            ? 2
-            : -1;
-    if (rank === -1) continue;
-    const content = tag.match(/\bcontent\s*=\s*["']([^"']+)["']/i)?.[1];
-    if (!content) continue;
-    if (!best || rank < best.rank) best = { rank, content };
-    if (best.rank === 0) break;
-  }
-  return best?.content ?? null;
-}
-
-async function readBodyHead(res, maxBytes = ARTICLE_MAX_BYTES) {
-  const reader = res.body?.getReader();
-  if (!reader) return '';
-  const decoder = new TextDecoder('utf-8', { fatal: false });
-  let text = '';
-  try {
-    while (text.length < maxBytes) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      text += decoder.decode(value, { stream: true });
-    }
-  } catch {
-    // a partial body is enough for the <head>
-  } finally {
-    reader.cancel().catch(() => {});
-  }
-  return text;
-}
-
-async function fetchArticleImage(url) {
-  if (!/^https?:\/\//i.test(url)) return null;
-  let res;
-  try {
-    res = await fetch(url, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (compatible; PhNewsWorkbench/1.0; +https://ph-news-workbench.onrender.com)',
-      },
-      redirect: 'follow',
-      signal: AbortSignal.timeout(ARTICLE_TIMEOUT_MS),
-    });
-  } catch {
-    return null;
-  }
-  if (!res.ok || !/text\/html/i.test(res.headers.get('content-type') ?? '')) {
-    return null;
-  }
-  const head = await readBodyHead(res);
-  const raw = extractArticleImage(head);
-  return raw ? toAbsoluteImageUrl(raw, url) : null;
-}
 
 async function migrate() {
   console.log('Starting sources redesign migration...');
@@ -241,4 +154,7 @@ async function migrate() {
   }
 }
 
-migrate().catch(console.error);
+migrate().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
