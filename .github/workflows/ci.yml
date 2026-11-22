@@ -276,15 +276,28 @@ jobs:
           for attempt in $(seq 1 345); do
             # A pull_request_target workflow only runs from the default branch,
             # so the pull request that introduces trusted-e2e.yml has no
-            # trusted run to wait for. Treat that as a pass — the same way a
-            # fork's skipped e2e job reports success — because the next pull
-            # request after this one merges is the first real one. Afterwards
-            # the workflow always exists on the default branch, so this check
-            # verifies the real result.
-            if ! gh api "repos/$REPO/actions/workflows/trusted-e2e.yml" >/dev/null 2>&1; then
-              echo "::notice::trusted-e2e.yml is not on the default branch yet — nothing to verify on the pull request that introduces it; the trusted flow starts with the next pull request."
-              exit 0
-            fi
+            # trusted run to wait for. Treat only a genuine 404 as a pass —
+            # the same way a fork's skipped e2e job reports success — because
+            # the next pull request after this one merges is the first real
+            # one. Afterwards the workflow always exists on the default branch,
+            # so this check verifies the real result. Any other API failure
+            # (expired token, rate limit, network) is not a 404: it must never
+            # pass the check, so warn and retry; the loop fails closed once
+            # exhausted.
+            probe=$(gh api -i "repos/$REPO/actions/workflows/trusted-e2e.yml" 2>&1) || true
+            code=$(awk '/^HTTP\// { print $2; exit }' <<< "$probe")
+            case $code in
+              200) ;; # exists → verify the trusted run below
+              404)
+                echo "::notice::trusted-e2e.yml is not on the default branch yet — nothing to verify on the pull request that introduces it; the trusted flow starts with the next pull request."
+                exit 0
+                ;;
+              *)
+                echo "::warning::Could not confirm trusted-e2e.yml on the default branch (HTTP ${code:-none}); retrying."
+                sleep 20
+                continue
+                ;;
+            esac
             if runs=$(gh api --method GET "repos/$REPO/actions/workflows/trusted-e2e.yml/runs" -f event=pull_request_target -F per_page=100); then
               run=$(jq -c --arg title "$RUN_TITLE" '[.workflow_runs[] | select(.display_title == $title)] | first // {}' <<< "$runs")
               if [[ $(jq -r .status <<< "$run") == completed ]]; then
