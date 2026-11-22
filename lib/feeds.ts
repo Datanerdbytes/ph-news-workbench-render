@@ -299,6 +299,25 @@ async function resolveOgImages(items: unknown[]): Promise<Map<string, string | n
   return images;
 }
 
+async function validateAdvertisedFeedUrl(url: string): Promise<string> {
+  // System DNS lookups cannot be cancelled. Limit the request's wait and
+  // reject on timeout; a late DNS result must not be used as validation.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      assertPublicSourceUrl(url),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('Advertised feed DNS lookup timed out')),
+          FEED_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Fetch the given URL once and work out what should actually be parsed.
  * Returns the URL unchanged when it already serves XML; when it is an HTML
@@ -319,7 +338,7 @@ export async function resolveFeedUrl(url: string): Promise<string> {
     if (/^\s*<\?xml|<rss[\s>]|<feed[\s>]/i.test(head)) return url;
 
     const advertisedUrl = extractFeedLink(head, finalUrl);
-    return advertisedUrl ? await assertPublicSourceUrl(advertisedUrl) : url;
+    return advertisedUrl ? await validateAdvertisedFeedUrl(advertisedUrl) : url;
   } catch (error) {
     if (error instanceof FeedFetchError) {
       throw new FeedFetchError(describeFeedError(error), error.status);

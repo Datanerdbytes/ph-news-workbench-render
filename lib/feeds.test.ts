@@ -499,6 +499,42 @@ describe("feed URL transport", () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects a stalled advertised-feed DNS lookup after 15 seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      const started = Promise.withResolvers<void>();
+      const pendingDns = Promise.withResolvers<{ address: string; family: number }[]>();
+      request.mockResolvedValueOnce(new Response(
+        '<link rel="alternate" type="application/rss+xml" href="https://rss.example/feed">',
+        { headers: { "content-type": "text/html" } },
+      ));
+      lookup.mockResolvedValueOnce([{ address: "93.184.216.34", family: 4 }]);
+      lookup.mockImplementationOnce(() => {
+        started.resolve();
+        return pendingDns.promise;
+      });
+
+      const result = resolveFeedUrl("https://news.example/").then(
+        url => ({ url }),
+        error => ({ error }),
+      );
+      const settled = vi.fn();
+      void result.then(settled);
+      await started.promise;
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(settled).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(settled).toHaveBeenCalledWith({ error: expect.any(FeedFetchError) });
+      await expect(result).resolves.toMatchObject({ error: { message: expect.stringContaining("timed out after 15s") } });
+      pendingDns.resolve([{ address: "93.184.216.34", family: 4 }]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(request).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("resolves relative advertised links against the final public page", async () => {
     request.mockResolvedValueOnce(new Response(null, {
       status: 302, headers: { location: "https://news.example/latest/" },
