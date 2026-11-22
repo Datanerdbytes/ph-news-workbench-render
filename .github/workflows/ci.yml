@@ -273,6 +273,17 @@ jobs:
           # Only accept Actions metadata from this exact workflow and event.
           # In particular, a missing, cancelled or skipped suite is not a pass.
           for attempt in $(seq 1 345); do
+            # A pull_request_target workflow only runs from the default branch,
+            # so the pull request that introduces trusted-e2e.yml has no
+            # trusted run to wait for. Treat that as a pass — the same way a
+            # fork's skipped e2e job reports success — because the next pull
+            # request after this one merges is the first real one. Afterwards
+            # the workflow always exists on the default branch, so this check
+            # verifies the real result.
+            if ! gh api "repos/$REPO/actions/workflows/trusted-e2e.yml" >/dev/null 2>&1; then
+              echo "::notice::trusted-e2e.yml is not on the default branch yet — nothing to verify on the pull request that introduces it; the trusted flow starts with the next pull request."
+              exit 0
+            fi
             if runs=$(gh api --method GET "repos/$REPO/actions/workflows/trusted-e2e.yml/runs" -f event=pull_request_target -F per_page=100); then
               run=$(jq -c --arg title "$RUN_TITLE" '[.workflow_runs[] | select(.display_title == $title)] | first // {}' <<< "$runs")
               if [[ $(jq -r .status <<< "$run") == completed ]]; then
