@@ -7,7 +7,8 @@ on:
 
 permissions: {}
 
-# Hold the lock until teardown, including while the optional override is in use.
+# Hold the database lock until teardown, including while the optional override
+# is in use. Keep pending runs queued so new PRs do not replace them.
 concurrency:
   group: trusted-e2e-database
   cancel-in-progress: false
