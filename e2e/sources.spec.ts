@@ -3,12 +3,19 @@ import {
   clearSeededSourcesRedesignData,
   seedSourcesRedesignData,
 } from "./helpers/db";
+import { ensureOwnerSession } from "./helpers/session";
 
 let vergeFeedId = 0;
 
-test.beforeEach(async () => {
+test.beforeEach(async ({ page }, testInfo) => {
   const seeded = await seedSourcesRedesignData();
   vergeFeedId = seeded.vergeFeedId;
+  // shell.spec signs the shared storage-state session out before this spec
+  // runs; establish a fresh session in this context so the APIs answer.
+  await ensureOwnerSession(
+    page,
+    new URL(testInfo.project.use.baseURL ?? "http://localhost:3000").origin,
+  );
 });
 
 test.afterEach(async () => {
