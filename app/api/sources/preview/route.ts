@@ -6,6 +6,13 @@ export const dynamic = 'force-dynamic';
 
 const PREVIEW_ITEMS = 8;
 
+function previewDate(isoDate?: string, pubDate?: string): string | null {
+  const value = isoDate ?? pubDate;
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
 type PreviewItem = {
   title: string;
   link: string;
@@ -42,7 +49,7 @@ export async function GET(request: Request) {
     const items: PreviewItem[] = (feed.items ?? []).slice(0, PREVIEW_ITEMS).map(item => ({
       title: item.title ?? '',
       link: item.link ?? '',
-      published_at: item.isoDate ?? (item.pubDate ? new Date(item.pubDate).toISOString() : null),
+      published_at: previewDate(item.isoDate, item.pubDate),
       image_url: extractItemImage(item),
     }));
 
@@ -70,8 +77,10 @@ export async function GET(request: Request) {
       route: 'sources-preview',
       event: 'preview_error',
       workspaceId: access.workspace.id,
-      url,
-      error: error instanceof Error ? error.message : String(error),
+      // Feed URLs may carry credentials. Error messages from the transport
+      // or parser can also repeat the input or feed content.
+      url: parsedUrl.origin + parsedUrl.pathname,
+      status: error instanceof FeedFetchError ? error.status : undefined,
     }));
     const message =
       error instanceof FeedFetchError

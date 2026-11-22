@@ -3,9 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vite
 
 vi.mock("./live/public-fetch", () => ({ fetchPublicSource: vi.fn() }));
 vi.mock("@/lib/db", () => ({ sql: vi.fn() }));
-vi.mock("rss-parser", () => ({
-  default: class {
-    parseURL = vi.fn();
+const { lookup, request } = vi.hoisted(() => ({ lookup: vi.fn(), request: vi.fn() }));
+vi.mock("node:dns/promises", () => ({ lookup }));
+vi.mock("undici", () => ({
+  fetch: request,
+  buildConnector: vi.fn(),
+  Agent: class {
+    close = vi.fn();
+    destroy = vi.fn();
   },
 }));
 
@@ -24,7 +29,7 @@ import {
 } from "@/lib/feeds";
 
 const sqlMock = sql as unknown as Mock;
-const parseURL = feedParser.parseURL as unknown as Mock;
+let parseURL: Mock;
 
 const feed: IngestableFeed = {
   id: 7,
@@ -61,15 +66,11 @@ beforeEach(() => {
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
   vi.mocked(fetchPublicSource).mockReset().mockRejectedValue(new Error("no article network in unit tests"));
-  vi.stubGlobal(
-    "fetch",
-    vi.fn().mockRejectedValue(new Error("no network in unit tests")),
-  );
+  parseURL = vi.spyOn(feedParser, "parseURL").mockRejectedValue(new Error("no feed network in unit tests"));
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
-  vi.unstubAllGlobals();
 });
 
 describe("ingestFeed", () => {
@@ -444,15 +445,75 @@ describe("ingestFeed og:image fallback", () => {
   });
 });
 
-describe("resolveFeedUrl", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
+describe("feed URL transport", () => {
+  beforeEach(async () => {
+    vi.mocked(feedParser.parseURL).mockRestore();
+    const actual = await vi.importActual<typeof import("./live/public-fetch")>("./live/public-fetch");
+    vi.mocked(fetchPublicSource).mockImplementation(actual.fetchPublicSource);
+    lookup.mockReset().mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    request.mockReset();
+  });
+
+  const xml = '<rss version="2.0"><channel><title>Public feed</title><item><title>A story</title></item></channel></rss>';
+
+  it.each(["http", "https"])("parses XML fetched over public %s", async (scheme) => {
+    const url = `${scheme}://news.example/feed`;
+    request.mockResolvedValue(new Response(xml));
+    await expect(feedParser.parseURL(url)).resolves.toMatchObject({
+      title: "Public feed",
+      items: [{ title: "A story" }],
+    });
+    expect(request).toHaveBeenCalledWith(url, expect.objectContaining({
+      redirect: "manual",
+      dispatcher: expect.any(Object),
+    }));
+  });
+
+  it.each([resolveFeedUrl, feedParser.parseURL])("rejects a destination with mixed DNS answers before connecting", async (read) => {
+    lookup.mockResolvedValueOnce([
+      { address: "93.184.216.34", family: 4 },
+      { address: "10.0.0.1", family: 4 },
+    ]);
+    await expect(read("https://news.example/feed")).rejects.toThrow(/non-public/);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each([resolveFeedUrl, feedParser.parseURL])("rejects a non-public redirect before following it", async (read) => {
+    request.mockResolvedValueOnce(new Response(null, {
+      status: 302, headers: { location: "https://internal.example/feed" },
+    }));
+    lookup.mockResolvedValueOnce([{ address: "93.184.216.34", family: 4 }]);
+    lookup.mockResolvedValueOnce([{ address: "10.0.0.1", family: 4 }]);
+    await expect(read("https://news.example/feed")).rejects.toThrow(/non-public/);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a non-public feed advertised by an HTML page", async () => {
+    request.mockResolvedValueOnce(new Response(
+      '<link rel="alternate" type="application/rss+xml" href="https://internal.example/feed">',
+      { headers: { "content-type": "text/html" } },
+    ));
+    lookup.mockResolvedValueOnce([{ address: "93.184.216.34", family: 4 }]);
+    lookup.mockResolvedValueOnce([{ address: "10.0.0.1", family: 4 }]);
+    await expect(resolveFeedUrl("https://news.example/")).rejects.toThrow(/non-public/);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves relative advertised links against the final public page", async () => {
+    request.mockResolvedValueOnce(new Response(null, {
+      status: 302, headers: { location: "https://news.example/latest/" },
+    })).mockResolvedValueOnce(new Response(
+      '<link rel="alternate" type="application/rss+xml" href="feed.xml">',
+      { headers: { "content-type": "text/html" } },
+    ));
+    await expect(resolveFeedUrl("https://old.example/")).resolves.toBe("https://news.example/latest/feed.xml");
+    expect(request).toHaveBeenCalledTimes(2);
   });
 
   it("returns the URL unchanged when it already serves XML", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+    request.mockResolvedValue(
       new Response("<rss><channel/></rss>", { headers: { "content-type": "application/rss+xml" } })
-    ));
+    );
     await expect(resolveFeedUrl("https://example.com/feed.xml")).resolves.toBe(
       "https://example.com/feed.xml"
     );
@@ -462,45 +523,41 @@ describe("resolveFeedUrl", () => {
     const html =
       `<html><head><link rel="alternate" type="application/rss+xml" href="/feed/"></head>` +
       `<body>hi</body></html>`;
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+    request.mockResolvedValue(
       new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } })
-    ));
+    );
     await expect(resolveFeedUrl("https://example.com/")).resolves.toBe("https://example.com/feed/");
   });
 
   it("returns the original URL when the page advertises nothing", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+    request.mockResolvedValue(
       new Response("<html><body>plain</body></html>", { headers: { "content-type": "text/html" } })
-    ));
+    );
     await expect(resolveFeedUrl("https://example.com/")).resolves.toBe("https://example.com/");
   });
 
   it("sniffs XML served with a non-XML content type", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+    request.mockResolvedValue(
       new Response('<?xml version="1.0"?><rss version="2.0"><channel/></rss>', {
         headers: { "content-type": "application/octet-stream" },
       })
-    ));
+    );
     await expect(resolveFeedUrl("https://example.com/feed")).resolves.toBe(
       "https://example.com/feed"
     );
   });
 
   it("throws a user-facing error on 403", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("blocked", { status: 403 })));
+    request.mockResolvedValue(new Response("blocked", { status: 403 }));
     const error = await resolveFeedUrl("https://example.com/feed/").catch((e) => e);
     expect(error).toBeInstanceOf(FeedFetchError);
     expect(error.message).toMatch(/refused the request/);
   });
 
   it("throws a user-facing error on DNS failure", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(
-      Object.assign(new Error("fetch failed"), {
-        cause: Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }),
-      })
-    ));
+    lookup.mockRejectedValue(new Error("DNS failure"));
     const error = await resolveFeedUrl("https://nope.example/").catch((e) => e);
     expect(error).toBeInstanceOf(FeedFetchError);
-    expect(error.message).toMatch(/could not be reached/);
+    expect(error.message).toMatch(/could not look up/);
   });
 });

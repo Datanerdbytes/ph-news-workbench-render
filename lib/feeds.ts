@@ -3,20 +3,22 @@ import crypto from 'crypto';
 import { sql } from '@/lib/db';
 import { decodeHtmlAttr, fetchArticleImage, toAbsoluteImageUrl } from './article-image';
 
+import { fetchPublicSource } from './live/public-fetch';
+import { assertPublicSourceUrl, NetworkPolicyError } from './live/public-network';
+
 export { extractArticleImage, fetchArticleImage } from './article-image';
 
 const FEED_TIMEOUT_MS = 15_000;
 const OG_CONCURRENCY = 8;
+const MAX_FEED_REDIRECTS = 5;
+const FEED_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const FEED_HEADERS = {
   'User-Agent':
     'Mozilla/5.0 (compatible; PhNewsWorkbench/1.0; +https://ph-news-workbench.onrender.com)',
   Accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.8',
 };
 
-export const feedParser = new Parser({
-  headers: { ...FEED_HEADERS },
-  timeout: FEED_TIMEOUT_MS,
-  maxRedirects: 5,
+const xmlParser = new Parser({
   // rss-parser drops every tag it is not told to keep, so list the Media RSS
   // tags explicitly — they are the thumbnail sources for the source browser.
   // keepArray so we can pick the first entry that is actually an image (the
@@ -29,6 +31,42 @@ export const feedParser = new Parser({
     ],
   },
 });
+
+// Keep rss-parser on XML parsing only. Every request, including ingestion
+// of a saved feed, goes through the same public-address transport.
+export const feedParser = {
+  async parseURL(url: string) {
+    const { response } = await fetchFeedResponse(url);
+    const contentType = response.headers.get('content-type') ?? '';
+    const charset = /charset\s*=\s*["']?([\w-]+)/i.exec(contentType)?.[1];
+    let decoder = new TextDecoder();
+    if (charset) {
+      try {
+        decoder = new TextDecoder(charset);
+      } catch {
+        // Keep the UTF-8 default for unsupported encodings.
+      }
+    }
+    return xmlParser.parseString(decoder.decode(await response.arrayBuffer()));
+  },
+};
+
+async function fetchFeedResponse(url: string): Promise<{ response: Response; finalUrl: string }> {
+  const signal = AbortSignal.timeout(FEED_TIMEOUT_MS);
+  let finalUrl = url;
+  for (let redirects = 0; ; redirects++) {
+    const response = await fetchPublicSource(finalUrl, { headers: FEED_HEADERS, signal });
+    if (response.ok) return { response, finalUrl };
+
+    const location = response.headers.get('location');
+    await response.body?.cancel().catch(() => {});
+    if (!FEED_REDIRECT_STATUSES.has(response.status) || !location) {
+      throw new FeedFetchError(`Status code ${response.status}`, response.status);
+    }
+    if (redirects === MAX_FEED_REDIRECTS) throw new Error('Too many redirects');
+    finalUrl = new URL(location, finalUrl).toString();
+  }
+}
 
 /** Error carrying a user-facing message about why a feed URL could not be read. */
 export class FeedFetchError extends Error {
@@ -67,6 +105,7 @@ export function describeFeedError(error: unknown): string {
   if (/status code/i.test(raw)) {
     return `The site rejected the request (${raw.replace(/^status code /i, 'HTTP ')}).`;
   }
+  if (error instanceof NetworkPolicyError) return error.message;
   if (/timed out|timeout/i.test(raw) || /ETIMEDOUT/.test(code)) {
     return `The site took too long to respond (timed out after ${FEED_TIMEOUT_MS / 1000}s). Try again later.`;
   }
@@ -268,27 +307,29 @@ async function resolveOgImages(items: unknown[]): Promise<Map<string, string | n
  * user-facing message when the site is unreachable or refuses the request.
  */
 export async function resolveFeedUrl(url: string): Promise<string> {
-  let res: Response;
   try {
-    res = await fetch(url, {
-      headers: FEED_HEADERS,
-      redirect: 'follow',
-      signal: AbortSignal.timeout(FEED_TIMEOUT_MS),
-    });
+    const { response, finalUrl } = await fetchFeedResponse(url);
+    const contentType = response.headers.get('content-type') ?? '';
+    if (/xml|rss|atom/i.test(contentType)) {
+      await response.body?.cancel().catch(() => {});
+      return url;
+    }
+
+    const head = await readBodyHead(response);
+    if (/^\s*<\?xml|<rss[\s>]|<feed[\s>]/i.test(head)) return url;
+
+    const advertisedUrl = extractFeedLink(head, finalUrl);
+    return advertisedUrl ? await assertPublicSourceUrl(advertisedUrl) : url;
   } catch (error) {
-    throw new FeedFetchError(describeFetchFailure(error));
+    if (error instanceof FeedFetchError) {
+      throw new FeedFetchError(describeFeedError(error), error.status);
+    }
+    const message = error instanceof NetworkPolicyError ||
+      (error instanceof Error && error.message === 'Too many redirects')
+      ? describeFeedError(error)
+      : describeFetchFailure(error);
+    throw new FeedFetchError(message);
   }
-  if (res.status >= 400) {
-    throw new FeedFetchError(describeFeedError(new Error(`Status code ${res.status}`)), res.status);
-  }
-
-  const contentType = res.headers.get('content-type') ?? '';
-  if (/xml|rss|atom/i.test(contentType)) return url;
-
-  const head = await readBodyHead(res);
-  if (/^\s*<\?xml|<rss[\s>]|<feed[\s>]/i.test(head)) return url;
-
-  return extractFeedLink(head, url) ?? url;
 }
 
 export type IngestableFeed = {
