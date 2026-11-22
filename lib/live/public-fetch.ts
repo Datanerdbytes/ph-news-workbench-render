@@ -3,7 +3,7 @@ import {
   resolvePublicAddresses,
   validateSourceUrl,
   type LookupAddress,
-} from './public-network';
+} from './public-network.ts';
 
 const CONNECT_TIMEOUT_MS = 8_000;
 const HEADERS_TIMEOUT_MS = 10_000;
@@ -27,7 +27,24 @@ export async function fetchPublicSource(
 ): Promise<Response> {
   const original = validateSourceUrl(value);
   const parsed = new URL(original);
-  const addresses = await resolvePublicAddresses(parsed.hostname);
+  const { signal } = init;
+  signal?.throwIfAborted();
+  const lookup = resolvePublicAddresses(parsed.hostname);
+  // Node's DNS lookup cannot be cancelled, but the caller can stop waiting
+  // for it. An abandoned lookup must never open a socket.
+  let onAbort: (() => void) | undefined;
+  const addresses = await (signal
+    ? Promise.race([
+        lookup,
+        new Promise<never>((_, reject) => {
+          onAbort = () => reject(signal.reason);
+          signal.addEventListener('abort', onAbort, { once: true });
+        }),
+      ]).finally(() => {
+        if (onAbort) signal.removeEventListener('abort', onAbort);
+      })
+    : lookup);
+  signal?.throwIfAborted();
   const dispatcher = createPinnedDispatcher(parsed.hostname, addresses);
 
   let upstream: Response;
@@ -51,10 +68,12 @@ export async function fetchPublicSource(
   // when the consumer finishes or cancels — never leaking a connection that
   // outlives its validated policy.
   const reader = upstream.body.getReader();
+  let cancelled = false;
   const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
         const chunk = await reader.read();
+        if (cancelled) return;
         if (chunk.done) {
           controller.close();
           await dispatcher.close();
@@ -62,11 +81,13 @@ export async function fetchPublicSource(
           controller.enqueue(chunk.value);
         }
       } catch (error) {
+        if (cancelled) return;
         controller.error(error);
         void dispatcher.destroy(error instanceof Error ? error : null);
       }
     },
     async cancel(reason) {
+      cancelled = true;
       try {
         await reader.cancel(reason);
       } finally {

@@ -1,8 +1,10 @@
 import { NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
-import { requireOwner, unauthorized } from '@/lib/session';
+import { requireOwner, requireWorkspace, unauthorized } from '@/lib/session';
 import { ingestFeed, describeFeedError } from '@/lib/feeds';
 import { randomUUID } from 'crypto';
+
+export const dynamic = 'force-dynamic';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -18,7 +20,7 @@ async function resolveFeed(workspaceId: string, params: Promise<{ id: string }>)
   }
 
   const result = await sql`
-    SELECT id, workspace_id, url, title, last_fetched_at, error_message, enabled, created_at
+    SELECT id, workspace_id, url, title, category, last_fetched_at, error_message, enabled, created_at
     FROM feeds
     WHERE id = ${feedId} AND workspace_id = ${workspaceId}
   `;
@@ -42,7 +44,7 @@ async function itemCount(workspaceId: string, feedId: number) {
 }
 
 export async function GET(request: Request, { params }: RouteParams) {
-  const access = await requireOwner(request);
+  const access = await requireWorkspace(request);
   if (!access) return unauthorized();
   if (access instanceof NextResponse) return access;
 
@@ -78,10 +80,10 @@ export async function PATCH(request: Request, { params }: RouteParams) {
     const feed = resolved.feed;
 
     const body = await request.json();
-    const { enabled, title } = body;
+    const { enabled, title, category } = body;
 
     const updates: string[] = [];
-    const values: (string | boolean | number)[] = [];
+    const values: (string | boolean | number | null)[] = [];
 
     if (typeof enabled === 'boolean') {
       updates.push(`enabled = $${values.length + 1}`);
@@ -90,6 +92,15 @@ export async function PATCH(request: Request, { params }: RouteParams) {
     if (typeof title === 'string' && title.trim()) {
       updates.push(`title = $${values.length + 1}`);
       values.push(title.trim());
+    }
+    // An explicit null (or blank string) clears the group; a string sets it.
+    if (category === null || typeof category === 'string') {
+      const normalized =
+        typeof category === 'string' && category.trim()
+          ? category.trim().slice(0, 60)
+          : null;
+      updates.push(`category = $${values.length + 1}`);
+      values.push(normalized);
     }
 
     if (updates.length === 0) {
@@ -102,7 +113,7 @@ export async function PATCH(request: Request, { params }: RouteParams) {
       UPDATE feeds
       SET ${updates.join(', ')}
       WHERE id = $${values.length - 1} AND workspace_id = $${values.length}
-      RETURNING id, workspace_id, url, title, last_fetched_at, error_message, enabled, created_at
+      RETURNING id, workspace_id, url, title, category, last_fetched_at, error_message, enabled, created_at
     `;
 
     const result = await sql.query(query, values);

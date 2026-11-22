@@ -1,19 +1,72 @@
 import Parser from 'rss-parser';
 import crypto from 'crypto';
 import { sql } from '@/lib/db';
+import { decodeHtmlAttr, fetchArticleImage, toAbsoluteImageUrl } from './article-image';
+
+import { fetchPublicSource } from './live/public-fetch';
+import { assertPublicSourceUrl, NetworkPolicyError } from './live/public-network';
+
+export { extractArticleImage, fetchArticleImage } from './article-image';
 
 const FEED_TIMEOUT_MS = 15_000;
+const OG_CONCURRENCY = 8;
+const MAX_FEED_REDIRECTS = 5;
+const FEED_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const FEED_HEADERS = {
   'User-Agent':
     'Mozilla/5.0 (compatible; PhNewsWorkbench/1.0; +https://ph-news-workbench.onrender.com)',
   Accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.8',
 };
 
-export const feedParser = new Parser({
-  headers: { ...FEED_HEADERS },
-  timeout: FEED_TIMEOUT_MS,
-  maxRedirects: 5,
+const xmlParser = new Parser({
+  // rss-parser drops every tag it is not told to keep, so list the Media RSS
+  // tags explicitly — they are the thumbnail sources for the source browser.
+  // keepArray so we can pick the first entry that is actually an image (the
+  // first media:content of a feed is often a video).
+  customFields: {
+    item: [
+      ['media:content', 'media:content', { keepArray: true }],
+      ['media:thumbnail', 'media:thumbnail', { keepArray: true }],
+      ['media:group', 'media:group', { keepArray: true }],
+    ],
+  },
 });
+
+// Keep rss-parser on XML parsing only. Every request, including ingestion
+// of a saved feed, goes through the same public-address transport.
+export const feedParser = {
+  async parseURL(url: string) {
+    const { response } = await fetchFeedResponse(url);
+    const contentType = response.headers.get('content-type') ?? '';
+    const charset = /charset\s*=\s*["']?([\w-]+)/i.exec(contentType)?.[1];
+    let decoder = new TextDecoder();
+    if (charset) {
+      try {
+        decoder = new TextDecoder(charset);
+      } catch {
+        // Keep the UTF-8 default for unsupported encodings.
+      }
+    }
+    return xmlParser.parseString(decoder.decode(await response.arrayBuffer()));
+  },
+};
+
+async function fetchFeedResponse(url: string): Promise<{ response: Response; finalUrl: string }> {
+  const signal = AbortSignal.timeout(FEED_TIMEOUT_MS);
+  let finalUrl = url;
+  for (let redirects = 0; ; redirects++) {
+    const response = await fetchPublicSource(finalUrl, { headers: FEED_HEADERS, signal });
+    if (response.ok) return { response, finalUrl };
+
+    const location = response.headers.get('location');
+    await response.body?.cancel().catch(() => {});
+    if (!FEED_REDIRECT_STATUSES.has(response.status) || !location) {
+      throw new FeedFetchError(`Status code ${response.status}`, response.status);
+    }
+    if (redirects === MAX_FEED_REDIRECTS) throw new Error('Too many redirects');
+    finalUrl = new URL(location, finalUrl).toString();
+  }
+}
 
 /** Error carrying a user-facing message about why a feed URL could not be read. */
 export class FeedFetchError extends Error {
@@ -52,6 +105,7 @@ export function describeFeedError(error: unknown): string {
   if (/status code/i.test(raw)) {
     return `The site rejected the request (${raw.replace(/^status code /i, 'HTTP ')}).`;
   }
+  if (error instanceof NetworkPolicyError) return error.message;
   if (/timed out|timeout/i.test(raw) || /ETIMEDOUT/.test(code)) {
     return `The site took too long to respond (timed out after ${FEED_TIMEOUT_MS / 1000}s). Try again later.`;
   }
@@ -105,16 +159,6 @@ async function readBodyHead(res: Response, maxBytes = 256 * 1024): Promise<strin
   return text;
 }
 
-function decodeHtmlAttr(value: string): string {
-  return value
-    .replace(/&amp;/gi, '&')
-    .replace(/&#0*38;|&#x0*26;/gi, '&')
-    .replace(/&quot;/gi, '"')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&apos;/gi, "'");
-}
-
 export function extractFeedLink(html: string, baseUrl: string): string | null {
   for (const tag of html.matchAll(/<link\b[^>]*>/gi)) {
     const markup = tag[0];
@@ -131,6 +175,149 @@ export function extractFeedLink(html: string, baseUrl: string): string | null {
   return null;
 }
 
+const IMAGE_EXT_RE = /\.(jpe?g|png|webp|gif|avif|jfif)(?:[?#]|$)/i;
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : value !== undefined && value !== null ? [value] : [];
+}
+
+/** Attributes of an xml2js node (its `$` object), when present. */
+function xmlAttrs(node: unknown): Record<string, unknown> | null {
+  return asRecord(asRecord(node)?.$);
+}
+
+/**
+ * Decide whether a media-tag URL points at an image. Trust the declared
+ * type/medium; fall back to the file extension because many feeds omit both.
+ */
+function looksLikeImageUrl(url: string, attrs: Record<string, unknown> | null): boolean {
+  const type = typeof attrs?.type === 'string' ? attrs.type : '';
+  if (type.startsWith('image/')) return true;
+  if (attrs?.medium === 'image') return true;
+  return IMAGE_EXT_RE.test(url);
+}
+
+/** First image URL in an HTML fragment (the feed's own content markup). */
+function firstHtmlImage(html: string, base: string | null): string | null {
+  for (const match of html.matchAll(/<img\b[^>]*>/gi)) {
+    const src = match[0].match(/\bsrc\s*=\s*["']([^"']+)["']/i)?.[1];
+    if (!src) continue;
+    const resolved = toAbsoluteImageUrl(src, base);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+/**
+ * Pull the thumbnail URL out of an RSS/Atom item (the same shape rss-parser
+ * emits, as stored in news_items.raw_payload). Preference order: the feed's
+ * explicit <enclosure>, then Media RSS tags (media:content, media:thumbnail,
+ * media:group), then the first <img> of the item's HTML content. Returns null
+ * when the item carries no usable image.
+ */
+export function extractItemImage(payload: unknown): string | null {
+  const item = asRecord(payload);
+  if (!item) return null;
+  const base = typeof item.link === 'string' && item.link ? item.link : null;
+
+  const enclosure = asRecord(item.enclosure);
+  if (enclosure && typeof enclosure.url === 'string' && looksLikeImageUrl(enclosure.url, enclosure)) {
+    const resolved = toAbsoluteImageUrl(enclosure.url, base);
+    if (resolved) return resolved;
+  }
+
+  const collectMediaUrls = (nodes: unknown[], thumbnailOnly: boolean): string | null => {
+    for (const node of nodes) {
+      const attrs = xmlAttrs(node);
+      const url = typeof attrs?.url === 'string' ? attrs.url : null;
+      if (!url) continue;
+      if (!thumbnailOnly && !looksLikeImageUrl(url, attrs)) continue;
+      const resolved = toAbsoluteImageUrl(url, base);
+      if (resolved) return resolved;
+    }
+    return null;
+  };
+
+  const fromMediaTags =
+    collectMediaUrls(asArray(item['media:content']), false) ??
+    collectMediaUrls(asArray(item['media:thumbnail']), true) ??
+    null;
+  if (fromMediaTags) return fromMediaTags;
+
+  // media:group nests the same tags one level down (YouTube-style feeds).
+  for (const group of asArray(item['media:group'])) {
+    const rec = asRecord(group);
+    if (!rec) continue;
+    const nested =
+      collectMediaUrls(asArray(rec['media:content']), false) ??
+      collectMediaUrls(asArray(rec['media:thumbnail']), true);
+    if (nested) return nested;
+  }
+
+  for (const key of ['content:encoded', 'content', 'summary']) {
+    if (typeof item[key] !== 'string') continue;
+    const resolved = firstHtmlImage(item[key] as string, base);
+    if (resolved) return resolved;
+  }
+
+  return null;
+}
+
+/**
+ * One bounded og:image lookup per story whose feed publishes no image, so
+ * text-only RSS (TechCrunch-style) still renders thumbnails. Batched so a
+ * large ingest stays polite and bounded by the per-page timeout.
+ */
+async function resolveOgImages(items: unknown[]): Promise<Map<string, string | null>> {
+  const links: string[] = [];
+  for (const item of items) {
+    if (extractItemImage(item)) continue;
+    const link = asRecord(item)?.link;
+    if (
+      typeof link === 'string' &&
+      /^https?:\/\//i.test(link) &&
+      !links.includes(link)
+    ) {
+      links.push(link);
+    }
+  }
+
+  const images = new Map<string, string | null>();
+  for (let start = 0; start < links.length; start += OG_CONCURRENCY) {
+    const batch = links.slice(start, start + OG_CONCURRENCY);
+    const results = await Promise.all(
+      batch.map(async link => [link, await fetchArticleImage(link)] as const)
+    );
+    for (const [link, image] of results) images.set(link, image);
+  }
+  return images;
+}
+
+async function validateAdvertisedFeedUrl(url: string): Promise<string> {
+  // System DNS lookups cannot be cancelled. Limit the request's wait and
+  // reject on timeout; a late DNS result must not be used as validation.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      assertPublicSourceUrl(url),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('Advertised feed DNS lookup timed out')),
+          FEED_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Fetch the given URL once and work out what should actually be parsed.
  * Returns the URL unchanged when it already serves XML; when it is an HTML
@@ -139,27 +326,29 @@ export function extractFeedLink(html: string, baseUrl: string): string | null {
  * user-facing message when the site is unreachable or refuses the request.
  */
 export async function resolveFeedUrl(url: string): Promise<string> {
-  let res: Response;
   try {
-    res = await fetch(url, {
-      headers: FEED_HEADERS,
-      redirect: 'follow',
-      signal: AbortSignal.timeout(FEED_TIMEOUT_MS),
-    });
+    const { response, finalUrl } = await fetchFeedResponse(url);
+    const contentType = response.headers.get('content-type') ?? '';
+    if (/xml|rss|atom/i.test(contentType)) {
+      await response.body?.cancel().catch(() => {});
+      return url;
+    }
+
+    const head = await readBodyHead(response);
+    if (/^\s*<\?xml|<rss[\s>]|<feed[\s>]/i.test(head)) return url;
+
+    const advertisedUrl = extractFeedLink(head, finalUrl);
+    return advertisedUrl ? await validateAdvertisedFeedUrl(advertisedUrl) : url;
   } catch (error) {
-    throw new FeedFetchError(describeFetchFailure(error));
+    if (error instanceof FeedFetchError) {
+      throw new FeedFetchError(describeFeedError(error), error.status);
+    }
+    const message = error instanceof NetworkPolicyError ||
+      (error instanceof Error && error.message === 'Too many redirects')
+      ? describeFeedError(error)
+      : describeFetchFailure(error);
+    throw new FeedFetchError(message);
   }
-  if (res.status >= 400) {
-    throw new FeedFetchError(describeFeedError(new Error(`Status code ${res.status}`)), res.status);
-  }
-
-  const contentType = res.headers.get('content-type') ?? '';
-  if (/xml|rss|atom/i.test(contentType)) return url;
-
-  const head = await readBodyHead(res);
-  if (/^\s*<\?xml|<rss[\s>]|<feed[\s>]/i.test(head)) return url;
-
-  return extractFeedLink(head, url) ?? url;
 }
 
 export type IngestableFeed = {
@@ -188,18 +377,33 @@ export async function ingestFeed(
       await sql`UPDATE feeds SET title = ${parsedFeed.title.trim()} WHERE id = ${feed.id}`;
     }
 
-    let ingested = 0;
-    let skipped = 0;
-
-    for (const item of parsedFeed.items ?? []) {
+    const candidates = (parsedFeed.items ?? []).map(item => {
       const link = item.link ?? '';
       const title = item.title ?? '';
-      const guid = item.guid ?? link;
       const dedupHash = crypto.createHash('sha256').update(`${link}|${title}`).digest('hex');
+      return { item, link, title, dedupHash };
+    });
+
+    // Leave stored stories to the separate thumbnail backfill. The insert's
+    // conflict guard still handles duplicates and concurrent ingests.
+    const hashes = [...new Set(candidates.map(({ dedupHash }) => dedupHash))];
+    const existing = hashes.length ? await sql`
+      SELECT dedup_hash FROM news_items
+      WHERE workspace_id = ${feed.workspace_id} AND dedup_hash = ANY(${hashes}::text[])
+    ` : [];
+    const storedHashes = new Set(existing.map(row => row.dedup_hash));
+    const newStories = candidates.filter(({ dedupHash }) => !storedHashes.has(dedupHash));
+    const ogImages = await resolveOgImages(newStories.map(({ item }) => item));
+
+    let ingested = 0;
+    let skipped = candidates.length - newStories.length;
+    for (const { item, link, title, dedupHash } of newStories) {
+      const guid = item.guid ?? link;
+      const imageUrl = extractItemImage(item) ?? ogImages.get(link) ?? null;
 
       const res = await sql`
-        INSERT INTO news_items (feed_id, workspace_id, guid, link, title, summary, published_at, raw_payload, dedup_hash)
-        VALUES (${feed.id}, ${feed.workspace_id}, ${guid}, ${link}, ${title}, ${item.contentSnippet ?? ''}, ${item.pubDate ? new Date(item.pubDate) : null}, ${JSON.stringify(item)}, ${dedupHash})
+        INSERT INTO news_items (feed_id, workspace_id, guid, link, title, summary, image_url, published_at, raw_payload, dedup_hash)
+        VALUES (${feed.id}, ${feed.workspace_id}, ${guid}, ${link}, ${title}, ${item.contentSnippet ?? ''}, ${imageUrl}, ${item.pubDate ? new Date(item.pubDate) : null}, ${JSON.stringify(item)}, ${dedupHash})
         ON CONFLICT (workspace_id, dedup_hash) DO NOTHING
         RETURNING id
       `;
