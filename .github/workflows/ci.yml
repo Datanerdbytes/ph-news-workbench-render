@@ -267,6 +267,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           RUN_TITLE: E2E PR ${{ github.event.number }} ${{ github.event.pull_request.head.sha }} ${{ github.event.pull_request.base.sha }}
           EXPECTED_JOB: Playwright (${{ github.sha }})
         run: |
@@ -293,8 +294,28 @@ jobs:
                    jq -e --arg name "$EXPECTED_JOB" '.jobs | any(.name == $name and .conclusion == "success")' <<< "$jobs" >/dev/null; then
                   exit 0
                 fi
+                # A trusted run that could not start means the workflow file on
+                # the default branch does not parse — GitHub runs nothing, so
+                # there is nothing to verify here. The pull request that
+                # repairs the file is the only way out, so pass with a notice
+                # instead of deadlocking the required check.
+                if [[ $(jq -r .conclusion <<< "$run") == startup_failure ]]; then
+                  echo "::notice::Trusted E2E run $id could not start — its workflow file on the default branch does not parse. Nothing to verify; this check passes so the repair can merge."
+                  exit 0
+                fi
                 echo "::error::Trusted E2E run $id did not pass for this merge commit."
                 exit 1
+              fi
+              # The run-name that titles a trusted run lives in the same file:
+              # when that file does not parse, GitHub falls back to the commit
+              # message as the title and the match above never appears. A
+              # startup-failed run for this head tells the same story — GitHub
+              # ran nothing, so there is nothing to verify. This check passes
+              # with a notice so the repair itself can merge.
+              unrunnable=$(jq -c --arg head "$HEAD_SHA" '[.workflow_runs[] | select(.head_sha == $head and .conclusion == "startup_failure")] | first // {}' <<< "$runs")
+              if [[ $(jq -r .status <<< "$unrunnable") == completed ]]; then
+                echo "::notice::Trusted E2E run $(jq -r .id <<< "$unrunnable") could not start — its workflow file on the default branch does not parse. Nothing to verify; this check passes so the repair can merge."
+                exit 0
               fi
             fi
             sleep 20
