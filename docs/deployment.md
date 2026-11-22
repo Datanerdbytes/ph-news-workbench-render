@@ -85,13 +85,13 @@ every production deploy a manual step.
 
 ### Other secrets this repository already uses
 
-| Name | Scope | Used by |
-| --- | --- | --- |
-| `CRON_SECRET` | repository | `keep-alive.yml` — the hourly feed ingest |
 <!-- coderabbit-ai-generated:v1 -->
 
 <!-- coderabbit-ai-generated-section:v1:4c69199779f2544879fd2c41e35fb33314e6b0c72917dd370e4941e880111ddf -->
 
+| Name | Scope | Used by |
+| --- | --- | --- |
+| `CRON_SECRET` | repository | `keep-alive.yml` — the hourly feed ingest |
 | `E2E_OWNER_EMAIL`, `E2E_OWNER_PASSWORD`, `E2E_BETTER_AUTH_SECRET`, `E2E_SIGNUP_INVITE_CODE` | `e2e` | the Playwright job in `trusted-e2e.yml` |
 | `NEON_API_KEY` | `e2e-db-management` only | creates and deletes temporary Neon branches |
 | `E2E_DATABASE_URL` (optional) | `e2e-db-management` | uses a healthy test database instead of creating a branch |

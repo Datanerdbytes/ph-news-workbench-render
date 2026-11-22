@@ -54,7 +54,12 @@ jobs:
                 ' <<< "$runs")
                 if [[ -n $id ]]; then
                   jobs=$(gh api "repos/$REPO/actions/runs/$id/jobs")
-                  if jq -e '.jobs | any(.name == "Docker build & scan" and .conclusion == "success")' <<< "$jobs" >/dev/null &&
+                  conclusion=$(jq -r 'first(.jobs[] | select(.name == "Docker build & scan")).conclusion // empty' <<< "$jobs")
+                  if [[ -n $conclusion && $conclusion != success ]]; then
+                    echo "::error::Docker build & scan in CI run $id concluded with $conclusion."
+                    exit 1
+                  fi
+                  if [[ $conclusion == success ]] &&
                      docker manifest inspect "$image:$sha" >/dev/null 2>&1; then
                     echo "sha=$sha" >> "$GITHUB_OUTPUT"
                     exit 0
