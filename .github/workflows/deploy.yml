@@ -66,6 +66,12 @@ jobs:
       packages: write
       # Trivy findings land in the code-scanning tab.
       security-events: write
+      # The e2e gate reads Trusted E2E run metadata from the Actions API. A
+      # called workflow's jobs may only use permissions granted here, and a
+      # request beyond the grant fails the whole call at plan time — the
+      # startup_failure that shipped the trusted E2E workflow without a
+      # working production deploy.
+      actions: read
 
   deploy:
     name: Deploy to Render
