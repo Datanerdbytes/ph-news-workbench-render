@@ -7,13 +7,12 @@ on:
 
 permissions: {}
 
-# Hold the lock until teardown, including while the optional override is in
-# use. `cancel-in-progress: false` queues overlapping runs serially — the
-# schema has no explicit queue-depth key, and an unknown key here makes the
-# whole file unparseable for GitHub, which startup-fails every deploy.
+# Hold the database lock until teardown, including while the optional override
+# is in use. Keep pending runs queued so new PRs do not replace them.
 concurrency:
   group: trusted-e2e-database
   cancel-in-progress: false
+  queue: max
 
 env:
   APP_PORT: 7860

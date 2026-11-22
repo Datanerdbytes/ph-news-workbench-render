@@ -313,7 +313,7 @@ jobs:
               # ran nothing, so there is nothing to verify. This check passes
               # with a notice so the repair itself can merge.
               unrunnable=$(jq -c --arg head "$HEAD_SHA" '[.workflow_runs[] | select(.head_sha == $head and .conclusion == "startup_failure")] | first // {}' <<< "$runs")
-              if [[ $(jq -r .status <<< "$unrunnable") == completed ]]; then
+              if [[ $run == '{}' && $(jq -r .status <<< "$unrunnable") == completed ]]; then
                 echo "::notice::Trusted E2E run $(jq -r .id <<< "$unrunnable") could not start — its workflow file on the default branch does not parse. Nothing to verify; this check passes so the repair can merge."
                 exit 0
               fi
