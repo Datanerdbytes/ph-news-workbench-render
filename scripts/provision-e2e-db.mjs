@@ -31,7 +31,7 @@
 import { appendFileSync } from "node:fs";
 import { neon } from "@neondatabase/serverless";
 
-const API = "https://api.neon.tech/v2";
+const API = "https://console.neon.tech/api/v2";
 const BRANCH_PREFIX = "ci-e2e-run-";
 const READY_ATTEMPTS = 12;
 const READY_INTERVAL_MS = 5_000;
@@ -149,6 +149,7 @@ async function ensure() {
     endpoints: [{ type: "read_write" }],
   });
   const branchId = created.branch.id;
+  exportEnv("NEON_BRANCH_ID", branchId);
 
   const { uri } = await neonApi(
     apiKey,
@@ -184,7 +185,6 @@ async function ensure() {
   await sql.query("CREATE SCHEMA public");
 
   exportEnv("E2E_DATABASE_URL", uri);
-  exportEnv("NEON_BRANCH_ID", branchId);
   log(`→ provisioned branch ${name} (${branchId}) from production with an empty public schema`);
 }
 

@@ -10,16 +10,16 @@ const calls = join(scratch, "calls.jsonl");
 const githubEnv = join(scratch, "github-env");
 
 // Exercise the script's real Neon driver and API client against a synthetic
-// HTTP layer: api.neon.tech gets canned JSON, anything else is the SQL
-// endpoint the serverless driver posts to. No database or credentials used.
+// HTTP layer: management requests get canned JSON; the remaining requests
+// are SQL. No database or credentials used.
 writeFileSync(preload, `
 import { appendFileSync } from 'node:fs';
 const log = (entry) => appendFileSync(process.env.CALLS_LOG, JSON.stringify(entry) + '\\n');
 globalThis.fetch = async (url, options = {}) => {
   const target = String(url);
-  if (target.includes('api.neon.tech')) {
+  if (options.headers?.Authorization) {
     const { pathname, search } = new URL(target);
-    log({ kind: 'api', method: options.method, path: pathname + search, body: options.body ? JSON.parse(options.body) : null });
+    log({ kind: 'api', url: target, method: options.method, path: pathname + search, body: options.body ? JSON.parse(options.body) : null });
     if (process.env.API_FAIL_ON && (pathname + search).includes(process.env.API_FAIL_ON)) {
       return new Response(JSON.stringify({ message: 'synthetic api failure' }), { status: 500 });
     }
@@ -57,7 +57,7 @@ afterEach(() => {
 });
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
-type Call = { kind: string; method?: string; path?: string; body?: unknown; query?: string };
+type Call = { kind: string; url?: string; method?: string; path?: string; body?: unknown; query?: string };
 
 function provision(mode = "ensure", env: Record<string, string> = {}) {
   const result = spawnSync(process.execPath, ["scripts/provision-e2e-db.mjs", mode], {
@@ -111,6 +111,7 @@ describe("E2E database provisioning", () => {
     const apiCalls = logged.filter((call) => call.kind === "api");
     expect(apiCalls.some((call) => call.method === "DELETE" && call.path?.includes("/branches/br-stale"))).toBe(true);
     const create = apiCalls.find((call) => call.method === "POST" && call.path?.endsWith("/branches"));
+    expect(create?.url).toBe("https://console.neon.tech/api/v2/projects/test-project/branches");
     expect(create?.body).toMatchObject({
       branch: { name: "ci-e2e-run-12345", parent_id: "br-parent" },
       endpoints: [{ type: "read_write" }],
@@ -141,6 +142,17 @@ describe("E2E database provisioning", () => {
     // The only work done before bailing out is the failed override probe.
     expect(logged.filter((call) => call.kind === "api")).toHaveLength(0);
     expect(logged.filter((call) => call.kind === "sql").map((call) => call.query)).toEqual(["SELECT 1"]);
+  });
+
+  it("exports the branch ID for teardown even when the connection URI request fails", () => {
+    const { result, logged, exported } = provision("ensure", {
+      E2E_DATABASE_URL: "",
+      API_FAIL_ON: "/connection_uri",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("synthetic api failure");
+    expect(logged.some((call) => call.method === "POST" && call.path?.endsWith("/branches"))).toBe(true);
+    expect(exported.trim()).toBe("NEON_BRANCH_ID=br-new");
   });
 
   it("deletes the created branch in teardown mode", () => {
