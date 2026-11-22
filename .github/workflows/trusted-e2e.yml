@@ -44,6 +44,14 @@ jobs:
         run: |
           image="ghcr.io/${REPO,,}/app"
           for attempt in $(seq 1 185); do
+            # A mid-review push supersedes this revision — a newer Trusted E2E
+            # run covers it, and provisioning a database for a stale sha is
+            # pure waste. Fail within seconds instead of after the queue.
+            head_now=$(gh api "repos/$REPO/git/ref/pull/$PR/head" --jq .object.sha) || head_now=$HEAD_SHA
+            if [[ $head_now != "$HEAD_SHA" ]]; then
+              echo "::error::The pull request head moved — this revision is superseded; a newer Trusted E2E run covers it."
+              exit 1
+            fi
             sha=$(gh api "repos/$REPO/git/ref/pull/$PR/merge" --jq .object.sha) || sha=
             if [[ $sha =~ ^[a-f0-9]{40}$ ]]; then
               parents=$(gh api "repos/$REPO/git/commits/$sha" --jq '[.parents[].sha] | join(" ")')
