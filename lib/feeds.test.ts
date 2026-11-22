@@ -11,6 +11,7 @@ vi.mock("rss-parser", () => ({
 import { sql } from "@/lib/db";
 import {
   describeFeedError,
+  extractArticleImage,
   extractFeedLink,
   extractItemImage,
   feedParser,
@@ -56,10 +57,17 @@ beforeEach(() => {
   useDb();
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
+  // The og:image fallback fetches each image-less story's page; keep tests
+  // offline unless a case stubs its own response.
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockRejectedValue(new Error("no network in unit tests")),
+  );
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("ingestFeed", () => {
@@ -317,6 +325,111 @@ describe("extractItemImage", () => {
     expect(extractItemImage({ link: "https://example.com/story", title: "No image" })).toBeNull();
     expect(extractItemImage(null)).toBeNull();
     expect(extractItemImage("junk")).toBeNull();
+  });
+});
+
+describe("extractArticleImage", () => {
+  it("reads og:image regardless of attribute order and quoting", () => {
+    expect(
+      extractArticleImage(
+        `<html><head><meta content="https://cdn.test/og.jpg" property="og:image"></head>`,
+      ),
+    ).toBe("https://cdn.test/og.jpg");
+    expect(
+      extractArticleImage(
+        `<meta name='twitter:image' content='https://cdn.test/tw.jpg'>`,
+      ),
+    ).toBe("https://cdn.test/tw.jpg");
+  });
+
+  it("prefers og:image over twitter:image and secure_url", () => {
+    const html =
+      `<meta property="og:image:secure_url" content="https://cdn.test/secure.jpg">` +
+      `<meta name="twitter:image" content="https://cdn.test/tw.jpg">` +
+      `<meta property="og:image" content="https://cdn.test/og.jpg">`;
+    expect(extractArticleImage(html)).toBe("https://cdn.test/og.jpg");
+  });
+
+  it("returns null without image meta", () => {
+    expect(extractArticleImage("<meta name='description' content='hi'>")).toBeNull();
+    expect(extractArticleImage("")).toBeNull();
+  });
+});
+
+describe("ingestFeed og:image fallback", () => {
+  it("fetches the story page's og:image when the feed provides no image", async () => {
+    parseURL.mockResolvedValue({
+      title: "Feed",
+      items: [{ link: "https://techcrunch.test/story", title: "Story" }],
+    });
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        `<html><head><title>t</title>` +
+          `<meta property="og:image" content="https://cdn.test/og.jpg?w=1&amp;h=2">` +
+          `</head></html>`,
+        { headers: { "content-type": "text/html; charset=utf-8" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    useDb([[{ id: 1 }]]);
+
+    await ingestFeed(feed, { correlationId: "c1", trigger: "cron" });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://techcrunch.test/story",
+      expect.objectContaining({ redirect: "follow" }),
+    );
+    const insert = sqlMock.mock.calls.find((call) =>
+      (call[0] as TemplateStringsArray).join(" ").includes("INSERT INTO news_items"),
+    );
+    expect(insert!.slice(1)[6]).toBe("https://cdn.test/og.jpg?w=1&h=2");
+  });
+
+  it("does not fetch any page when the feed already provides images", async () => {
+    parseURL.mockResolvedValue({
+      title: "Feed",
+      items: [
+        {
+          link: "https://example.com/story",
+          title: "Story",
+          enclosure: { url: "https://cdn.test/cover.jpg", type: "image/jpeg" },
+        },
+      ],
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    useDb([[{ id: 1 }]]);
+
+    await ingestFeed(feed, { correlationId: "c1", trigger: "cron" });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    const insert = sqlMock.mock.calls.find((call) =>
+      (call[0] as TemplateStringsArray).join(" ").includes("INSERT INTO news_items"),
+    );
+    expect(insert!.slice(1)[6]).toBe("https://cdn.test/cover.jpg");
+  });
+
+  it("stores null when the story page has no og meta", async () => {
+    parseURL.mockResolvedValue({
+      title: "Feed",
+      items: [{ link: "https://example.com/story", title: "Story" }],
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("<html><head><title>plain</title></head></html>", {
+          headers: { "content-type": "text/html" },
+        }),
+      ),
+    );
+    useDb([[{ id: 1 }]]);
+
+    await ingestFeed(feed, { correlationId: "c1", trigger: "cron" });
+
+    const insert = sqlMock.mock.calls.find((call) =>
+      (call[0] as TemplateStringsArray).join(" ").includes("INSERT INTO news_items"),
+    );
+    expect(insert!.slice(1)[6]).toBeNull();
   });
 });
 

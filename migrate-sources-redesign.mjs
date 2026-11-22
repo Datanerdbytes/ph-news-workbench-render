@@ -105,6 +105,78 @@ function extractItemImage(payload) {
   return null;
 }
 
+// og:image fallback (mirrors lib/feeds.ts#fetchArticleImage) — text-only feeds
+// like TechCrunch publish no image data at all, but their article pages carry
+// og:image in <head>.
+const ARTICLE_TIMEOUT_MS = 8000;
+const ARTICLE_MAX_BYTES = 128 * 1024;
+const OG_CONCURRENCY = 8;
+
+function extractArticleImage(html) {
+  let best = null;
+  for (const markup of html.matchAll(/<meta\b[^>]*>/gi)) {
+    const tag = markup[0];
+    const key = tag.match(/\b(?:property|name)\s*=\s*["']([^"']+)["']/i)?.[1]?.toLowerCase();
+    if (!key) continue;
+    const rank =
+      key === 'og:image'
+        ? 0
+        : key === 'twitter:image' || key === 'twitter:image:src'
+          ? 1
+          : key === 'og:image:secure_url'
+            ? 2
+            : -1;
+    if (rank === -1) continue;
+    const content = tag.match(/\bcontent\s*=\s*["']([^"']+)["']/i)?.[1];
+    if (!content) continue;
+    if (!best || rank < best.rank) best = { rank, content };
+    if (best.rank === 0) break;
+  }
+  return best?.content ?? null;
+}
+
+async function readBodyHead(res, maxBytes = ARTICLE_MAX_BYTES) {
+  const reader = res.body?.getReader();
+  if (!reader) return '';
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+  let text = '';
+  try {
+    while (text.length < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+    }
+  } catch {
+    // a partial body is enough for the <head>
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  return text;
+}
+
+async function fetchArticleImage(url) {
+  if (!/^https?:\/\//i.test(url)) return null;
+  let res;
+  try {
+    res = await fetch(url, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (compatible; PhNewsWorkbench/1.0; +https://ph-news-workbench.onrender.com)',
+      },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(ARTICLE_TIMEOUT_MS),
+    });
+  } catch {
+    return null;
+  }
+  if (!res.ok || !/text\/html/i.test(res.headers.get('content-type') ?? '')) {
+    return null;
+  }
+  const head = await readBodyHead(res);
+  const raw = extractArticleImage(head);
+  return raw ? toAbsoluteImageUrl(raw, url) : null;
+}
+
 async function migrate() {
   console.log('Starting sources redesign migration...');
 
@@ -141,6 +213,26 @@ async function migrate() {
       backfilled++;
     }
     console.log(`Backfilled ${backfilled} of ${rows.length} rows`);
+
+    // 4. Stories still without a thumbnail get one bounded og:image lookup of
+    // their own page, batched in parallel. Never throws per row; a blocked or
+    // image-less page simply stays with the monogram fallback.
+    console.log('Fetching og:image for stories without thumbnails...');
+    const ogRows = await sql`
+      SELECT id, link FROM news_items
+      WHERE image_url IS NULL AND link <> ''
+    `;
+    let ogFilled = 0;
+    for (let start = 0; start < ogRows.length; start += OG_CONCURRENCY) {
+      const batch = ogRows.slice(start, start + OG_CONCURRENCY);
+      await Promise.all(batch.map(async row => {
+        const image = await fetchArticleImage(row.link);
+        if (!image) return;
+        await sql`UPDATE news_items SET image_url = ${image} WHERE id = ${row.id}`;
+        ogFilled++;
+      }));
+    }
+    console.log(`og:image filled ${ogFilled} of ${ogRows.length} rows`);
 
     console.log('Migration completed successfully!');
   } catch (error) {

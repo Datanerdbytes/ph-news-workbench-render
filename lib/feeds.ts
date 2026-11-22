@@ -3,6 +3,9 @@ import crypto from 'crypto';
 import { sql } from '@/lib/db';
 
 const FEED_TIMEOUT_MS = 15_000;
+const ARTICLE_TIMEOUT_MS = 8_000;
+const ARTICLE_MAX_BYTES = 128 * 1024; // og:image sits in <head>; no need for the whole page
+const OG_CONCURRENCY = 8;
 const FEED_HEADERS = {
   'User-Agent':
     'Mozilla/5.0 (compatible; PhNewsWorkbench/1.0; +https://ph-news-workbench.onrender.com)',
@@ -257,6 +260,90 @@ export function extractItemImage(payload: unknown): string | null {
 }
 
 /**
+ * og:image (or twitter:image) from an article page's markup. Prefers the
+ * plain og:image; the twitter variant and secure_url are fallbacks.
+ */
+export function extractArticleImage(html: string): string | null {
+  let best: { rank: number; content: string } | null = null;
+  for (const markup of html.matchAll(/<meta\b[^>]*>/gi)) {
+    const tag = markup[0];
+    const key = tag
+      .match(/\b(?:property|name)\s*=\s*["']([^"']+)["']/i)?.[1]
+      ?.toLowerCase();
+    if (!key) continue;
+    const rank =
+      key === 'og:image'
+        ? 0
+        : key === 'twitter:image' || key === 'twitter:image:src'
+          ? 1
+          : key === 'og:image:secure_url'
+            ? 2
+            : -1;
+    if (rank === -1) continue;
+    const content = tag.match(/\bcontent\s*=\s*["']([^"']+)["']/i)?.[1];
+    if (!content) continue;
+    if (!best || rank < best.rank) best = { rank, content };
+    if (best.rank === 0) break;
+  }
+  return best?.content ?? null;
+}
+
+/**
+ * Fetch the story's own page and pull its og:image (twitter:image fallback).
+ * Never throws — feeds must keep ingesting when a site blocks bots, hangs,
+ * or serves no image meta. Returns an absolute http(s) URL or null.
+ */
+export async function fetchArticleImage(url: string): Promise<string | null> {
+  if (!/^https?:\/\//i.test(url)) return null;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      headers: FEED_HEADERS,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(ARTICLE_TIMEOUT_MS),
+    });
+  } catch {
+    return null;
+  }
+  if (!res.ok || !/text\/html/i.test(res.headers.get('content-type') ?? '')) {
+    return null;
+  }
+  const head = await readBodyHead(res, ARTICLE_MAX_BYTES);
+  const raw = extractArticleImage(head);
+  return raw ? toAbsoluteImageUrl(raw, url) : null;
+}
+
+/**
+ * One bounded og:image lookup per story whose feed publishes no image, so
+ * text-only RSS (TechCrunch-style) still renders thumbnails. Batched so a
+ * large ingest stays polite and bounded by the per-page timeout.
+ */
+async function resolveOgImages(items: unknown[]): Promise<Map<string, string | null>> {
+  const links: string[] = [];
+  for (const item of items) {
+    if (extractItemImage(item)) continue;
+    const link = asRecord(item)?.link;
+    if (
+      typeof link === 'string' &&
+      /^https?:\/\//i.test(link) &&
+      !links.includes(link)
+    ) {
+      links.push(link);
+    }
+  }
+
+  const images = new Map<string, string | null>();
+  for (let start = 0; start < links.length; start += OG_CONCURRENCY) {
+    const batch = links.slice(start, start + OG_CONCURRENCY);
+    const results = await Promise.all(
+      batch.map(async link => [link, await fetchArticleImage(link)] as const)
+    );
+    for (const [link, image] of results) images.set(link, image);
+  }
+  return images;
+}
+
+/**
  * Fetch the given URL once and work out what should actually be parsed.
  * Returns the URL unchanged when it already serves XML; when it is an HTML
  * page, returns the feed URL advertised in <link rel="alternate"> tags, or
@@ -316,12 +403,17 @@ export async function ingestFeed(
     let ingested = 0;
     let skipped = 0;
 
+    // Stories whose feed carries no image get one bounded og:image lookup of
+    // their own page (TechCrunch-style text-only feeds), batched in parallel
+    // so the ingest stays bounded by one timeout per batch.
+    const ogImages = await resolveOgImages(parsedFeed.items ?? []);
+
     for (const item of parsedFeed.items ?? []) {
       const link = item.link ?? '';
       const title = item.title ?? '';
       const guid = item.guid ?? link;
       const dedupHash = crypto.createHash('sha256').update(`${link}|${title}`).digest('hex');
-      const imageUrl = extractItemImage(item);
+      const imageUrl = extractItemImage(item) ?? ogImages.get(link) ?? null;
 
       const res = await sql`
         INSERT INTO news_items (feed_id, workspace_id, guid, link, title, summary, image_url, published_at, raw_payload, dedup_hash)
