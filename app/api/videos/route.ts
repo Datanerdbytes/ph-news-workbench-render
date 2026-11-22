@@ -202,11 +202,16 @@ export async function POST(request: Request) {
           }),
       });
 
+      // Facebook shows the description as the post's caption, and the
+      // unified /post composer sends only a description (it has no title
+      // field) — so the mirror must record the description when the title
+      // is empty. Recording the bare title would stamp "(no caption)" on
+      // an Activity log row whose Facebook post carries the caption.
       await recordNativeSchedule({
         workspaceId: access.workspace.id,
         userId: access.user.id,
         kind: 'video',
-        text: title,
+        text: title || description,
         scheduledFor: schedule.unix ? new Date(schedule.unix * 1000) : null,
         results,
       });

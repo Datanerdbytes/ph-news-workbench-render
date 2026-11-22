@@ -19,6 +19,7 @@ vi.mock("@/lib/schedule-mirror", () => ({ recordNativeSchedule: vi.fn() }));
 vi.mock("@/lib/reel-meta", () => ({ readMp4DurationSecondsFromFile: vi.fn() }));
 
 import { notifyPublishAttemptFailure } from "@/lib/notifications";
+import { recordNativeSchedule } from "@/lib/schedule-mirror";
 import { crosspostResponse, publishToSelectedPages } from "@/lib/publishing/crosspost";
 import { requirePublishingConnection } from "@/lib/publishing/connection";
 import { publishPageVideo } from "@/lib/publishing/videos";
@@ -31,6 +32,7 @@ const responseMock = crosspostResponse as unknown as Mock;
 const videoMock = publishPageVideo as unknown as Mock;
 const durationMock = readMp4DurationSecondsFromFile as unknown as Mock;
 const notifyMock = notifyPublishAttemptFailure as unknown as Mock;
+const mirrorMock = recordNativeSchedule as unknown as Mock;
 
 const access = {
   user: { id: "u1" },
@@ -217,5 +219,67 @@ describe("POST /api/videos", () => {
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe("Choose an MP4 or MOV video.");
     expect(videoMock).not.toHaveBeenCalled();
+  });
+
+  it("mirrors the description when the composer sent no title", async () => {
+    // The unified /post composer has no title field — with a video attached
+    // it sends the caption as the description only. Facebook publishes that
+    // description as the post's caption, so the Activity log must show it
+    // too, not the "(no caption)" placeholder an empty title would stamp.
+    const res = await POST(
+      multipartRequest([
+        { name: "description", body: Buffer.from("The caption I typed") },
+        { name: "pageIds", body: Buffer.from(JSON.stringify(["p1"])) },
+        {
+          name: "video",
+          filename: "clip.mp4",
+          body: VIDEO_BYTES,
+          contentType: "video/mp4",
+        },
+      ])
+    );
+
+    expect(res.status).toBe(201);
+    expect(mirrorMock).toHaveBeenCalledTimes(1);
+    expect(mirrorMock.mock.calls[0][0]).toMatchObject({
+      kind: "video",
+      text: "The caption I typed",
+    });
+  });
+
+  it("mirrors the title over the description when both were sent", async () => {
+    // The Videos composer always appends both parts, possibly empty — an
+    // empty title falls back to the description, a typed title wins.
+    const res = await POST(
+      videoRequest([{ name: "description", body: Buffer.from("The caption") }])
+    );
+
+    expect(res.status).toBe(201);
+    expect(mirrorMock.mock.calls[0][0]).toMatchObject({
+      kind: "video",
+      text: "My video",
+    });
+  });
+
+  it("mirrors the description when the title part is empty", async () => {
+    const res = await POST(
+      multipartRequest([
+        { name: "title", body: Buffer.from("") },
+        { name: "description", body: Buffer.from("The caption") },
+        { name: "pageIds", body: Buffer.from(JSON.stringify(["p1"])) },
+        {
+          name: "video",
+          filename: "clip.mp4",
+          body: VIDEO_BYTES,
+          contentType: "video/mp4",
+        },
+      ])
+    );
+
+    expect(res.status).toBe(201);
+    expect(mirrorMock.mock.calls[0][0]).toMatchObject({
+      kind: "video",
+      text: "The caption",
+    });
   });
 });
