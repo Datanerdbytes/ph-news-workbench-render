@@ -229,7 +229,11 @@ export async function searchFeeds(
     if (oldest === undefined) break;
     searchCache.delete(oldest);
   }
-  searchCache.set(cacheKey, { expires: now + CACHE_TTL_MS, sources });
+  // Empty results are never cached: a transient upstream blip returning no
+  // rows would otherwise freeze "no publications" past the retry button.
+  if (sources.length > 0) {
+    searchCache.set(cacheKey, { expires: now + CACHE_TTL_MS, sources });
+  }
 
   return sources;
 }

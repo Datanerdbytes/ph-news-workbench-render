@@ -88,37 +88,97 @@ export function extractArticleImage(html: string): string | null {
   return best?.content ?? null;
 }
 
+export type PublicDocument = {
+  status: number;
+  contentType: string;
+  finalUrl: string;
+  text: string;
+};
+
 /**
- * Best-effort metadata lookup for both ingestion and migration. Every hop
- * passes through the public-source policy and its pinned socket connector.
+ * Fetch a document through the pinned public transport, following redirects
+ * hop by hop so every destination re-runs the public-address policy. Reads at
+ * most `opts.maxBytes` of the body; bodies whose content type does not match
+ * `opts.acceptContentTypes` (when given) are cancelled unread. Returns null
+ * when the transport, the policy, or the redirect chain fails; callers map
+ * `status` to messages.
  */
-export async function fetchArticleImage(url: string): Promise<string | null> {
-  const signal = AbortSignal.timeout(ARTICLE_TIMEOUT_MS);
+export async function fetchPublicDocument(
+  url: string,
+  opts: {
+    headers: Record<string, string>;
+    timeoutMs: number;
+    maxBytes: number;
+    maxRedirects?: number;
+    acceptContentTypes?: RegExp;
+  },
+): Promise<PublicDocument | null> {
+  const signal = AbortSignal.timeout(opts.timeoutMs);
+  const maxRedirects = opts.maxRedirects ?? MAX_ARTICLE_REDIRECTS;
   let currentUrl = url;
   try {
-    for (let redirects = 0; redirects <= MAX_ARTICLE_REDIRECTS; redirects++) {
+    for (let redirects = 0; redirects <= maxRedirects; redirects++) {
       const res = await fetchPublicSource(currentUrl, {
-        headers: ARTICLE_HEADERS,
+        headers: opts.headers,
         signal,
       });
       if (REDIRECT_STATUSES.has(res.status)) {
         const location = res.headers.get('location');
         await res.body?.cancel().catch(() => {});
-        if (!location || redirects === MAX_ARTICLE_REDIRECTS) return null;
+        if (!location || redirects === maxRedirects) return null;
         currentUrl = new URL(location, currentUrl).toString();
         continue;
       }
-      if (!res.ok || !/text\/html/i.test(res.headers.get('content-type') ?? '')) {
+      // Error bodies are cancelled unread — callers only need the status,
+      // and a rejected stream may never resolve a read.
+      if (res.status >= 400) {
         await res.body?.cancel().catch(() => {});
-        return null;
+        return {
+          status: res.status,
+          contentType: res.headers.get('content-type') ?? '',
+          finalUrl: res.url || currentUrl,
+          text: '',
+        };
       }
-      const head = await readBodyHead(res, ARTICLE_MAX_BYTES);
-      const raw = extractArticleImage(head);
-      // The pinned transport wraps streaming bodies, which clears Response.url.
-      return raw ? toAbsoluteImageUrl(raw, res.url || currentUrl) : null;
+      const contentType = res.headers.get('content-type') ?? '';
+      if (opts.acceptContentTypes && !opts.acceptContentTypes.test(contentType)) {
+        await res.body?.cancel().catch(() => {});
+        return {
+          status: res.status,
+          contentType,
+          finalUrl: res.url || currentUrl,
+          text: '',
+        };
+      }
+      const text = await readBodyHead(res, opts.maxBytes);
+      return {
+        status: res.status,
+        contentType,
+        // The pinned transport wraps streaming bodies, which clears Response.url.
+        finalUrl: res.url || currentUrl,
+        text,
+      };
     }
   } catch {
-    // Blocked, unavailable, or malformed article pages have no thumbnail.
+    // Blocked, unreachable, or malformed destinations have no document.
   }
   return null;
+}
+
+/**
+ * Best-effort metadata lookup for both ingestion and migration. Every hop
+ * passes through the public-source policy and its pinned socket connector.
+ */
+export async function fetchArticleImage(url: string): Promise<string | null> {
+  const doc = await fetchPublicDocument(url, {
+    headers: ARTICLE_HEADERS,
+    timeoutMs: ARTICLE_TIMEOUT_MS,
+    maxBytes: ARTICLE_MAX_BYTES,
+    acceptContentTypes: /text\/html/i,
+  });
+  if (!doc || doc.status >= 400) {
+    return null;
+  }
+  const raw = extractArticleImage(doc.text);
+  return raw ? toAbsoluteImageUrl(raw, doc.finalUrl) : null;
 }

@@ -178,6 +178,8 @@ describe("formatCompact", () => {
     [1_000_000, "1M"],
     [1_340_140, "1.3M"],
     [12_400_000, "12M"],
+    [999_999, "1M"],
+    [1_049_000, "1M"],
   ])("formats %d as %s", (value, expected) => {
     expect(formatCompact(value)).toBe(expected);
   });

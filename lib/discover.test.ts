@@ -116,6 +116,24 @@ describe("searchFeeds", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("does not cache empty results so a retry can recover", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({ results: [] }), {
+          headers: { "content-type": "application/json" },
+        }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ results: [rawFeed] }), {
+          headers: { "content-type": "application/json" },
+        })),
+    );
+
+    expect(await searchFeeds("ghost-topic")).toEqual([]);
+    const recovered = await searchFeeds("ghost-topic");
+    expect(recovered).toHaveLength(1);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it("throws a user-facing error when the index fails", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("nope", { status: 503 })));
     await expect(searchFeeds("tech")).rejects.toThrow(DiscoverSearchError);
