@@ -1,0 +1,256 @@
+name: Trusted E2E
+run-name: E2E PR ${{ github.event.number }} ${{ github.event.pull_request.head.sha }} ${{ github.event.pull_request.base.sha }}
+
+on:
+  pull_request_target:
+    branches: [main]
+
+permissions: {}
+
+# Hold the lock until teardown, including while the optional override is in use.
+concurrency:
+  group: trusted-e2e-database
+  cancel-in-progress: false
+  queue: max
+
+env:
+  APP_PORT: 7860
+
+jobs:
+  image:
+    name: Find the PR merge image
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+    outputs:
+      sha: ${{ steps.image.outputs.sha }}
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          image="ghcr.io/${REPO,,}/app"
+          for attempt in $(seq 1 185); do
+            # A mid-review push supersedes this revision — a newer Trusted E2E
+            # run covers it, and provisioning a database for a stale sha is
+            # pure waste. Fail within seconds instead of after the queue.
+            head_now=$(gh api "repos/$REPO/git/ref/pull/$PR/head" --jq .object.sha) || head_now=$HEAD_SHA
+            if [[ $head_now != "$HEAD_SHA" ]]; then
+              echo "::error::The pull request head moved — this revision is superseded; a newer Trusted E2E run covers it."
+              exit 1
+            fi
+            sha=$(gh api "repos/$REPO/git/ref/pull/$PR/merge" --jq .object.sha) || sha=
+            if [[ $sha =~ ^[a-f0-9]{40}$ ]]; then
+              parents=$(gh api "repos/$REPO/git/commits/$sha" --jq '[.parents[].sha] | join(" ")')
+              if [[ $parents == "$BASE_SHA $HEAD_SHA" ]]; then
+                runs=$(gh api --method GET "repos/$REPO/actions/workflows/ci.yml/runs" -f event=pull_request -f head_sha="$HEAD_SHA")
+                id=$(jq -r --argjson pr "$PR" --arg base "$BASE_SHA" '
+                  [.workflow_runs[] | select(any(.pull_requests[]; .number == $pr and .base.sha == $base))] | first.id // empty
+                ' <<< "$runs")
+                if [[ -n $id ]]; then
+                  jobs=$(gh api "repos/$REPO/actions/runs/$id/jobs")
+                  conclusion=$(jq -r 'first(.jobs[] | select(.name == "Docker build & scan")).conclusion // empty' <<< "$jobs")
+                  if [[ -n $conclusion && $conclusion != success ]]; then
+                    echo "::error::Docker build & scan in CI run $id concluded with $conclusion."
+                    exit 1
+                  fi
+                  if [[ $conclusion == success ]] &&
+                     docker manifest inspect "$image:$sha" >/dev/null 2>&1; then
+                    echo "sha=$sha" >> "$GITHUB_OUTPUT"
+                    exit 0
+                  fi
+                fi
+              fi
+            fi
+            sleep 20
+          done
+          echo "::error::No container image for the expected PR merge commit."
+          exit 1
+
+  provision:
+    name: Provision the E2E database
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: e2e-db-management
+    permissions:
+      contents: read
+    outputs:
+      envelope: ${{ steps.handoff.outputs.envelope }}
+      branch: ${{ steps.identity.outputs.branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts
+      - run: node scripts/provision-e2e-db.mjs ensure
+        env:
+          E2E_DATABASE_URL: ${{ secrets.E2E_DATABASE_URL }}
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+          NEON_PARENT_BRANCH_ID: ${{ vars.NEON_PARENT_BRANCH_ID }}
+      - id: identity
+        if: always()
+        run: printf 'branch=%s\n' "$NEON_BRANCH_ID" >> "$GITHUB_OUTPUT"
+      - id: handoff
+        run: node scripts/e2e-db-handoff.mjs encrypt
+        env:
+          E2E_DB_HANDOFF_KEY: ${{ secrets.E2E_DB_HANDOFF_KEY }}
+
+  playwright:
+    name: Playwright (${{ needs.image.outputs.sha }})
+    needs: [image, provision]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: e2e
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE_SHA: ${{ needs.image.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.image.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          HUSKY: '0'
+
+      - name: Cache the Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Read the encrypted database URL
+        run: node scripts/e2e-db-handoff.mjs decrypt
+        env:
+          E2E_DB_HANDOFF_KEY: ${{ secrets.E2E_DB_HANDOFF_KEY }}
+          E2E_DB_ENVELOPE: ${{ needs.provision.outputs.envelope }}
+
+      # The base schema, the migrations, the owner account and its workspace,
+      # in the order the migrations depend on each other. The Facebook page
+      # token migration decrypts with this secret, so it has to be the same
+      # value the container runs with.
+      - name: Prepare the test database
+        run: node scripts/prepare-e2e-db.mjs
+        env:
+          DATABASE_URL: ${{ env.E2E_DATABASE_URL }}
+          OWNER_EMAIL: ${{ secrets.E2E_OWNER_EMAIL }}
+          OWNER_PASSWORD: ${{ secrets.E2E_OWNER_PASSWORD }}
+          BETTER_AUTH_SECRET: ${{ secrets.E2E_BETTER_AUTH_SECRET }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Same lowercased registry path the docker job pushed to.
+      - name: Resolve the image name
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "IMAGE=ghcr.io/$(echo "$REPOSITORY" | tr '[:upper:]' '[:lower:]')/app" >> "$GITHUB_ENV"
+
+      - name: Pull the image under test
+        run: docker pull ${{ env.IMAGE }}:${{ env.IMAGE_SHA }}
+
+      - name: Start the container
+        env:
+          DATABASE_URL: ${{ env.E2E_DATABASE_URL }}
+          BETTER_AUTH_SECRET: ${{ secrets.E2E_BETTER_AUTH_SECRET }}
+          SIGNUP_INVITE_CODE: ${{ secrets.E2E_SIGNUP_INVITE_CODE }}
+        run: |
+          docker run -d --name app \
+            -p ${{ env.APP_PORT }}:7860 \
+            -e DATABASE_URL \
+            -e BETTER_AUTH_SECRET \
+            -e BETTER_AUTH_URL="http://localhost:${{ env.APP_PORT }}" \
+            -e BETTER_AUTH_TRUSTED_ORIGINS="http://localhost:${{ env.APP_PORT }}" \
+            -e SIGNUP_INVITE_CODE \
+            -e DISABLE_LOCAL_SCHEDULER=1 \
+            -e DISABLE_AUTH_RATE_LIMIT=1 \
+            ${{ env.IMAGE }}:${{ env.IMAGE_SHA }}
+
+      - name: Wait for the app to answer
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl -fsS "http://localhost:${{ env.APP_PORT }}/login" > /dev/null; then
+              echo "app is up after ${attempt} attempts"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the container never became ready" >&2
+          docker logs app >&2
+          exit 1
+
+      - name: Run the Playwright suite
+        run: npx playwright test
+        env:
+          PLAYWRIGHT_BASE_URL: http://localhost:${{ env.APP_PORT }}
+          DATABASE_URL: ${{ env.E2E_DATABASE_URL }}
+          OWNER_EMAIL: ${{ secrets.E2E_OWNER_EMAIL }}
+          OWNER_PASSWORD: ${{ secrets.E2E_OWNER_PASSWORD }}
+
+      - name: Upload the Playwright artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.run_id }}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+
+  cleanup:
+    name: Delete the E2E database branch
+    needs: [provision, playwright]
+    if: always() && needs.provision.outputs.branch != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: e2e-db-management
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts
+      - run: node scripts/provision-e2e-db.mjs teardown
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+          NEON_BRANCH_ID: ${{ needs.provision.outputs.branch }}
