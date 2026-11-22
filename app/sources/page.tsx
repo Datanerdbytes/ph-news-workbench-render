@@ -8,6 +8,7 @@ import {
   CheckCircle,
   ChevronDown,
   Clock,
+  Compass,
   Edit2,
   Layers,
   Loader2,
@@ -822,6 +823,14 @@ function SourcesPageInner() {
               <Button
                 variant="ghost"
                 size="icon-sm"
+                onClick={() => router.push('/sources/discover')}
+                aria-label="Discover sources"
+              >
+                <Compass className="size-3.5" aria-hidden />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
                 onClick={() => setAddDialogOpen(true)}
                 aria-label="Add source"
               >
@@ -911,10 +920,20 @@ function SourcesPageInner() {
           <div className="shrink-0 border-b border-border/70 md:hidden">
             <div className="flex items-center justify-between px-4 py-3">
               <h1 className="font-heading text-lg font-semibold tracking-tight">Sources</h1>
-              <Button size="sm" onClick={() => setAddDialogOpen(true)}>
-                <Plus className="size-3.5" aria-hidden />
-                Add source
-              </Button>
+              <div className="flex items-center gap-1.5">
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => router.push('/sources/discover')}
+                  aria-label="Discover sources"
+                >
+                  <Compass className="size-3.5" aria-hidden />
+                </Button>
+                <Button size="sm" onClick={() => setAddDialogOpen(true)}>
+                  <Plus className="size-3.5" aria-hidden />
+                  Add source
+                </Button>
+              </div>
             </div>
             <div
               className="flex items-center gap-1 overflow-x-auto px-4 pb-2"

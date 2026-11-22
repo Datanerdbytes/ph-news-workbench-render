@@ -50,6 +50,20 @@ export function formatCost(value: number): string {
   return `$${value.toFixed(5)}`;
 }
 
+/** Compact follower-style counts: 82K, 892K, 1.3M. */
+export function formatCompact(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0";
+  if (value >= 1_000_000) {
+    const millions = value / 1_000_000;
+    return `${millions >= 10 ? Math.round(millions) : Math.round(millions * 10) / 10}M`;
+  }
+  if (value >= 1_000) {
+    const thousands = value / 1_000;
+    return `${thousands >= 10 ? Math.round(thousands) : Math.round(thousands * 10) / 10}K`;
+  }
+  return String(Math.round(value));
+}
+
 export function wordCount(text: string): number {
   const trimmed = text.trim();
   return trimmed ? trimmed.split(/\s+/).length : 0;

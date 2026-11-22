@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  formatCompact,
   formatCost,
   formatDateTime,
   formatDomain,
@@ -162,5 +163,22 @@ describe("stripMarkdown", () => {
     expect(stripMarkdown(input)).toBe(
       "Breaking\nOfficials confirmed the results today.\n\n• Point one\n• Point two\n\nRead the report (https://example.com/report)."
     );
+  });
+});
+
+describe("formatCompact", () => {
+  it.each([
+    [0, "0"],
+    [-5, "0"],
+    [82, "82"],
+    [999, "999"],
+    [1000, "1K"],
+    [82_000, "82K"],
+    [892_400, "892K"],
+    [1_000_000, "1M"],
+    [1_340_140, "1.3M"],
+    [12_400_000, "12M"],
+  ])("formats %d as %s", (value, expected) => {
+    expect(formatCompact(value)).toBe(expected);
   });
 });
