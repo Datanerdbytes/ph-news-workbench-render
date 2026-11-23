@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import { redirect } from "next/navigation";
 import { NextRequest } from "next/server";
 
+vi.mock("next/navigation", () => ({ redirect: vi.fn() }));
 vi.mock("@/lib/auth", () => ({
   auth: { api: { getSession: vi.fn() } },
 }));
@@ -13,6 +15,7 @@ vi.mock("@/lib/facebook", () => ({
 
 import { auth } from "@/lib/auth";
 import { facebookConfigured } from "@/lib/facebook";
+import Home from "@/app/page";
 import { GET } from "./route";
 
 const getSession = auth.api.getSession as unknown as Mock;
@@ -123,6 +126,7 @@ describe("GET /api/facebook/connect", () => {
 
     const url = redirectTo(res);
     expect(url.pathname).toBe("/");
-    expect(url.searchParams.get("facebook")).toBe("unconfigured");
+    await Home({ searchParams: Promise.resolve(Object.fromEntries(url.searchParams)) });
+    expect(redirect).toHaveBeenCalledExactlyOnceWith("/sources?facebook=unconfigured");
   });
 });
