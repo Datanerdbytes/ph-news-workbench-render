@@ -219,6 +219,17 @@ docker run --rm -p 7860:7860 --env-file .env.local workbench-selfhost
 (`--env-file .env.local` passes your local secrets; nothing is baked into the
 image.)
 
+## Tests
+
+`npm test` runs the Vitest suite.
+
+`npm run test:e2e` is the CI form: it expects the cloud E2E database that CI
+provisions, because `e2e/helpers/db.ts` talks to Postgres through the Neon HTTP
+driver. Against the local Docker stack use `npm run test:e2e:local` instead —
+it preloads `scripts/neon-local.mjs` so the harness's driver calls tunnel
+through `phnews-wsproxy` to `phnews-pg`, the same way the app does. Without the
+preload those specs fail with `NeonDbError: … TypeError: fetch failed`.
+
 ## Notes
 
 - The GitHub Actions keep-alive cron auto-disables after 60 days without a
