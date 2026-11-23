@@ -8,10 +8,15 @@ import { defaultTextModel, draftPost, resolveTextModel } from "./nim";
 
 const sqlMock = sql as unknown as Mock;
 
-const completion = (content: string, prompt = 10, completionTokens = 20) =>
+const completion = (
+  content: string,
+  prompt = 10,
+  completionTokens = 20,
+  finishReason = "stop"
+) =>
   new Response(
     JSON.stringify({
-      choices: [{ message: { content } }],
+      choices: [{ message: { content }, finish_reason: finishReason }],
       usage: { prompt_tokens: prompt, completion_tokens: completionTokens },
     }),
     { status: 200, headers: { "content-type": "application/json" } }
@@ -80,7 +85,11 @@ describe("draftPost", () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toBe("https://nim.test/v1/chat/completions");
     expect(init.headers.Authorization).toBe("Bearer key-123");
-    expect(JSON.parse(init.body).model).toBe(DEFAULT_TEXT_MODEL);
+    const body = JSON.parse(init.body);
+    expect(body.model).toBe(DEFAULT_TEXT_MODEL);
+    // Reasoning models must answer directly, or the hidden reasoning eats the
+    // whole max_tokens budget and the draft comes back empty.
+    expect(body.reasoning_effort).toBe("none");
   });
 
   it("uses the requested model when one is passed", async () => {
@@ -110,10 +119,22 @@ describe("draftPost", () => {
     );
   });
 
-  it("enforces the per-draft token cap before touching the database", async () => {
+  it("reports a truncated draft when the token budget runs out", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(completion("", 10, 1500, "length"))
+    );
+    await expect(draftPost("hi")).rejects.toThrow(
+      "The AI ran out of tokens before writing the draft. Try again or pick a faster model."
+    );
+  });
+
+  it("records usage before rejecting an oversized draft", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(completion("big", 1500, 500)));
     await expect(draftPost("hi")).rejects.toThrow("per-draft cap exceeded");
-    expect(sqlMock).not.toHaveBeenCalled();
+    expect(
+      sqlMock.mock.calls[0][0].join(" ").includes("INSERT INTO usage_daily")
+    ).toBe(true);
   });
 
   it("enforces the daily token cap after recording usage", async () => {

@@ -38,6 +38,13 @@ export async function draftPost(
         model,
         messages: [{ role: 'user', content: prompt }],
         max_tokens: PER_DRAFT_CAP,
+        // Reasoning models on NIM (Nemotron 3 Nano/Omni, Lightning, Super VL)
+        // charge their hidden reasoning against max_tokens. With a post-sized
+        // budget the reasoning can consume the whole allowance, so the request
+        // succeeds with an empty `content` — the "empty draft" failure. A
+        // short Facebook post does not need a reasoning trace, so ask the
+        // endpoint to answer directly and keep the budget for the draft.
+        reasoning_effort: 'none',
       }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
@@ -51,22 +58,30 @@ export async function draftPost(
   if (!res.ok) throw new Error(`NIM ${res.status}: ${await res.text()}`);
 
   const data = await res.json();
-  const text: string = data.choices?.[0]?.message?.content ?? '';
+  const choice = data.choices?.[0];
+  const text: string = choice?.message?.content ?? '';
   const inputTokens = data.usage?.prompt_tokens ?? 0;
   const outputTokens = data.usage?.completion_tokens ?? 0;
   const total = inputTokens + outputTokens;
 
-  if (!text.trim()) {
-    throw new Error('The model returned an empty draft. Try a different model.');
-  }
-
-  if (total > PER_DRAFT_CAP) throw new Error('per-draft cap exceeded');
-
+  // Record the spend before validating the answer: NIM already billed these
+  // tokens, including a draft that came back empty or over the per-draft cap.
   const today = new Date().toISOString().slice(0, 10);
   await sql`INSERT INTO usage_daily (day, total_tokens) VALUES (${today}, ${total})
             ON CONFLICT (day) DO UPDATE SET total_tokens = usage_daily.total_tokens + ${total}`;
 
   const row = await sql`SELECT total_tokens FROM usage_daily WHERE day = ${today}`;
+
+  if (!text.trim()) {
+    throw new Error(
+      choice?.finish_reason === 'length'
+        ? 'The AI ran out of tokens before writing the draft. Try again or pick a faster model.'
+        : 'The model returned an empty draft. Try a different model.'
+    );
+  }
+
+  if (total > PER_DRAFT_CAP) throw new Error('per-draft cap exceeded');
+
   if ((row[0]?.total_tokens ?? 0) > DAILY_CAP) {
     throw new Error('daily cap exceeded');
   }
