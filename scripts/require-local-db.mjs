@@ -9,6 +9,11 @@
 // reads BETTER_AUTH_URL while e2e/helpers/db.ts reads DATABASE_URL — so this
 // cannot prove the two match. It can prove the database is local, which is the
 // part that makes a mismatched target destructive rather than merely wrong.
+//
+// This is a locality check, not an identity check: an SSH tunnel that forwards
+// a remote database to localhost:5432 passes. Identifying the server reliably
+// would need a marker the database does not carry, so the README states the
+// weaker guarantee instead of implying one that does not hold.
 import { pathToFileURL } from "node:url";
 
 const LOCAL_HOSTS = new Set(["postgres", "localhost", "127.0.0.1", "[::1]", "::1"]);

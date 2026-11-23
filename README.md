@@ -233,8 +233,9 @@ preload those specs fail with `NeonDbError: … TypeError: fetch failed`.
 The local form **writes to the database in `DATABASE_URL`** — the specs seed
 notifications, flip drafts, and delete rows by fixture marker — so it refuses
 to start unless that URL resolves to a local host (`scripts/require-local-db.mjs`).
-It is not a disposable database, unlike CI's branch: expect your dev data to be
-touched.
+That is a locality check, not an identity check: an SSH tunnel forwarding a
+remote database to `localhost:5432` would still pass. And it is not a
+disposable database, unlike CI's branch — expect your dev data to be touched.
 
 ## Notes
 
