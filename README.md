@@ -230,6 +230,12 @@ it preloads `scripts/neon-local.mjs` so the harness's driver calls tunnel
 through `phnews-wsproxy` to `phnews-pg`, the same way the app does. Without the
 preload those specs fail with `NeonDbError: … TypeError: fetch failed`.
 
+The local form **writes to the database in `DATABASE_URL`** — the specs seed
+notifications, flip drafts, and delete rows by fixture marker — so it refuses
+to start unless that URL resolves to a local host (`scripts/require-local-db.mjs`).
+It is not a disposable database, unlike CI's branch: expect your dev data to be
+touched.
+
 ## Notes
 
 - The GitHub Actions keep-alive cron auto-disables after 60 days without a
