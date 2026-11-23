@@ -16,7 +16,6 @@ import {
   Globe,
   Images,
   LayoutDashboard,
-  Newspaper,
   LogOut,
   Menu,
   PenLine,
@@ -71,7 +70,7 @@ type NavItem = {
 };
 
 // Workspace holds the cross-platform utilities; Facebook Page holds the Page
-// pipeline (queue → composers); Channels holds the platforms you publish to,
+// pipeline (compose → composers); Channels holds the platforms you publish to,
 // each linking to its own composer or studio.
 const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
@@ -86,7 +85,6 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: "Facebook Page",
     items: [
-      { href: "/queue", label: "Story Queue", icon: Newspaper, facebookOnly: true },
       { href: "/compose", label: "Compose", icon: SquarePen, facebookOnly: true },
       { href: "/post", label: "Post", icon: PenLine, facebookOnly: true },
       { href: "/photos", label: "Photos", icon: Images, facebookOnly: true },
@@ -166,8 +164,7 @@ function isActivePath(pathname: string, item: NavItem) {
 }
 
 function pageLabel(pathname: string) {
-  if (pathname === "/") return "Story Queue";
-  if (pathname.startsWith("/queue")) return "Story Queue";
+  if (pathname === "/") return "Sources";
   if (pathname.startsWith("/compose")) return "Compose";
   if (pathname.startsWith("/dashboard")) return "Dashboard";
   if (pathname.startsWith("/status") || pathname.startsWith("/drafts"))
@@ -443,7 +440,7 @@ export function AppFrame({
 
           {showFacebookTools ? (
             <Link
-              href="/queue"
+              href="/sources"
               className="flex h-9 items-center justify-center gap-1.5 rounded-lg bg-brand text-[12.5px] font-semibold text-brand-foreground shadow-sm transition-colors hover:bg-brand-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
             >
               <Plus className="size-4" aria-hidden />
@@ -681,11 +678,7 @@ export function AppFrame({
                   status={platformStatusForSection}
                 />
               ) : showFacebookTools ? (
-                <>
-                  <StoryQueueQuickLink />
-                  <span className="hidden h-4 w-px bg-border sm:block" aria-hidden />
-                  <PublishQuickNav />
-                </>
+                <PublishQuickNav />
               ) : null}
               <NotificationBell />
               {!platformSection && <FacebookConnectionButton />}
@@ -791,10 +784,10 @@ function PlatformStatusCard({
   );
 }
 
-// Header quick-nav for the platform studios, mirroring the Facebook pair
-// (Story Queue + Publish dropdown): a link to the studio's composer plus,
-// when the platform is connected and its public URL is derivable, an
-// external link to the profile/channel itself.
+// Header quick-nav for the platform studios, mirroring the Facebook Publish
+// dropdown: a link to the studio's composer plus, when the platform is
+// connected and its public URL is derivable, an external link to the
+// profile/channel itself.
 const PLATFORM_QUICK_NAV: Record<
   PlatformSection,
   { href: string; label: string; externalLabel: string | null }
@@ -886,32 +879,6 @@ function PlatformQuickNav({
         </a>
       ) : null}
     </nav>
-  );
-}
-
-function StoryQueueQuickLink() {
-  const pathname = usePathname();
-  const active = pathname.startsWith("/queue");
-
-  return (
-    <Link
-      href="/queue"
-      aria-label="Story Queue"
-      aria-current={active ? "page" : undefined}
-      title="Story Queue"
-      className={cn(
-        "flex items-center gap-1.5 rounded-[7px] px-2 py-1.5 text-[11.5px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
-        active
-          ? "bg-brand-soft text-brand-strong"
-          : "text-muted-foreground hover:bg-surface-3 hover:text-foreground"
-      )}
-    >
-      <Newspaper
-        className={cn("size-3.5", active && "text-brand")}
-        aria-hidden
-      />
-      <span className="hidden sm:inline">Story Queue</span>
-    </Link>
   );
 }
 

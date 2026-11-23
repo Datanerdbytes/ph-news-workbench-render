@@ -20,7 +20,7 @@ type SourceItemRow = {
 const DEFAULT_LIMIT = 30;
 const MAX_LIMIT = 50;
 
-// Unlike /api/items (the 30-day Story Queue inbox), this endpoint backs the
+// Unlike /api/items (the 30-day story desk inbox), this endpoint backs the
 // Sources page archive browser: it serves the feed's lifetime articles so a
 // source can be paged through the way a reader browses a publication.
 export async function GET(request: Request) {

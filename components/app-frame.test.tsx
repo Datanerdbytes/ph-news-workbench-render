@@ -369,7 +369,6 @@ describe("AppFrame platform nav", () => {
 
     const facebook = groups.get("Facebook Page")!;
     for (const [label, href] of [
-      ["Story Queue", "/queue"],
       ["Compose", "/compose"],
       ["Post", "/post"],
       ["Photos", "/photos"],
@@ -393,6 +392,12 @@ describe("AppFrame platform nav", () => {
     // The Page tools must not leak into the channels group.
     expect(
       within(channels).queryByRole("link", { name: "Post" })
+    ).not.toBeInTheDocument();
+
+    // The Story Queue page was retired in favour of the Sources page — no
+    // sidebar entry and no header quick link may bring it back.
+    expect(
+      screen.queryByRole("link", { name: "Story Queue" })
     ).not.toBeInTheDocument();
   });
 

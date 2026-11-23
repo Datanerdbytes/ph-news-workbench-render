@@ -7,7 +7,7 @@ import { recordScheduleEvent } from '@/lib/schedule-events';
  * `scheduled_publish_time`, or `planned_start_time` for live) and then
  * mirrored here so the Calendar and Analytics can see it.
  *
- * The Story Queue does NOT use this module — it schedules locally and the
+ * The story desk does NOT use this module — it schedules locally and the
  * worker publishes it, so it writes `source='local'` rows directly.
  * YouTube uploads mirror here too (`platform:'youtube'`, kind `'video'`):
  * the upload happens immediately and YouTube auto-publishes via

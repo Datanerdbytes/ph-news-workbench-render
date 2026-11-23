@@ -1,6 +1,6 @@
-// Shared client for the Story Queue data (/api/items) used by the /queue
-// browse page and the /compose workspace, so both pages read the same shapes
-// and never drift apart.
+// Shared client for the ingested-story data (/api/items) used by the Sources
+// page and the /compose workspace, so both read the same shapes and never
+// drift apart.
 
 export type QueueItem = {
   id: number;

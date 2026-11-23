@@ -27,7 +27,7 @@ type FeedCountRow = {
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 
-// The Story Queue is the active inbox: list and stat chips cover the last N
+// The story desk is the active inbox: list and stat chips cover the last N
 // days of ingested stories, so Published drifts back to zero on its own as
 // stories age out instead of counting everything ever ingested. Lifetime
 // numbers belong on the Dashboard. (created_at = ingest time, not the
