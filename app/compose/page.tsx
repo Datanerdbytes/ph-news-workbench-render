@@ -128,7 +128,7 @@ function WorkspaceSkeleton() {
   );
 }
 
-function EmptyWorkspace({ onOpenQueue }: { onOpenQueue: () => void }) {
+function EmptyWorkspace({ onOpenSources }: { onOpenSources: () => void }) {
   return (
     <div className="grid min-h-[55vh] place-items-center rounded-xl border border-dashed border-border bg-card/50 p-8 text-center">
       <div className="max-w-sm">
@@ -137,16 +137,16 @@ function EmptyWorkspace({ onOpenQueue }: { onOpenQueue: () => void }) {
         </span>
         <h2 className="mt-4 font-heading text-2xl">The desk is quiet</h2>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-          Pick a story from the Story Queue to start drafting.
+          Pick a story from Sources to start drafting.
         </p>
         <Button
           variant="brand"
           size="sm"
           className="mt-4"
-          onClick={onOpenQueue}
+          onClick={onOpenSources}
         >
           <Newspaper className="size-3.5" aria-hidden />
-          Open Story Queue
+          Open Sources
         </Button>
       </div>
     </div>
@@ -898,13 +898,13 @@ function ComposeWorkspace() {
       <div className="flex min-h-0 flex-1 flex-col">
         <header className="flex shrink-0 items-center gap-3 border-b border-border/70 px-4 py-3 sm:px-6">
           <Link
-            href="/queue"
-            aria-label="Back to Story Queue"
+            href="/sources"
+            aria-label="Back to Sources"
             className="flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-border bg-card px-2 text-faint transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
           >
             <ArrowLeft className="size-3.5" aria-hidden />
             <span className="hidden text-[11.5px] font-medium sm:inline">
-              Story Queue
+              Sources
             </span>
           </Link>
           <div className="min-w-0">
@@ -926,7 +926,7 @@ function ComposeWorkspace() {
                 onRetry={load}
               />
             ) : !selected ? (
-              <EmptyWorkspace onOpenQueue={() => router.push('/queue')} />
+              <EmptyWorkspace onOpenSources={() => router.push('/sources')} />
             ) : (
               <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px] xl:items-start">
                 <ComposerCard

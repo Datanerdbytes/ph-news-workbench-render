@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation';
 
-// The Story Queue moved to its own page (/queue) and Compose to /compose;
-// the old combined workspace at / now points at the queue.
+// Stories are picked and drafted straight from the Sources page, so the old
+// combined workspace at / now points there.
 export default function Home() {
-  redirect('/queue');
+  redirect('/sources');
 }

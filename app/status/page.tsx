@@ -128,11 +128,11 @@ export default function StatusPage() {
     <AppFrame>
       <div className="mx-auto w-full max-w-[1240px] px-4 py-6 sm:px-6 lg:py-7">
         <Link
-          href="/"
+          href="/sources"
           className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
         >
           <ArrowLeft className="size-3.5" aria-hidden />
-          Open story queue
+          Open sources
         </Link>
 
         <div className="mt-4 flex flex-wrap items-end justify-between gap-4">
@@ -277,13 +277,13 @@ export default function StatusPage() {
               />
               <p className="mt-2 text-sm font-medium">No drafts yet</p>
               <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                Generate a post from the story queue and it will appear here.
+                Generate a post from Sources and it will appear here.
               </p>
               <Link
-                href="/"
+                href="/sources"
                 className={buttonVariants({ variant: 'brand', size: 'sm', className: 'mt-4' })}
               >
-                Open story queue
+                Open sources
               </Link>
             </div>
           )}

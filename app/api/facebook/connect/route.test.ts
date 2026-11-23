@@ -103,7 +103,7 @@ describe("GET /api/facebook/connect", () => {
   });
 
   it.each(["//evil.com", "https://evil.com"])(
-    "falls back to the story queue instead of redirecting unconfigured to %s",
+    "falls back to the sources page instead of redirecting unconfigured to %s",
     async (next) => {
       configured.mockReturnValue(false);
 
@@ -116,7 +116,7 @@ describe("GET /api/facebook/connect", () => {
     }
   );
 
-  it("defaults the unconfigured result to the story queue", async () => {
+  it("defaults the unconfigured result to the sources page", async () => {
     configured.mockReturnValue(false);
 
     const res = await GET(requestFor());

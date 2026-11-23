@@ -439,7 +439,7 @@ export default function DashboardPage() {
       hint:
         stories.length > 0
           ? `${stories.length} stories tracked`
-          : "Open the story queue and fetch your feeds.",
+          : "Open Sources and fetch your feeds.",
     },
     {
       label: "Generate your first draft",
@@ -490,13 +490,13 @@ export default function DashboardPage() {
               {refreshing ? "Refreshing…" : "Refresh"}
             </Button>
             <Link
-              href="/"
+              href="/sources"
               className={buttonVariants({
                 variant: "brand",
                 className: "h-9 rounded-[7px] px-3 text-[12px]",
               })}
             >
-              Open story queue
+              Open sources
               <ArrowUpRight className="size-3.5" aria-hidden />
             </Link>
           </div>
@@ -695,14 +695,14 @@ export default function DashboardPage() {
                   Scheduled posts, published content, and drafts will appear here.
                 </p>
                 <Link
-                  href="/"
+                  href="/sources"
                   className={buttonVariants({
                     variant: "brand",
                     size: "sm",
                     className: "mt-4 h-8 rounded-[7px] px-3 text-[11.5px]",
                   })}
                 >
-                  Open story queue
+                  Open sources
                 </Link>
               </div>
             )}

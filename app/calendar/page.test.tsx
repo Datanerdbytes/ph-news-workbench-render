@@ -61,7 +61,7 @@ const published: Row = {
 
 const localPost: Row = {
   id: 51,
-  text: "Queued by the Story Queue",
+  text: "Queued by the desk",
   scheduled_for: "2026-11-20T09:00:00.000Z",
   status: "scheduled",
   kind: "post",

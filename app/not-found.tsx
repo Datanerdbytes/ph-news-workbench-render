@@ -14,14 +14,14 @@ export default function NotFound() {
           This page doesn&apos;t exist or was moved.
         </p>
         <Link
-          href="/"
+          href="/sources"
           className={buttonVariants({
             variant: "brand",
             size: "sm",
             className: "mt-4",
           })}
         >
-          Back to the story queue
+          Back to sources
         </Link>
       </div>
     </main>

@@ -1129,7 +1129,7 @@ function SourcesPageInner() {
                   </div>
                   <h2 className="mt-4 font-heading text-xl">No sources yet</h2>
                   <p className="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-muted-foreground">
-                    Add your first RSS feed to start pulling stories into your Story Queue.
+                    Add your first RSS feed to start pulling stories into your feed.
                   </p>
                   <Button variant="brand" size="sm" className="mt-4" onClick={() => setAddDialogOpen(true)}>
                     <Plus className="size-3.5" aria-hidden />

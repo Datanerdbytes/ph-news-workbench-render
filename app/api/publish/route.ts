@@ -173,7 +173,7 @@ export async function POST(request: Request) {
 
     // This route publishes straight away and used to leave no trace beyond
     // the draft's status, so the Dashboard's published counters never saw a
-    // post made from the Story Queue. Mirroring it records the publish —
+    // post made from the story desk. Mirroring it records the publish —
     // linked to the story and the draft it published, so the activity log
     // keeps one entry for it rather than the draft and the event side by
     // side.

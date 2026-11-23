@@ -60,6 +60,25 @@ test("renders the calendar with its scheduled sidebar", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Today" })).toBeVisible();
 });
 
+test("the retired Story Queue is gone and Sources owns the drafting flow", async ({
+  page,
+}) => {
+  await page.goto("/dashboard");
+
+  // Neither the sidebar entry nor the header quick link may bring it back.
+  const sidebar = page.locator("aside nav[aria-label='Workspace navigation']");
+  await expect(sidebar.getByRole("link", { name: "Story Queue" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Story Queue" })).toHaveCount(0);
+
+  // The page itself is retired — it answers 404 instead of a redirect.
+  const gone = await page.goto("/queue");
+  expect(gone?.status()).toBe(404);
+
+  // The root still lands somewhere real: Sources, where stories are drafted.
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/sources/);
+});
+
 test("signs out from the account menu back to /login", async ({ page }) => {
   await page.goto("/dashboard");
 
