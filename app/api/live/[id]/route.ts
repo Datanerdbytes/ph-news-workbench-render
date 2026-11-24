@@ -8,12 +8,18 @@ import { requireWorkspace, unauthorized } from '@/lib/session';
 import { facebookErrorResponse } from '@/lib/publishing/errors';
 import {
   endPageLiveVideo,
+  resolveEndVideoId,
   updatePageLiveVideo,
 } from '@/lib/publishing/live';
 import { readText } from '@/lib/publishing/request';
 import { parseScheduledPublishTime } from '@/lib/publishing/schedule';
 
 export const dynamic = 'force-dynamic';
+
+// User-facing text when ending fails; the raw Graph detail goes to the
+// server log instead (see the DELETE catch below).
+const END_FAILED_MESSAGE =
+  'The live stream could not be ended. Try again — if it still fails, reconnect the Page or create the stream again.';
 
 type StreamRow = {
   id: number;
@@ -105,10 +111,31 @@ export async function DELETE(
       }
 
       try {
+        // The end call must target the live video node id — not a value
+        // Graph cannot resolve to a broadcast (the observed failure quoted
+        // the stream key, e.g. "Object with ID '122152546167117522' does not
+        // exist"). Re-read the node from Facebook when the stored id is
+        // missing or no longer loads; with no usable id there is nothing
+        // safe to POST to, so say so and let the user recreate the stream.
+        const endVideoId = await resolveEndVideoId({
+          liveVideoId: stream.facebook_video_id,
+          accessToken: connection.accessToken,
+        });
+        if (!endVideoId) {
+          return NextResponse.json(
+            {
+              error:
+                'This live stream could not be ended because Facebook no longer recognizes it as a broadcast. Create a new live stream to broadcast again.',
+              code: 'live_end_unresolved',
+            },
+            { status: 502 }
+          );
+        }
+
         // End Facebook first; a failed end request must leave the pump and
         // controls available for another attempt.
         await endPageLiveVideo({
-          liveVideoId: stream.facebook_video_id,
+          liveVideoId: endVideoId,
           accessToken: connection.accessToken,
         });
 
@@ -131,10 +158,22 @@ export async function DELETE(
 
         return NextResponse.json({ ended: true });
       } catch (error) {
+        // The raw Graph detail stays in the server log; the toast gets a
+        // line the person can act on.
+        console.error(
+          JSON.stringify({
+            route: 'live/[id]',
+            event: 'live_end_failed',
+            streamId: stream.id,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        );
         return facebookErrorResponse(
           error,
           'live_end_failed',
-          'The live stream could not be ended.'
+          'The live stream could not be ended.',
+          undefined,
+          { userMessage: END_FAILED_MESSAGE }
         );
       }
     });

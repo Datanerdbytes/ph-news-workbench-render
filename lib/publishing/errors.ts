@@ -6,7 +6,11 @@ export async function facebookErrorResponse(
   error: unknown,
   code: string,
   fallback: string,
-  notify?: { workspaceId: string; kind?: string | null }
+  notify?: { workspaceId: string; kind?: string | null },
+  // Replaces the raw Graph message in the response while it stays in the
+  // logs and the failure notification — for errors whose Graph text is not
+  // actionable for the user.
+  { userMessage }: { userMessage?: string } = {}
 ): Promise<NextResponse> {
   const permissionIssue =
     error instanceof FacebookApiError &&
@@ -15,15 +19,15 @@ export async function facebookErrorResponse(
   let message: string;
   let outCode = code;
   if (error instanceof FacebookApiError) {
-    message = redactTokens(error.message);
+    message = userMessage ?? redactTokens(error.message);
     if (permissionIssue) {
       message = `${message} Reconnect the Page to refresh its permissions.`;
       outCode = 'permission';
     }
   } else if (error instanceof Error && error.message) {
-    message = redactTokens(error.message);
+    message = userMessage ?? redactTokens(error.message);
   } else {
-    message = fallback;
+    message = userMessage ?? fallback;
   }
 
   // The bell keeps the failed attempt visible after the toast is gone.

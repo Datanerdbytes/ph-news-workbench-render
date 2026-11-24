@@ -117,6 +117,28 @@ export async function endPageLiveVideo({
   );
 }
 
+/**
+ * The id that `end_live_video` must target — the live video node id, not a
+ * value Graph cannot resolve to a broadcast. When the row has a stored id,
+ * the node is re-read from Facebook so the end goes to a real id; returns
+ * null when the row stores none or Facebook cannot load it.
+ */
+export async function resolveEndVideoId({
+  liveVideoId,
+  accessToken,
+}: {
+  liveVideoId: string;
+  accessToken: string;
+}): Promise<string | null> {
+  if (!liveVideoId) return null;
+  try {
+    const live = await fetchPageLiveVideo(liveVideoId, accessToken);
+    return live.id || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchPageLiveVideo(
   liveVideoId: string,
   accessToken: string
