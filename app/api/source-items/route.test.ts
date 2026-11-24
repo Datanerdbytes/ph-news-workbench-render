@@ -8,7 +8,7 @@ vi.mock('@/lib/session', () => ({
   unauthorized: vi.fn(),
 }));
 
-function story(id: number, total = 42) {
+function story(id: number) {
   return {
     id,
     title: `Story ${id}`,
@@ -20,8 +20,11 @@ function story(id: number, total = 42) {
     feed_id: 7,
     feed_title: 'Example Feed',
     status: 'pending',
-    total,
   };
+}
+
+function queryResult(rows: ReturnType<typeof story>[], total = 75) {
+  return [{ total, rows: JSON.stringify(rows) }];
 }
 
 function queryValues() {
@@ -38,19 +41,15 @@ afterEach(() => {
 
 describe('GET /api/source-items', () => {
   it.each([[0.5, 1], [500, 50]])('paginates with a bounded limit when asked for %s', async (requested, limit) => {
-    const rows = Array.from({ length: limit + 1 }, (_, i) => story(100 - i, 75));
-    vi.mocked(sql).mockResolvedValueOnce(rows);
+    const rows = Array.from({ length: limit + 1 }, (_, i) => story(100 - i));
+    vi.mocked(sql).mockResolvedValueOnce(queryResult(rows));
 
     const res = await GET(new Request(`https://example.test/api/source-items?limit=${requested}`));
 
     expect(res.status).toBe(200);
     expect(queryValues().at(-1)).toBe(limit + 1);
     expect(await res.json()).toEqual({
-      rows: rows.slice(0, limit).map(row => {
-        const { total, ...payload } = row;
-        expect(total).toBe(75);
-        return payload;
-      }),
+      rows: rows.slice(0, limit),
       total: 75,
       hasMore: true,
       nextCursor: rows[limit - 1].id,
@@ -60,7 +59,7 @@ describe('GET /api/source-items', () => {
   it('defaults to Today using the Manila day boundary', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-11-24T16:30:00.000Z'));
-    vi.mocked(sql).mockResolvedValueOnce([story(1, 1)]);
+    vi.mocked(sql).mockResolvedValueOnce(queryResult([story(1)], 1));
 
     const res = await GET(new Request('https://example.test/api/source-items'));
 
@@ -74,7 +73,7 @@ describe('GET /api/source-items', () => {
   });
 
   it('filters a specific day with an exclusive next-day end', async () => {
-    vi.mocked(sql).mockResolvedValueOnce([]);
+    vi.mocked(sql).mockResolvedValueOnce(queryResult([], 0));
 
     const res = await GET(new Request(
       'https://example.test/api/source-items?range=day&date=2026-11-24',
@@ -89,7 +88,7 @@ describe('GET /api/source-items', () => {
   });
 
   it('filters a specific month with an exclusive next-month start', async () => {
-    vi.mocked(sql).mockResolvedValueOnce([]);
+    vi.mocked(sql).mockResolvedValueOnce(queryResult([], 0));
 
     const res = await GET(new Request(
       'https://example.test/api/source-items?range=month&month=2024-02',
@@ -103,7 +102,7 @@ describe('GET /api/source-items', () => {
   });
 
   it('leaves All time unbounded', async () => {
-    vi.mocked(sql).mockResolvedValueOnce([]);
+    vi.mocked(sql).mockResolvedValueOnce(queryResult([], 0));
 
     const res = await GET(new Request('https://example.test/api/source-items?range=all'));
 
@@ -112,7 +111,7 @@ describe('GET /api/source-items', () => {
   });
 
   it('searches normalized text and RSS author/tag metadata with literal AND terms', async () => {
-    vi.mocked(sql).mockResolvedValueOnce([]);
+    vi.mocked(sql).mockResolvedValueOnce(queryResult([], 0));
 
     const res = await GET(new Request(
       'https://example.test/api/source-items?q=Maya%25%20Santos%20flood_',
@@ -130,8 +129,8 @@ describe('GET /api/source-items', () => {
   });
 
   it('combines workspace, source, date, search, and cursor filters without losing totals', async () => {
-    const rows = [story(100, 77), story(99, 77), story(98, 77)];
-    vi.mocked(sql).mockResolvedValueOnce(rows);
+    const rows = [story(100), story(99), story(98)];
+    vi.mocked(sql).mockResolvedValueOnce(queryResult(rows, 77));
 
     const res = await GET(new Request(
       'https://example.test/api/source-items?feed=7&range=day&date=2026-11-24&q=flood&before=90&limit=2',
@@ -151,6 +150,25 @@ describe('GET /api/source-items', () => {
     expect(payload.total).toBe(77);
     expect(payload.rows.map((row: { id: number }) => row.id)).toEqual([100, 99]);
     expect(payload.nextCursor).toBe(99);
+  });
+
+  it('keeps the filtered total when a cursor page is empty', async () => {
+    vi.mocked(sql).mockResolvedValueOnce(queryResult([], 12));
+
+    const res = await GET(new Request(
+      'https://example.test/api/source-items?range=all&before=1',
+    ));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      rows: [],
+      total: 12,
+      nextCursor: null,
+      hasMore: false,
+    });
+    const queryText = vi.mocked(sql).mock.lastCall?.[0].join('');
+    expect(queryText).toContain('SELECT COUNT(*)::int FROM stories');
+    expect(queryText).toContain('json_agg(row_to_json(page)');
   });
 
   it.each([

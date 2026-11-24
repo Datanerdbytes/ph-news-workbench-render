@@ -138,6 +138,14 @@ test("API applies Manila boundaries and returns exact filtered pagination totals
   expect(secondPage.rows).toHaveLength(1);
   expect(secondPage.hasMore).toBe(false);
 
+  const emptyCursor = await page.request.get(
+    `/api/source-items?${feed}&range=day&date=${seeded.today}&before=1`,
+  );
+  const emptyPage = await emptyCursor.json();
+  expect(emptyPage.rows).toEqual([]);
+  expect(emptyPage.total).toBe(2);
+  expect(emptyPage.hasMore).toBe(false);
+
   const previousDay = await page.request.get(
     `/api/source-items?${feed}&range=day&date=${seeded.previousDay}`,
   );

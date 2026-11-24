@@ -14,6 +14,7 @@ describe('source item filters', () => {
 
     expect(manilaSourceDay(new Date('2026-11-24T15:59:59.000Z'))).toBe('2026-11-24');
     expect(filters.range).toBe('today');
+    expect(filters.date).toBe('2026-11-24');
     expect(filters.start).toBe('2026-11-23T16:00:00.000Z');
     expect(filters.end).toBe('2026-11-24T16:00:00.000Z');
   });

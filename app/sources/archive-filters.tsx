@@ -161,7 +161,10 @@ export function ArchiveFilters({
           <Button
             type="button"
             variant="ghost"
-            onClick={onReset}
+            onClick={() => {
+              setDraftQuery('');
+              onReset();
+            }}
             disabled={range === 'today' && !draftQuery.trim()}
             className={cn('h-10 px-2.5 text-[12px]', range === 'day' || range === 'month' ? 'ml-auto' : '')}
           >

@@ -35,6 +35,9 @@ import { manilaSourceDay } from "@/lib/source-item-filters";
 
 const today = manilaSourceDay(new Date());
 const todayIso = new Date(`${today}T12:00:00+08:00`).toISOString();
+const todayQuery = `range=day&date=${today}`;
+const todayUrl = `/api/source-items?${todayQuery}`;
+const vergeTodayUrl = `/api/source-items?feed=7&${todayQuery}`;
 
 const feedsPayload = {
   feeds: [
@@ -208,15 +211,15 @@ describe("SourcesPage", () => {
     const sourceRequest = new Promise<Response>(resolve => { finishSourceRequest = resolve; });
     fetchMock.mockImplementation(async (url: string) => {
       if (url === "/api/sources") return jsonResponse(feedsPayload);
-      if (url === "/api/source-items?feed=7") return sourceRequest;
-      if (url === "/api/source-items") return jsonResponse(allItemsPayload);
+      if (url === vergeTodayUrl) return sourceRequest;
+      if (url === todayUrl) return jsonResponse(allItemsPayload);
       return jsonResponse({});
     });
     const { rerender } = render(<SourcesPage />);
     const sidebar = await screen.findByRole("navigation", { name: "Source list" });
     fireEvent.click(await within(sidebar).findByRole("button", { name: /The Verge/ }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
-      "/api/source-items?feed=7",
+      vergeTodayUrl,
       { cache: "no-store" },
     ));
 
@@ -258,11 +261,11 @@ describe("SourcesPage", () => {
     const oldPage = new Promise<Response>(resolve => { finishOldPage = resolve; });
     fetchMock.mockImplementation(async (url: string) => {
       if (url === "/api/sources") return jsonResponse(feedsPayload);
-      if (url === "/api/source-items?feed=7&before=30") return oldPage;
-      if (url === "/api/source-items?feed=7&before=20") return jsonResponse({
+      if (url === `${vergeTodayUrl}&before=30`) return oldPage;
+      if (url === `${vergeTodayUrl}&before=20`) return jsonResponse({
         ...vergeItemsPayload, rows: [{ ...vergeItemsPayload.rows[0], id: 3, title: "Current next page" }],
       });
-      if (url === "/api/source-items?feed=7") {
+      if (url === vergeTodayUrl) {
         const visits = fetchMock.mock.calls.filter(([input]) => input === url).length;
         return jsonResponse({ ...vergeItemsPayload, hasMore: true, nextCursor: visits === 1 ? 30 : 20 });
       }
@@ -276,7 +279,7 @@ describe("SourcesPage", () => {
 
     select(/The Verge/);
     fireEvent.click(await screen.findByRole("button", { name: "Load more stories" }));
-    expect(fetchMock).toHaveBeenCalledWith("/api/source-items?feed=7&before=30", expect.anything());
+    expect(fetchMock).toHaveBeenCalledWith(`${vergeTodayUrl}&before=30`, expect.anything());
     select(/All sources/);
     await screen.findByText("No stories for today");
     select(/The Verge/);
@@ -295,11 +298,11 @@ describe("SourcesPage", () => {
     expect(await screen.findByText("Current next page")).toBeInTheDocument();
   });
 
-  it("requests only today's stories by default and shows the filtered total", async () => {
+  it("requests only the resolved Manila day by default and shows the filtered total", async () => {
     render(<SourcesPage />);
 
     expect(await screen.findByText("Story One")).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledWith("/api/source-items", { cache: "no-store" });
+    expect(fetchMock).toHaveBeenCalledWith(todayUrl, { cache: "no-store" });
     expect(screen.getByRole("status")).toHaveTextContent("2 stories in this view");
     expect(screen.getByRole("status")).toHaveTextContent("Today · PHT");
   });
@@ -381,7 +384,7 @@ describe("SourcesPage", () => {
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/sources") return jsonResponse(feedsPayload);
-      if (url === "/api/source-items") return oldRequest;
+      if (url === todayUrl) return oldRequest;
       if (url.includes("q=Maria")) {
         return jsonResponse({
           ...allItemsPayload,
@@ -394,7 +397,7 @@ describe("SourcesPage", () => {
     searchParamsRef.value = new URLSearchParams();
     const { rerender } = render(<SourcesPage />);
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
-      "/api/source-items",
+      todayUrl,
       { cache: "no-store" },
     ));
 

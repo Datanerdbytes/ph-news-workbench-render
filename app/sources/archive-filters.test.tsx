@@ -60,6 +60,20 @@ describe("ArchiveFilters", () => {
     expect(controls.onQueryChange).toHaveBeenCalledWith("");
   });
 
+  it("cancels a pending search when Reset is clicked", () => {
+    const controls = props();
+    render(<ArchiveFilters {...controls} />);
+    const input = screen.getByRole("searchbox", { name: "Search stories" });
+
+    fireEvent.change(input, { target: { value: "flood" } });
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    act(() => vi.advanceTimersByTime(350));
+
+    expect(input).toHaveValue("");
+    expect(controls.onReset).toHaveBeenCalledOnce();
+    expect(controls.onQueryChange).not.toHaveBeenCalled();
+  });
+
   it("syncs external URL changes while keeping the search input focused", () => {
     const controls = props();
     const { rerender } = render(<ArchiveFilters {...controls} />);

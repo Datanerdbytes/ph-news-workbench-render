@@ -97,6 +97,7 @@ export function parseSourceItemFilters(
   let end: string | null = null;
   if (range === 'today') {
     const today = manilaSourceDay(now);
+    date = today;
     start = manilaMidnightIso(today);
     end = manilaMidnightIso(nextDay(today));
   } else if (range === 'day' && date) {

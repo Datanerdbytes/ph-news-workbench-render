@@ -41,7 +41,7 @@ export async function GET(request: Request) {
 
   try {
     const filters = parseSourceItemFilters(params);
-    const rows = (await sql`
+    const result = (await sql`
       WITH stories AS (
         SELECT n.id, n.title, n.summary, n.image_url, n.link, n.published_at, n.created_at,
                n.feed_id, f.title AS feed_title,
@@ -70,15 +70,22 @@ export async function GET(request: Request) {
               OR COALESCE(n.raw_payload->>'categories', '') ILIKE search_terms.pattern
           )
       ),
-      with_total AS (
-        SELECT *, COUNT(*) OVER()::int AS total FROM stories
+      page AS (
+        SELECT * FROM stories
+        WHERE id < COALESCE(${before}, 2147483647)
+        ORDER BY id DESC
+        LIMIT ${limit + 1}
       )
-      SELECT * FROM with_total
-      WHERE id < COALESCE(${before}, 2147483647)
-      ORDER BY id DESC
-      LIMIT ${limit + 1}
-    `) as unknown as (SourceItemRow & { total: number })[];
+      SELECT
+        (SELECT COUNT(*)::int FROM stories) AS total,
+        COALESCE(
+          (SELECT json_agg(row_to_json(page) ORDER BY page.id DESC)::text FROM page),
+          '[]'
+        ) AS rows
+    `) as unknown as { total: number; rows: string }[];
 
+    const rows = JSON.parse(result[0]?.rows ?? '[]') as SourceItemRow[];
+    const total = result[0]?.total ?? 0;
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
     const nextCursor = hasMore ? page[page.length - 1].id : null;
@@ -96,7 +103,7 @@ export async function GET(request: Request) {
     }));
 
     return NextResponse.json(
-      { rows: payload, total: page[0]?.total ?? 0, nextCursor, hasMore },
+      { rows: payload, total, nextCursor, hasMore },
       { headers: { 'cache-control': 'no-store' } }
     );
   } catch (error) {

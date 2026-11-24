@@ -75,8 +75,10 @@ function buildSourceItemsQuery(
 ): string {
   const params = new URLSearchParams();
   if (feedKey !== 'all') params.set('feed', feedKey);
-  if (filters.range !== 'today') params.set('range', filters.range);
-  if (filters.range === 'day' && filters.date) params.set('date', filters.date);
+  params.set('range', filters.range === 'today' ? 'day' : filters.range);
+  if ((filters.range === 'today' || filters.range === 'day') && filters.date) {
+    params.set('date', filters.date);
+  }
   if (filters.range === 'month' && filters.month) params.set('month', filters.month);
   if (filters.query) params.set('q', filters.query);
   if (before) params.set('before', String(before));
