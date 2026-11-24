@@ -115,3 +115,74 @@ describe("facebookErrorResponse", () => {
     });
   });
 });
+
+describe("facebookErrorResponse userMessage override", () => {
+  it("replaces the Graph message on a Graph failure", async () => {
+    const { status, body } = await shape(
+      facebookErrorResponse(
+        new FacebookApiError("Unsupported post request. Object with ID '122' does not exist.", 100),
+        "live_end_failed",
+        "fallback",
+        undefined,
+        { userMessage: "The live stream could not be ended. Try again." }
+      )
+    );
+    expect(status).toBe(502);
+    expect(body).toEqual({
+      error: "The live stream could not be ended. Try again.",
+      code: "live_end_failed",
+    });
+  });
+
+  it("replaces the plain-error message on a plain Error", async () => {
+    const { status, body } = await shape(
+      facebookErrorResponse(
+        new Error("url had client_secret=hush inside"),
+        "live_end_failed",
+        "fallback",
+        undefined,
+        { userMessage: "The live stream could not be ended. Try again." }
+      )
+    );
+    expect(status).toBe(500);
+    expect(body).toEqual({
+      error: "The live stream could not be ended. Try again.",
+      code: "live_end_failed",
+    });
+  });
+
+  it("replaces the fallback for non-Error throws", async () => {
+    const { status, body } = await shape(
+      facebookErrorResponse(
+        "boom",
+        "live_end_failed",
+        "Something went wrong.",
+        undefined,
+        { userMessage: "The live stream could not be ended. Try again." }
+      )
+    );
+    expect(status).toBe(500);
+    expect(body).toEqual({
+      error: "The live stream could not be ended. Try again.",
+      code: "live_end_failed",
+    });
+  });
+
+  it("appends the reconnect hint on a permission failure", async () => {
+    const { status, body } = await shape(
+      facebookErrorResponse(
+        new FacebookApiError("must have an access_token", 190),
+        "live_end_failed",
+        "fallback",
+        undefined,
+        { userMessage: "The live stream could not be ended. Try again." }
+      )
+    );
+    expect(status).toBe(403);
+    expect(body).toEqual({
+      error:
+        "The live stream could not be ended. Try again. Reconnect the Page to refresh its permissions.",
+      code: "permission",
+    });
+  });
+});
