@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS news_items (
 CREATE INDEX IF NOT EXISTS feeds_workspace_idx ON feeds (workspace_id);
 CREATE INDEX IF NOT EXISTS news_items_workspace_idx ON news_items (workspace_id);
 CREATE INDEX IF NOT EXISTS news_items_feed_idx ON news_items (feed_id);
+CREATE INDEX IF NOT EXISTS news_items_workspace_published_idx
+  ON news_items (workspace_id, published_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS drafts (
   id SERIAL PRIMARY KEY,

@@ -31,8 +31,10 @@ vi.mock("@/components/app-frame", () => ({
 vi.mock("sonner", () => ({ toast: toastMock }));
 
 import SourcesPage from "./page";
+import { manilaSourceDay } from "@/lib/source-item-filters";
 
-const todayIso = new Date().toISOString();
+const today = manilaSourceDay(new Date());
+const todayIso = new Date(`${today}T12:00:00+08:00`).toISOString();
 
 const feedsPayload = {
   feeds: [
@@ -101,6 +103,7 @@ const allItemsPayload = {
   ],
   nextCursor: null,
   hasMore: false,
+  total: 2,
 };
 
 const vergeItemsPayload = {
@@ -120,6 +123,7 @@ const vergeItemsPayload = {
   ],
   nextCursor: null,
   hasMore: false,
+  total: 1,
 };
 
 function jsonResponse(payload: unknown, ok = true) {
@@ -190,13 +194,43 @@ describe("SourcesPage", () => {
     fireEvent.click(within(sidebar).getByRole("button", { name: /The Verge/ }));
 
     await waitFor(() =>
-      expect(replaceMock).toHaveBeenCalledWith("/sources?feed=7"),
+      expect(replaceMock).toHaveBeenCalledWith("/sources?feed=7", { scroll: false }),
     );
     await waitFor(() =>
       expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/api/source-items?feed=7"))).toBe(true),
     );
     expect(await screen.findByRole("heading", { name: "The Verge" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Fetch now" })).toBeInTheDocument();
+  });
+
+  it("keeps a source response when the router URL catches up", async () => {
+    let finishSourceRequest!: (response: Response) => void;
+    const sourceRequest = new Promise<Response>(resolve => { finishSourceRequest = resolve; });
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === "/api/sources") return jsonResponse(feedsPayload);
+      if (url === "/api/source-items?feed=7") return sourceRequest;
+      if (url === "/api/source-items") return jsonResponse(allItemsPayload);
+      return jsonResponse({});
+    });
+    const { rerender } = render(<SourcesPage />);
+    const sidebar = await screen.findByRole("navigation", { name: "Source list" });
+    fireEvent.click(await within(sidebar).findByRole("button", { name: /The Verge/ }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/source-items?feed=7",
+      { cache: "no-store" },
+    ));
+
+    searchParamsRef.value = new URLSearchParams("feed=7");
+    rerender(<SourcesPage />);
+    await act(async () => {
+      finishSourceRequest(jsonResponse({
+        ...vergeItemsPayload,
+        rows: [{ ...vergeItemsPayload.rows[0], title: "Selected source story" }],
+      }));
+    });
+
+    expect(await screen.findByText("Selected source story")).toBeInTheDocument();
+    expect(screen.queryByText("Story Two")).not.toBeInTheDocument();
   });
 
   it("falls back to All sources when a deep link points at a missing feed", async () => {
@@ -232,7 +266,7 @@ describe("SourcesPage", () => {
         const visits = fetchMock.mock.calls.filter(([input]) => input === url).length;
         return jsonResponse({ ...vergeItemsPayload, hasMore: true, nextCursor: visits === 1 ? 30 : 20 });
       }
-      return jsonResponse({ rows: [] });
+      return jsonResponse({ rows: [], total: 0, nextCursor: null, hasMore: false });
     });
 
     render(<SourcesPage />);
@@ -244,13 +278,14 @@ describe("SourcesPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Load more stories" }));
     expect(fetchMock).toHaveBeenCalledWith("/api/source-items?feed=7&before=30", expect.anything());
     select(/All sources/);
-    await screen.findByText("No stories yet");
+    await screen.findByText("No stories for today");
     select(/The Verge/);
     await screen.findByRole("button", { name: "Load more stories" });
 
     await act(async () => {
       finishOldPage(jsonResponse({
         rows: [{ ...vergeItemsPayload.rows[0], id: 4, title: "Obsolete page" }],
+        total: 2,
         hasMore: true,
         nextCursor: 10,
       }));
@@ -258,6 +293,120 @@ describe("SourcesPage", () => {
     expect(screen.queryByText("Obsolete page")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Load more stories" }));
     expect(await screen.findByText("Current next page")).toBeInTheDocument();
+  });
+
+  it("requests only today's stories by default and shows the filtered total", async () => {
+    render(<SourcesPage />);
+
+    expect(await screen.findByText("Story One")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("/api/source-items", { cache: "no-store" });
+    expect(screen.getByRole("status")).toHaveTextContent("2 stories in this view");
+    expect(screen.getByRole("status")).toHaveTextContent("Today · PHT");
+  });
+
+  it("loads a specific Manila day and search from the URL", async () => {
+    searchParamsRef.value = new URLSearchParams(
+      "range=day&date=2026-02-03&q=Maria+Santos",
+    );
+    render(<SourcesPage />);
+
+    expect(await screen.findByText("Story One")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/source-items?range=day&date=2026-02-03&q=Maria+Santos",
+      { cache: "no-store" },
+    );
+    expect(screen.getByLabelText("Day")).toHaveValue("2026-02-03");
+    expect(screen.getByRole("searchbox", { name: "Search stories" })).toHaveValue("Maria Santos");
+    expect(screen.getByRole("status")).toHaveTextContent("Feb 3, 2026 · PHT");
+  });
+
+  it("loads a specific month from the URL", async () => {
+    searchParamsRef.value = new URLSearchParams("range=month&month=2026-02");
+    render(<SourcesPage />);
+
+    expect(await screen.findByText("Story One")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/source-items?range=month&month=2026-02",
+      { cache: "no-store" },
+    );
+    expect(screen.getByLabelText("Month")).toHaveValue("2026-02");
+    expect(screen.getByRole("status")).toHaveTextContent("February 2026 · PHT");
+  });
+
+  it("preserves date and search filters when switching sources", async () => {
+    searchParamsRef.value = new URLSearchParams("range=all&q=climate");
+    render(<SourcesPage />);
+
+    const sidebar = await screen.findByRole("navigation", { name: "Source list" });
+    fireEvent.click(within(sidebar).getByRole("button", { name: /The Verge/ }));
+
+    await waitFor(() =>
+      expect(replaceMock).toHaveBeenCalledWith(
+        "/sources?range=all&q=climate&feed=7",
+        { scroll: false },
+      ),
+    );
+  });
+
+  it("offers clear-search and all-time actions when a filtered view is empty", async () => {
+    searchParamsRef.value = new URLSearchParams(
+      "range=day&date=2026-02-03&q=missing+person",
+    );
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/sources") return jsonResponse(feedsPayload);
+      if (url.includes("/api/source-items")) {
+        return jsonResponse({ rows: [], total: 0, nextCursor: null, hasMore: false });
+      }
+      return jsonResponse({});
+    });
+    render(<SourcesPage />);
+
+    expect(await screen.findByText('No stories match “missing person”')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(replaceMock).toHaveBeenLastCalledWith(
+      "/sources?range=day&date=2026-02-03",
+      { scroll: false },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Browse all time" }));
+    expect(replaceMock).toHaveBeenLastCalledWith(
+      "/sources?range=all&q=missing+person",
+      { scroll: false },
+    );
+  });
+
+  it("ignores a delayed response after the search filter changes", async () => {
+    let finishOldRequest!: (response: Response) => void;
+    const oldRequest = new Promise<Response>(resolve => { finishOldRequest = resolve; });
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/sources") return jsonResponse(feedsPayload);
+      if (url === "/api/source-items") return oldRequest;
+      if (url.includes("q=Maria")) {
+        return jsonResponse({
+          ...allItemsPayload,
+          rows: [{ ...allItemsPayload.rows[1], title: "Maria search result" }],
+          total: 1,
+        });
+      }
+      return jsonResponse({ rows: [], total: 0, hasMore: false });
+    });
+    searchParamsRef.value = new URLSearchParams();
+    const { rerender } = render(<SourcesPage />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/source-items",
+      { cache: "no-store" },
+    ));
+
+    searchParamsRef.value = new URLSearchParams("q=Maria");
+    rerender(<SourcesPage />);
+    expect(await screen.findByText("Maria search result")).toBeInTheDocument();
+
+    await act(async () => {
+      finishOldRequest(jsonResponse(allItemsPayload));
+    });
+    expect(screen.queryByText("Story One")).not.toBeInTheDocument();
+    expect(screen.getByText("Maria search result")).toBeInTheDocument();
   });
 
   it("drafts a pending story via the compose deep link", async () => {
