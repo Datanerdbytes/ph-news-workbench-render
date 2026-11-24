@@ -8,6 +8,7 @@ import { requireWorkspace, unauthorized } from '@/lib/session';
 import { facebookErrorResponse } from '@/lib/publishing/errors';
 import {
   endPageLiveVideo,
+  isAlreadyEndedGraphError,
   resolveEndVideoId,
   updatePageLiveVideo,
 } from '@/lib/publishing/live';
@@ -34,6 +35,29 @@ async function findStream(workspaceId: string, id: string) {
       AND (facebook_video_id = ${id} OR id::text = ${id})
   `) as unknown as StreamRow[];
   return rows[0] ?? null;
+}
+
+// Stop the pump and persist ENDED. Shared by the normal end path and the
+// "broadcast already gone from Facebook" path — in both cases the local row
+// must stop reporting a stream that is no longer running.
+async function endLocalStream(workspaceId: string, streamId: number) {
+  // Media runner mode: the pump lives in the worker — relay the stop
+  // (best-effort; the worker's reconcile loop will surface reality on the
+  // next tick either way).
+  if (runnerMode()) {
+    await runnerRequest('/pump/stop', {
+      workspaceId,
+      streamId: String(streamId),
+    });
+  } else {
+    getPumpManager().stop(streamId);
+  }
+  await sql`
+    UPDATE live_streams
+    SET status = 'ENDED', pump_status = 'stopped', updated_at = now()
+    WHERE id = ${streamId} AND workspace_id = ${workspaceId}
+  `;
+  return NextResponse.json({ ended: true });
 }
 
 export async function PATCH(
@@ -134,29 +158,22 @@ export async function DELETE(
 
         // End Facebook first; a failed end request must leave the pump and
         // controls available for another attempt.
-        await endPageLiveVideo({
-          liveVideoId: endVideoId,
-          accessToken: connection.accessToken,
-        });
-
-        // Media runner mode: the pump lives in the worker — relay the stop
-        // (best-effort; the worker's reconcile loop will surface reality on
-        // the next tick either way).
-        if (runnerMode()) {
-          await runnerRequest('/pump/stop', {
-            workspaceId: access.workspace.id,
-            streamId: String(stream.id),
+        try {
+          await endPageLiveVideo({
+            liveVideoId: endVideoId,
+            accessToken: connection.accessToken,
           });
-        } else {
-          getPumpManager().stop(stream.id);
+        } catch (error) {
+          // The broadcast is already gone from Facebook — the node no longer
+          // exists — so there is nothing left to end. Clean up locally
+          // instead of surfacing a failure the person cannot act on.
+          if (isAlreadyEndedGraphError(error)) {
+            return await endLocalStream(access.workspace.id, stream.id);
+          }
+          throw error;
         }
-        await sql`
-          UPDATE live_streams
-          SET status = 'ENDED', pump_status = 'stopped', updated_at = now()
-          WHERE id = ${stream.id} AND workspace_id = ${access.workspace.id}
-        `;
 
-        return NextResponse.json({ ended: true });
+        return await endLocalStream(access.workspace.id, stream.id);
       } catch (error) {
         // The raw Graph detail stays in the server log; the toast gets a
         // line the person can act on.

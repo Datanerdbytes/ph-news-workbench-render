@@ -182,4 +182,31 @@ describe('DELETE /api/live/[id]', () => {
     expect(body.error).not.toContain('does not exist');
     expect(body.error).toContain('could not be ended');
   });
+
+  // The QUA-18 symptom: the card was already STOPPED, so the broadcast had
+  // already ended on Facebook and the node no longer exists. Ending again
+  // is expected to fail with the same "does not exist" message — the right
+  // outcome is to clean up the local row, not to surface a failure.
+  it('cleans up the local row when Facebook reports the broadcast already ended', async () => {
+    graphPostFormMock.mockRejectedValue(
+      new FacebookApiError(
+        "Unsupported post request. Object with ID '122152546167117522' does not exist.",
+        100
+      )
+    );
+
+    const response = await DELETE(
+      new Request('http://localhost/api/live/37', { method: 'DELETE' }),
+      { params: Promise.resolve({ id: '37' }) }
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ended: true });
+    expect(managerMock.stop).toHaveBeenCalledWith(37);
+    expect(
+      sqlMock.mock.calls.some((call) =>
+        queryText(call).includes("SET status = 'ENDED'")
+      )
+    ).toBe(true);
+  });
 });

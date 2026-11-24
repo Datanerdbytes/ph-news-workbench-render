@@ -1,4 +1,8 @@
-import { FacebookApiError, graphPostForm, graphRequest } from '@/lib/facebook';
+import {
+  FacebookApiError,
+  graphPostForm,
+  graphRequest,
+} from '@/lib/facebook';
 
 type RawLiveVideo = {
   id?: string;
@@ -114,6 +118,25 @@ export async function endPageLiveVideo({
     liveVideoId,
     { end_live_video: 'true' },
     accessToken
+  );
+}
+
+/**
+ * Whether a Graph failure means the broadcast is already gone from Facebook.
+ *
+ * The reported QUA-18 symptom was a card in STOPPED state whose end call
+ * failed with "Unsupported post request. Object with ID '…' does not exist".
+ * A finished broadcast is history on Facebook — the node is no longer
+ * addressable — so the end request is expected to fail, and the local row
+ * should be cleaned up instead of being treated as a live failure.
+ */
+export function isAlreadyEndedGraphError(
+  error: unknown
+): error is FacebookApiError {
+  return (
+    error instanceof FacebookApiError &&
+    error.code === 100 &&
+    /Unsupported (get|post) request\. Object with ID /i.test(error.message)
   );
 }
 
