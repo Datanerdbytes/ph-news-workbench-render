@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { sqlMock, requireWorkspaceMock, requirePublishingConnectionMock, managerMock, endLiveMock, resolveEndVideoIdMock } =
+const { sqlMock, requireWorkspaceMock, requirePublishingConnectionMock, managerMock, graphPostFormMock, graphRequestMock } =
   vi.hoisted(() => ({
     sqlMock: vi.fn(),
     requireWorkspaceMock: vi.fn(),
     requirePublishingConnectionMock: vi.fn(),
     managerMock: { stop: vi.fn() },
-    endLiveMock: vi.fn(),
-    resolveEndVideoIdMock: vi.fn(),
+    graphPostFormMock: vi.fn(),
+    graphRequestMock: vi.fn(),
   }));
 
 vi.mock('@/lib/db', () => ({ sql: sqlMock }));
@@ -18,9 +18,10 @@ vi.mock('@/lib/session', () => ({
 vi.mock('@/lib/publishing/connection', () => ({
   requirePublishingConnection: requirePublishingConnectionMock,
 }));
-vi.mock('@/lib/publishing/live', () => ({
-  endPageLiveVideo: endLiveMock,
-  resolveEndVideoId: resolveEndVideoIdMock,
+vi.mock('@/lib/facebook', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/lib/facebook')>(),
+  graphPostForm: graphPostFormMock,
+  graphRequest: graphRequestMock,
 }));
 vi.mock('@/lib/live/pump', () => ({ getPumpManager: () => managerMock }));
 
@@ -50,8 +51,8 @@ beforeEach(() => {
       connection: { accessToken: 'page-token' },
     },
   });
-  endLiveMock.mockResolvedValue(undefined);
-  resolveEndVideoIdMock.mockResolvedValue(live.facebook_video_id);
+  graphPostFormMock.mockResolvedValue(undefined);
+  graphRequestMock.mockResolvedValue({ id: live.facebook_video_id });
   managerMock.stop.mockReturnValue({ ok: true, wasRunning: true });
   sqlMock.mockImplementation(async (...args: unknown[]) => {
     const text = queryText(args);
@@ -63,7 +64,7 @@ beforeEach(() => {
 describe('DELETE /api/live/[id]', () => {
   it('ends Facebook, stops the pump, then persists ENDED and stopped', async () => {
     const events: string[] = [];
-    endLiveMock.mockImplementation(async () => events.push('facebook:ended'));
+    graphPostFormMock.mockImplementation(async () => events.push('facebook:ended'));
     managerMock.stop.mockImplementation(() => {
       events.push('pump:stopped');
       return { ok: true, wasRunning: true };
@@ -90,7 +91,7 @@ describe('DELETE /api/live/[id]', () => {
   });
 
   it('leaves the pump and controls unchanged when Facebook end fails', async () => {
-    endLiveMock.mockRejectedValue(new Error('Facebook failed'));
+    graphPostFormMock.mockRejectedValue(new Error('Facebook failed'));
     const response = await DELETE(
       new Request('http://localhost/api/live/37', { method: 'DELETE' }),
       { params: Promise.resolve({ id: '37' }) }
@@ -106,7 +107,7 @@ describe('DELETE /api/live/[id]', () => {
   // stored facebook_video_id (the Graph error quoted it, e.g.
   // "Object with ID '122152546167117522' does not exist").
   it('ends Facebook with the id the node re-read resolves, not the stored value', async () => {
-    resolveEndVideoIdMock.mockResolvedValue('real-live-video-999');
+    graphRequestMock.mockResolvedValue({ id: 'real-live-video-999' });
 
     const response = await DELETE(
       new Request('http://localhost/api/live/37', { method: 'DELETE' }),
@@ -114,18 +115,20 @@ describe('DELETE /api/live/[id]', () => {
     );
 
     expect(response.status).toBe(200);
-    expect(resolveEndVideoIdMock).toHaveBeenCalledWith({
-      liveVideoId: 'fb-video-37',
-      accessToken: 'page-token',
-    });
-    expect(endLiveMock).toHaveBeenCalledWith({
-      liveVideoId: 'real-live-video-999',
-      accessToken: 'page-token',
-    });
+    expect(graphRequestMock).toHaveBeenCalledWith(
+      'fb-video-37',
+      expect.objectContaining({ fields: expect.stringContaining('id') }),
+      'page-token'
+    );
+    expect(graphPostFormMock).toHaveBeenCalledWith(
+      'real-live-video-999', { end_live_video: 'true' }, 'page-token'
+    );
   });
 
   it('returns an actionable error and leaves the pump and row alone when no usable id resolves', async () => {
-    resolveEndVideoIdMock.mockResolvedValue(null);
+    graphRequestMock.mockRejectedValue(
+      new FacebookApiError("Unsupported get request. Object with ID 'fb-video-37' does not exist.", 100)
+    );
 
     const response = await DELETE(
       new Request('http://localhost/api/live/37', { method: 'DELETE' }),
@@ -133,7 +136,7 @@ describe('DELETE /api/live/[id]', () => {
     );
 
     expect(response.status).toBeGreaterThanOrEqual(400);
-    expect(endLiveMock).not.toHaveBeenCalled();
+    expect(graphPostFormMock).not.toHaveBeenCalled();
     expect(managerMock.stop).not.toHaveBeenCalled();
     const body = await response.json();
     expect(body.error).toContain('Create a new live stream');
@@ -144,8 +147,26 @@ describe('DELETE /api/live/[id]', () => {
     ).toBe(false);
   });
 
+  it('asks the user to reconnect when the live video lookup rejects an expired token', async () => {
+    graphRequestMock.mockRejectedValue(new FacebookApiError('Session has expired.', 190));
+
+    const response = await DELETE(
+      new Request('http://localhost/api/live/37', { method: 'DELETE' }),
+      { params: Promise.resolve({ id: '37' }) }
+    );
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({
+      code: 'permission',
+      error: expect.stringContaining('Reconnect the Page to refresh its permissions.'),
+    });
+    expect(graphPostFormMock).not.toHaveBeenCalled();
+    expect(managerMock.stop).not.toHaveBeenCalled();
+    expect(sqlMock.mock.calls.some((call) => queryText(call).includes("SET status = 'ENDED'"))).toBe(false);
+  });
+
   it('replaces the raw Graph message in the response with an actionable line when ending fails', async () => {
-    endLiveMock.mockRejectedValue(
+    graphPostFormMock.mockRejectedValue(
       new FacebookApiError(
         "Unsupported post request. Object with ID '122152546167117522' does not exist, cannot be loaded due to missing permissions, or does not support this operation."
       )

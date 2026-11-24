@@ -1,4 +1,4 @@
-import { graphPostForm, graphRequest } from '@/lib/facebook';
+import { FacebookApiError, graphPostForm, graphRequest } from '@/lib/facebook';
 
 type RawLiveVideo = {
   id?: string;
@@ -121,7 +121,7 @@ export async function endPageLiveVideo({
  * The id that `end_live_video` must target — the live video node id, not a
  * value Graph cannot resolve to a broadcast. When the row has a stored id,
  * the node is re-read from Facebook so the end goes to a real id; returns
- * null when the row stores none or Facebook cannot load it.
+ * null when the row stores none or Graph reports an unavailable node.
  */
 export async function resolveEndVideoId({
   liveVideoId,
@@ -134,8 +134,15 @@ export async function resolveEndVideoId({
   try {
     const live = await fetchPageLiveVideo(liveVideoId, accessToken);
     return live.id || null;
-  } catch {
-    return null;
+  } catch (error) {
+    if (
+      error instanceof FacebookApiError &&
+      error.code === 100 &&
+      /^Unsupported get request\. Object with ID /i.test(error.message)
+    ) {
+      return null;
+    }
+    throw error;
   }
 }
 
