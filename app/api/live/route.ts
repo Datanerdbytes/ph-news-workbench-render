@@ -25,6 +25,7 @@ import {
 } from '@/lib/live/public-network';
 
 export const dynamic = 'force-dynamic';
+const STREAM_LIST_LIMIT = 50;
 
 /**
  * A finished broadcast is history, not something the Live page should list.
@@ -103,7 +104,8 @@ async function loadRows(
   workspaceId: string,
   refresh: boolean,
   accessToken: string,
-  includeHistory = false
+  includeHistory: boolean,
+  pollIds: number[] | null
 ): Promise<StreamRow[]> {
   const rows = (await sql`
     SELECT id, facebook_video_id, title, description, status, stream_key,
@@ -111,8 +113,9 @@ async function loadRows(
            source_url, source_mode, pump_status, pump_started_at, pump_error
     FROM live_streams
     WHERE workspace_id = ${workspaceId}
+      AND (${pollIds === null} OR id = ANY(${pollIds ?? []}::integer[]))
     ORDER BY created_at DESC
-    LIMIT 50
+    LIMIT ${STREAM_LIST_LIMIT}
   `) as unknown as StreamRow[];
 
   if (refresh) {
@@ -150,15 +153,25 @@ export async function GET(request: Request) {
   if (result.response) return result.response;
 
   const params = new URL(request.url).searchParams;
-  const refresh = params.get('refresh') === '1';
-  const includeHistory = params.get('history') === '1';
+  const poll = params.get('pollIds');
+  const ids = poll === null ? null : poll.split(',');
+  if (ids && (ids.length > STREAM_LIST_LIMIT || ids.some(
+    (id) => !/^[1-9]\d{0,9}$/.test(id) || Number(id) > 2_147_483_647
+  ))) {
+    return NextResponse.json({ error: 'Invalid live stream IDs.' }, { status: 400 });
+  }
+  const pollIds = ids?.map(Number) ?? null;
+  // Poll the displayed IDs, including archived rows, using stored state only.
+  const refresh = pollIds === null && params.get('refresh') === '1';
+  const includeHistory = pollIds !== null || params.get('history') === '1';
 
   try {
     const rows = await loadRows(
       result.context.access.workspace.id,
       refresh,
       result.context.connection.accessToken,
-      includeHistory
+      includeHistory,
+      pollIds
     );
     return NextResponse.json(
       { streams: rows.map(toStream) },

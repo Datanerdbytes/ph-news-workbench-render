@@ -130,6 +130,29 @@ describe('GET /api/live', () => {
     ]);
   });
 
+  it('polls displayed IDs within the workspace and returns stored archive status', async () => {
+    sqlMock.mockResolvedValueOnce([row(1, 'LIVE_NOW'), row(3, 'ENDED')]);
+    const response = await GET(new Request('http://localhost/api/live?pollIds=1,3&refresh=1'));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      streams: [{ id: 1, status: 'LIVE_NOW' }, { id: 3, status: 'ENDED' }],
+    });
+    const select = sqlMock.mock.calls[0];
+    expect(queryText(select)).toContain('WHERE workspace_id = ?');
+    expect(queryText(select)).toContain('id = ANY(?::integer[])');
+    expect(select.slice(1)).toEqual(['workspace-1', false, [1, 3], 50]);
+    expect(fetchPageLiveVideoMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['', '1,abc', '2147483648', Array(51).fill('1').join(',')])(
+    'rejects an invalid poll ID list before querying the database (%s)',
+    async (pollIds) => {
+      const response = await GET(new Request(`http://localhost/api/live?pollIds=${pollIds}`));
+      expect(response.status).toBe(400);
+      expect(sqlMock).not.toHaveBeenCalled();
+    }
+  );
+
   it('persists a newly ended stream from Facebook and hides it from the default read', async () => {
     fetchPageLiveVideoMock.mockImplementation(async (videoId: string) => ({
       status: videoId === 'fb-1' ? 'ENDED' : 'LIVE_NOW',

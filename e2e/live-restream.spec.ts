@@ -83,12 +83,12 @@ test("pump start without a source is guarded and the Live Page still renders", a
   await page.goto("/live");
 
   await expect(page.getByRole("button", { name: "Preview" })).toBeVisible();
-  await expect(
-    page.getByText("ENDED", { exact: true })
-  ).toHaveCount(0);
 
   const goLive = page.getByRole("button", { name: "Go live" });
   await expect(goLive).toHaveCount(1);
+  await expect(
+    page.getByText("ENDED", { exact: true })
+  ).toHaveCount(0);
   await expect(goLive).toBeDisabled();
   await expect(
     page.getByText("Resolve and preview a source URL for this stream to go live.")

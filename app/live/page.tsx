@@ -148,12 +148,13 @@ export default function LivePage() {
     let stopped = false;
     let inFlight = false;
     const controller = new AbortController();
+    const pollIds = streams.map((stream) => stream.id).join(',');
     const timer = setInterval(async () => {
       if (inFlight) return;
       inFlight = true;
       try {
         // Read runner state only; Facebook refresh remains a manual action.
-        const res = await fetch('/api/live', {
+        const res = await fetch(`/api/live?pollIds=${pollIds}`, {
           cache: 'no-store',
           signal: controller.signal,
         });
@@ -163,11 +164,14 @@ export default function LivePage() {
           data.streams.map((stream: Stream) => [stream.id, stream])
         );
         // Keep cards mounted and their editable fields unchanged. Only the
-        // pump status/error follows the runner. A stream missing from the
-        // active read has been archived (ENDED/VOD) in the database, so drop
-        // its card instead of leaving finished history on the page.
+        // pump status/error follows the runner. Remove a card only when
+        // the stored status confirms it was archived.
         setStreams((current) =>
           current
+            .filter((stream) => {
+              const updated = latest.get(stream.id);
+              return !updated || !isArchivedLiveStatus(updated.status);
+            })
             .map((stream) => {
               const updated = latest.get(stream.id);
               return updated
@@ -179,7 +183,6 @@ export default function LivePage() {
                   }
                 : stream;
             })
-            .filter((stream) => latest.has(stream.id))
         );
       } catch {
         // Transient read failures leave the card intact; retry next tick.
