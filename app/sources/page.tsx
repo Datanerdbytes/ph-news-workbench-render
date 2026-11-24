@@ -29,7 +29,16 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Modal } from '@/components/ui/modal';
 import { formatDomain, timeAgo } from '@/lib/format';
+import {
+  manilaSourceDay,
+  parseSourceItemFilters,
+  SOURCE_ITEM_TIME_ZONE,
+  SourceItemFilterError,
+  type SourceItemFilters,
+  type SourceItemRange,
+} from '@/lib/source-item-filters';
 import { fetchQueueItem } from '@/lib/story-queue';
+import { ArchiveFilters } from './archive-filters';
 
 type Feed = {
   id: number;
@@ -58,6 +67,49 @@ type SourceItem = {
 };
 
 const UNGROUPED = 'Ungrouped';
+
+function buildSourceItemsQuery(
+  feedKey: string,
+  filters: SourceItemFilters,
+  before?: number,
+): string {
+  const params = new URLSearchParams();
+  if (feedKey !== 'all') params.set('feed', feedKey);
+  params.set('range', filters.range === 'today' ? 'day' : filters.range);
+  if ((filters.range === 'today' || filters.range === 'day') && filters.date) {
+    params.set('date', filters.date);
+  }
+  if (filters.range === 'month' && filters.month) params.set('month', filters.month);
+  if (filters.query) params.set('q', filters.query);
+  if (before) params.set('before', String(before));
+  return params.toString();
+}
+
+function sourceItemsUrl(feedKey: string, filters: SourceItemFilters, before?: number): string {
+  const query = buildSourceItemsQuery(feedKey, filters, before);
+  return `/api/source-items${query ? `?${query}` : ''}`;
+}
+
+function sourceRangeLabel(filters: SourceItemFilters): string {
+  if (filters.range === 'all') return 'All time';
+  if (filters.range === 'today') return 'Today';
+  if (filters.range === 'month' && filters.month) {
+    return new Date(`${filters.month}-01T12:00:00+08:00`).toLocaleDateString('en-PH', {
+      timeZone: SOURCE_ITEM_TIME_ZONE,
+      month: 'long',
+      year: 'numeric',
+    });
+  }
+  if (filters.range === 'day' && filters.date) {
+    return new Date(`${filters.date}T12:00:00+08:00`).toLocaleDateString('en-PH', {
+      timeZone: SOURCE_ITEM_TIME_ZONE,
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  }
+  return 'Selected dates';
+}
 
 function feedName(feed: Pick<Feed, 'title' | 'url'>): string {
   return feed.title?.trim() || formatDomain(feed.url);
@@ -452,31 +504,43 @@ function DeleteConfirmDialog({
   );
 }
 
-/** Day bucket for date-group headers, keyed by local calendar day. */
+/** Day bucket for date-group headers, keyed by Manila calendar day. */
 function dayKey(value: string | null): string | null {
   if (!value) return null;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
-  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+  return manilaSourceDay(date);
 }
 
 function dayLabel(key: string): string {
-  const [year, month, day] = key.split('-').map(Number);
-  const date = new Date(year, month, day);
-  const today = new Date();
-  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const diffDays = Math.round((startOfToday.getTime() - date.getTime()) / 86_400_000);
-  if (diffDays <= 0) return 'Today';
+  const date = new Date(`${key}T12:00:00+08:00`);
+  const today = manilaSourceDay(new Date());
+  const diffDays = Math.round(
+    (Date.parse(`${today}T00:00:00.000Z`) - Date.parse(`${key}T00:00:00.000Z`)) / 86_400_000,
+  );
+  if (diffDays === 0) return 'Today';
   if (diffDays === 1) return 'Yesterday';
   const options: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' };
-  if (year !== today.getFullYear()) options.year = 'numeric';
-  return date.toLocaleDateString('en-PH', options);
+  if (key.slice(0, 4) !== today.slice(0, 4)) options.year = 'numeric';
+  return date.toLocaleDateString('en-PH', { ...options, timeZone: SOURCE_ITEM_TIME_ZONE });
 }
 
 function SourcesPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const feedParam = searchParams.get('feed');
+  const today = manilaSourceDay(new Date());
+  const filters = useMemo(() => {
+    const now = new Date();
+    try {
+      return parseSourceItemFilters(searchParams, now);
+    } catch (error) {
+      if (error instanceof SourceItemFilterError) {
+        return parseSourceItemFilters(new URLSearchParams(), now);
+      }
+      throw error;
+    }
+  }, [searchParams]);
 
   const [feeds, setFeeds] = useState<Feed[]>([]);
   const [feedsLoading, setFeedsLoading] = useState(true);
@@ -494,6 +558,7 @@ function SourcesPageInner() {
   const [items, setItems] = useState<SourceItem[]>([]);
   const [itemsLoading, setItemsLoading] = useState(true);
   const [itemsError, setItemsError] = useState(false);
+  const [filteredTotal, setFilteredTotal] = useState<number | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
   const [hasMore, setHasMore] = useState(false);
@@ -537,33 +602,36 @@ function SourcesPageInner() {
   const effectiveKey =
     !feedsLoading && selectedKey !== 'all' && !selectedFeed ? 'all' : selectedKey;
   const selectedKeyRef = useRef(effectiveKey);
+  const filtersRef = useRef(filters);
+  const filterSignature = buildSourceItemsQuery(effectiveKey, filters);
   const itemsGeneration = useRef<symbol | null>(null);
   useLayoutEffect(() => {
     selectedKeyRef.current = effectiveKey;
-    return () => { itemsGeneration.current = null; };
-  }, [effectiveKey]);
+    filtersRef.current = filters;
+  }, [effectiveKey, filters]);
 
   const loadItems = useCallback(async () => {
-    const keyAtRequest = selectedKeyRef.current;
+    const keyAtRequest = `${selectedKeyRef.current}|${buildSourceItemsQuery(selectedKeyRef.current, filtersRef.current)}`;
     const generation = Symbol();
     itemsGeneration.current = generation;
     const isCurrent = () =>
-      keyAtRequest === selectedKeyRef.current && generation === itemsGeneration.current;
+      keyAtRequest === `${selectedKeyRef.current}|${buildSourceItemsQuery(selectedKeyRef.current, filtersRef.current)}`
+      && generation === itemsGeneration.current;
     setItemsLoading(true);
     setItemsError(false);
+    setFilteredTotal(null);
     setLoadingMore(false);
     setNextCursor(null);
     setHasMore(false);
     try {
-      const query =
-        keyAtRequest === 'all' ? '' : `feed=${encodeURIComponent(keyAtRequest)}`;
-      const res = await fetch(`/api/source-items${query ? `?${query}` : ''}`, {
+      const res = await fetch(sourceItemsUrl(selectedKeyRef.current, filtersRef.current), {
         cache: 'no-store',
       });
       if (!res.ok) throw new Error('Failed to load stories');
       const data = await res.json();
       if (!isCurrent()) return;
       setItems(data.rows ?? []);
+      setFilteredTotal(data.total);
       setNextCursor(typeof data.nextCursor === 'number' ? data.nextCursor : null);
       setHasMore(Boolean(data.hasMore));
     } catch {
@@ -576,22 +644,21 @@ function SourcesPageInner() {
 
   useEffect(() => {
     void loadItems();
-  }, [loadItems, effectiveKey]);
+  }, [loadItems, effectiveKey, filterSignature]);
 
   const loadMore = useCallback(async () => {
     if (!nextCursor || loadingMore || itemsLoading) return;
-    const keyAtRequest = selectedKeyRef.current;
+    const keyAtRequest = `${selectedKeyRef.current}|${buildSourceItemsQuery(selectedKeyRef.current, filtersRef.current)}`;
     const generation = itemsGeneration.current;
     if (!generation) return;
     const isCurrent = () =>
-      keyAtRequest === selectedKeyRef.current && generation === itemsGeneration.current;
+      keyAtRequest === `${selectedKeyRef.current}|${buildSourceItemsQuery(selectedKeyRef.current, filtersRef.current)}`
+      && generation === itemsGeneration.current;
     setLoadingMore(true);
     try {
-      const query =
-        keyAtRequest === 'all'
-          ? `before=${nextCursor}`
-          : `feed=${encodeURIComponent(keyAtRequest)}&before=${nextCursor}`;
-      const res = await fetch(`/api/source-items?${query}`, { cache: 'no-store' });
+      const res = await fetch(sourceItemsUrl(selectedKeyRef.current, filtersRef.current, nextCursor), {
+        cache: 'no-store',
+      });
       if (!res.ok) throw new Error('Failed to load stories');
       const data = await res.json();
       if (!isCurrent()) return;
@@ -599,6 +666,7 @@ function SourcesPageInner() {
         const seen = new Set(prev.map(item => item.id));
         return [...prev, ...(data.rows ?? []).filter((item: SourceItem) => !seen.has(item.id))];
       });
+      setFilteredTotal(data.total);
       setNextCursor(typeof data.nextCursor === 'number' ? data.nextCursor : null);
       setHasMore(Boolean(data.hasMore));
     } catch {
@@ -608,13 +676,44 @@ function SourcesPageInner() {
     }
   }, [nextCursor, loadingMore, itemsLoading]);
 
-  const select = useCallback(
-    (key: string) => {
-      setSelectedKey(key);
-      router.replace(key === 'all' ? '/sources' : `/sources?feed=${key}`);
-    },
-    [router]
-  );
+  const updateUrl = useCallback((updates: Record<string, string | null>) => {
+    const params = new URLSearchParams(searchParams.toString());
+    for (const [key, value] of Object.entries(updates)) {
+      if (value) params.set(key, value);
+      else params.delete(key);
+    }
+    const query = params.toString();
+    router.replace(query ? `/sources?${query}` : '/sources', { scroll: false });
+  }, [router, searchParams]);
+
+  const select = useCallback((key: string) => {
+    setSelectedKey(key);
+    updateUrl({ feed: key === 'all' ? null : key });
+  }, [updateUrl]);
+
+  const changeRange = useCallback((range: SourceItemRange) => {
+    updateUrl({
+      range: range === 'today' ? null : range,
+      date: range === 'day' ? today : null,
+      month: range === 'month' ? today.slice(0, 7) : null,
+    });
+  }, [today, updateUrl]);
+
+  const changeDate = useCallback((date: string) => {
+    if (date) updateUrl({ date });
+  }, [updateUrl]);
+
+  const changeMonth = useCallback((month: string) => {
+    if (month) updateUrl({ month });
+  }, [updateUrl]);
+
+  const changeQuery = useCallback((query: string) => {
+    updateUrl({ q: query || null });
+  }, [updateUrl]);
+
+  const resetFilters = useCallback(() => {
+    updateUrl({ range: null, date: null, month: null, q: null });
+  }, [updateUrl]);
 
   const totalCount = useMemo(
     () => feeds.reduce((sum, feed) => sum + feed.item_count, 0),
@@ -646,14 +745,14 @@ function SourcesPageInner() {
   const sections = useMemo(() => {
     const map = new Map<string, SourceItem[]>();
     for (const item of items) {
-      const key = dayKey(item.published_at ?? item.created_at) ?? 'undated';
+      const key = dayKey(item.published_at) ?? 'undated';
       const bucket = map.get(key);
       if (bucket) bucket.push(item);
       else map.set(key, [item]);
     }
     return [...map.entries()].map(([key, rows]) => ({
       key,
-      label: key === 'undated' ? 'Earlier' : dayLabel(key),
+      label: key === 'undated' ? 'Undated' : dayLabel(key),
       rows,
     }));
   }, [items]);
@@ -797,7 +896,7 @@ function SourcesPageInner() {
   };
 
   const isAll = effectiveKey === 'all';
-  const headerTotal = isAll ? totalCount : (selectedFeed?.item_count ?? 0);
+  const headerTotal = filteredTotal;
 
   const sourceRowBase =
     'flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50';
@@ -1014,7 +1113,7 @@ function SourcesPageInner() {
                     </h1>
                     <p className="mt-0.5 text-[11px] text-muted-foreground">
                       {feeds.length} {feeds.length === 1 ? 'source' : 'sources'} ·{' '}
-                      {headerTotal} {headerTotal === 1 ? 'story' : 'stories'}
+                      {headerTotal ?? '—'} {headerTotal === 1 ? 'story' : 'stories'}
                     </p>
                   </div>
                 </div>
@@ -1030,8 +1129,7 @@ function SourcesPageInner() {
                         <FeedStatusPill feed={selectedFeed} />
                       </div>
                       <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                        {formatDomain(selectedFeed.url)} · {selectedFeed.item_count}{' '}
-                        {selectedFeed.item_count === 1 ? 'story' : 'stories'}
+                        {formatDomain(selectedFeed.url)} · {headerTotal ?? '—'} in this view
                         {selectedFeed.last_fetched_at &&
                           ` · last fetched ${timeAgo(selectedFeed.last_fetched_at)}`}
                         {selectedFeed.category?.trim() && ` · ${selectedFeed.category.trim()}`}
@@ -1099,9 +1197,38 @@ function SourcesPageInner() {
             </div>
           </header>
 
+          <ArchiveFilters
+            range={filters.range}
+            date={filters.date ?? today}
+            month={filters.month ?? today.slice(0, 7)}
+            query={filters.query}
+            today={today}
+            busy={itemsLoading}
+            onRangeChange={changeRange}
+            onDateChange={changeDate}
+            onMonthChange={changeMonth}
+            onQueryChange={changeQuery}
+            onReset={resetFilters}
+          />
+
           {/* Article list */}
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
             <div className="mx-auto w-full max-w-[900px] px-4 py-4 sm:px-6 sm:py-5">
+              <div
+                className="mb-3 flex flex-wrap items-center justify-between gap-1 text-[11px] text-muted-foreground"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                <p>
+                  {itemsLoading
+                    ? 'Loading stories…'
+                    : itemsError
+                      ? 'Stories unavailable'
+                      : `${headerTotal} ${headerTotal === 1 ? 'story' : 'stories'} in this view`}
+                </p>
+                <p>{sourceRangeLabel(filters)} · PHT</p>
+              </div>
               {itemsLoading ? (
                 <div className="animate-pulse overflow-hidden rounded-xl border border-border/80 bg-card">
                   {Array.from({ length: 5 }).map((_, index) => (
@@ -1140,27 +1267,44 @@ function SourcesPageInner() {
                 <div className="rounded-xl border border-dashed border-border bg-card/50 px-6 py-12 text-center">
                   <Newspaper className="mx-auto size-5 text-faint/60" aria-hidden />
                   <p className="mt-2 text-sm font-medium">
-                    {isAll ? 'No stories yet' : 'No stories from this source yet'}
+                    {filters.query
+                      ? `No stories match “${filters.query}”`
+                      : filters.range === 'all'
+                        ? (isAll ? 'No stories yet' : 'No stories from this source yet')
+                        : `No stories for ${sourceRangeLabel(filters).toLowerCase()}`}
                   </p>
                   <p className="mx-auto mt-1 max-w-sm text-xs leading-relaxed text-muted-foreground">
-                    Pull the latest articles now, or wait for the next scheduled refresh.
+                    {filters.query
+                      ? 'Try another topic or name, search all time, or clear your search.'
+                      : 'Try another day or month, browse all time, or fetch the latest articles.'}
                   </p>
-                  {!isAll && selectedFeed?.enabled && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="mt-4"
-                      onClick={() => handleFetchNow(selectedFeed.id)}
-                      disabled={fetchingIds.has(selectedFeed.id)}
-                      aria-busy={fetchingIds.has(selectedFeed.id)}
-                    >
-                      <RefreshCw
-                        className={cn('size-3.5', fetchingIds.has(selectedFeed.id) && 'animate-spin')}
-                        aria-hidden
-                      />
-                      Fetch now
-                    </Button>
-                  )}
+                  <div className="mt-4 flex flex-wrap justify-center gap-2">
+                    {filters.query && (
+                      <Button variant="outline" size="sm" onClick={() => changeQuery('')}>
+                        Clear search
+                      </Button>
+                    )}
+                    {filters.range !== 'all' && (
+                      <Button variant="outline" size="sm" onClick={() => changeRange('all')}>
+                        Browse all time
+                      </Button>
+                    )}
+                    {!isAll && selectedFeed?.enabled && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleFetchNow(selectedFeed.id)}
+                        disabled={fetchingIds.has(selectedFeed.id)}
+                        aria-busy={fetchingIds.has(selectedFeed.id)}
+                      >
+                        <RefreshCw
+                          className={cn('size-3.5', fetchingIds.has(selectedFeed.id) && 'animate-spin')}
+                          aria-hidden
+                        />
+                        Fetch now
+                      </Button>
+                    )}
+                  </div>
                 </div>
               ) : (
                 <>
@@ -1203,7 +1347,9 @@ function SourcesPageInner() {
                       </Button>
                     ) : (
                       <p className="py-1 text-center text-[10.5px] text-muted-foreground">
-                        All stories loaded
+                        {filters.range === 'all' && !filters.query
+                          ? 'All stories loaded'
+                          : 'All matching stories loaded'}
                       </p>
                     )}
                     <p className="mt-1.5 text-center text-[10px] tabular-nums text-muted-foreground">

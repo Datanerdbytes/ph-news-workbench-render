@@ -132,18 +132,32 @@ export async function clearSeededLiveStreams(): Promise<void> {
 const SOURCES_FEED_HOST = "https://e2e-sources.test/";
 
 /**
- * Seed two feeds with categories plus a few news_items for the Sources page
- * regression spec: "Tech" holds two feeds, one feed is uncategorized, one
- * story carries a thumbnail URL, and the rest have no image (monogram
- * fallback). All rows are namespaced under e2e-sources.test for cleanup.
+ * Seed two feeds with stories on both sides of Manila day/month boundaries,
+ * plus RSS metadata and an undated item for Sources filter coverage. All rows
+ * are namespaced under e2e-sources.test for cleanup.
  */
 export async function seedSourcesRedesignData(): Promise<{
   vergeFeedId: number;
   soloFeedId: number;
+  today: string;
+  previousDay: string;
+  previousMonth: string;
 }> {
   const sql = db();
   const owner = await ownerContext();
   const runId = randomUUID();
+  const manilaDay = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Manila",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const today = manilaDay.format(new Date());
+  const [year, month] = today.split("-").map(Number);
+  const previousMonth = new Date(Date.UTC(year, month - 2, 1)).toISOString().slice(0, 7);
+  const dayStart = new Date(`${today}T00:00:00+08:00`);
+  const nextDay = new Date(dayStart.getTime() + 86_400_000);
+  const previousDay = manilaDay.format(new Date(dayStart.getTime() - 86_400_000));
 
   const feeds = (await sql`
     INSERT INTO feeds (workspace_id, url, title, category, enabled)
@@ -156,20 +170,44 @@ export async function seedSourcesRedesignData(): Promise<{
 
   await sql`
     INSERT INTO news_items
-      (feed_id, workspace_id, guid, link, title, summary, image_url, published_at, created_at, dedup_hash)
+      (feed_id, workspace_id, guid, link, title, summary, image_url,
+       published_at, created_at, raw_payload, dedup_hash)
     VALUES
       (${vergeFeedId}, ${owner.workspace_id}, ${`e2e-${runId}-1`},
-       ${`${SOURCES_FEED_HOST}one`}, 'E2E sources story one', 'Seeded summary one.',
-       ${`${SOURCES_FEED_HOST}img/one.jpg`}, now(), now(), ${`e2e-${runId}-h1`}),
+       ${`${SOURCES_FEED_HOST}one`}, 'E2E sources story one',
+       'Discusses flood resilience and evacuation plans.',
+       ${`${SOURCES_FEED_HOST}img/one.jpg`}, ${dayStart.toISOString()}, ${dayStart.toISOString()},
+       ${JSON.stringify({ creator: "Maria Santos", categories: ["Climate", "Metro Manila"] })},
+       ${`e2e-${runId}-h1`}),
       (${vergeFeedId}, ${owner.workspace_id}, ${`e2e-${runId}-2`},
        ${`${SOURCES_FEED_HOST}two`}, 'E2E sources story two', NULL,
-       NULL, now() - (1 * interval '1 day'), now() - (1 * interval '1 day'), ${`e2e-${runId}-h2`}),
+       NULL, ${new Date(nextDay.getTime() - 1).toISOString()}, ${dayStart.toISOString()},
+       ${JSON.stringify({ author: "Liza Reyes", categories: ["Breaking"] })},
+       ${`e2e-${runId}-h2`}),
       (${soloFeedId}, ${owner.workspace_id}, ${`e2e-${runId}-3`},
        ${`${SOURCES_FEED_HOST}three`}, 'E2E solo story', 'Seeded solo summary.',
-       NULL, now(), now(), ${`e2e-${runId}-h3`})
+       NULL, ${new Date(dayStart.getTime() + 12 * 3_600_000).toISOString()}, ${dayStart.toISOString()},
+       NULL, ${`e2e-${runId}-h3`}),
+      (${vergeFeedId}, ${owner.workspace_id}, ${`e2e-${runId}-4`},
+       ${`${SOURCES_FEED_HOST}yesterday`}, 'E2E yesterday story', 'Previous Manila day.',
+       NULL, ${new Date(dayStart.getTime() - 1).toISOString()}, ${dayStart.toISOString()},
+       NULL, ${`e2e-${runId}-h4`}),
+      (${vergeFeedId}, ${owner.workspace_id}, ${`e2e-${runId}-5`},
+       ${`${SOURCES_FEED_HOST}tomorrow`}, 'E2E tomorrow story', 'Next Manila day.',
+       NULL, ${nextDay.toISOString()}, ${dayStart.toISOString()},
+       NULL, ${`e2e-${runId}-h5`}),
+      (${vergeFeedId}, ${owner.workspace_id}, ${`e2e-${runId}-6`},
+       ${`${SOURCES_FEED_HOST}previous-month`}, 'E2E previous month story',
+       'A policy story from the previous month.', NULL,
+       ${new Date(`${previousMonth}-15T12:00:00+08:00`).toISOString()}, ${dayStart.toISOString()},
+       ${JSON.stringify({ creator: "Juan Dela Cruz", categories: ["Politics"] })},
+       ${`e2e-${runId}-h6`}),
+      (${vergeFeedId}, ${owner.workspace_id}, ${`e2e-${runId}-7`},
+       ${`${SOURCES_FEED_HOST}undated`}, 'E2E undated story', 'No publication date.',
+       NULL, NULL, ${dayStart.toISOString()}, NULL, ${`e2e-${runId}-h7`})
   `;
 
-  return { vergeFeedId, soloFeedId };
+  return { vergeFeedId, soloFeedId, today, previousDay, previousMonth };
 }
 
 /** Remove exactly what seedSourcesRedesignData wrote. */
