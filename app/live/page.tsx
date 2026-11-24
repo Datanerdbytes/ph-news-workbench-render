@@ -29,6 +29,15 @@ import {
   MediaPreviewMedia,
 } from '@/components/publishing/media-preview-card';
 
+// Kept in sync with the API's default read: finished broadcasts are history
+// and must not linger as cards on the Live page. The rows remain in the
+// database — this is only about what the page renders.
+const ARCHIVED_LIVE_STATUSES = ['ENDED', 'VOD'] as const;
+
+function isArchivedLiveStatus(status: string) {
+  return (ARCHIVED_LIVE_STATUSES as readonly string[]).includes(status);
+}
+
 type Stream = {
   id: number;
   facebookVideoId: string;
@@ -154,19 +163,23 @@ export default function LivePage() {
           data.streams.map((stream: Stream) => [stream.id, stream])
         );
         // Keep cards mounted and their editable fields unchanged. Only the
-        // pump status/error needs to follow the runner in the background.
+        // pump status/error follows the runner. A stream missing from the
+        // active read has been archived (ENDED/VOD) in the database, so drop
+        // its card instead of leaving finished history on the page.
         setStreams((current) =>
-          current.map((stream) => {
-            const updated = latest.get(stream.id);
-            return updated
-              ? {
-                  ...stream,
-                  pumpStatus: updated.pumpStatus,
-                  pumpStartedAt: updated.pumpStartedAt,
-                  pumpError: updated.pumpError,
-                }
-              : stream;
-          })
+          current
+            .map((stream) => {
+              const updated = latest.get(stream.id);
+              return updated
+                ? {
+                    ...stream,
+                    pumpStatus: updated.pumpStatus,
+                    pumpStartedAt: updated.pumpStartedAt,
+                    pumpError: updated.pumpError,
+                  }
+                : stream;
+            })
+            .filter((stream) => latest.has(stream.id))
         );
       } catch {
         // Transient read failures leave the card intact; retry next tick.
@@ -599,7 +612,7 @@ function StreamCard({
   const [commentsBusy, setCommentsBusy] = useState(false);
   const [commentsStopped, setCommentsStopped] = useState(false);
 
-  const ended = stream.status === 'ENDED' || stream.status === 'VOD';
+  const ended = isArchivedLiveStatus(stream.status);
   const commentsOpen = comments !== null;
 
   useEffect(() => {

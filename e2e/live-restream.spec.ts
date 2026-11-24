@@ -76,16 +76,16 @@ test("pump start without a source is guarded and the Live Page still renders", a
   expect((await liveStart.json()).error).toContain("Resolve a source URL");
 
   // The UI pass: /live still renders after the refused starts — the composer
-  // is intact and both cards show the right affordance. The ended card hides
-  // its pump controls entirely (components/live/source-preview.tsx renders
-  // PumpControls only for non-ended streams); the live card without a source
-  // shows a disabled Go live plus the hint explaining why.
+  // is intact. Finished broadcasts are history and must not be listed: the
+  // API omits ENDED rows on the default read, so the ended card never renders
+  // on reload even though its row is still in the database. The live card
+  // without a source shows a disabled Go live plus the hint explaining why.
   await page.goto("/live");
 
   await expect(page.getByRole("button", { name: "Preview" })).toBeVisible();
   await expect(
     page.getByText("ENDED", { exact: true })
-  ).toBeVisible();
+  ).toHaveCount(0);
 
   const goLive = page.getByRole("button", { name: "Go live" });
   await expect(goLive).toHaveCount(1);

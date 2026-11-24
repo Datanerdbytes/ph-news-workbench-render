@@ -153,6 +153,21 @@ describe('live pump status refresh', () => {
     expect(toast.error).not.toHaveBeenCalled();
   });
 
+  it('removes a finished stream from the page when it leaves the active read', async () => {
+    fetchMock
+      .mockResolvedValueOnce(response([stream()]))
+      .mockResolvedValueOnce(response([]));
+    render(<LivePage />);
+    await flush();
+    expect(screen.getByLabelText('Stream title')).toBeInTheDocument();
+
+    // The card was archived (ENDED/VOD) in the database; the active read no
+    // longer returns it, so it must disappear without a manual reload.
+    await advance();
+    expect(screen.queryByLabelText('Stream title')).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it.each(['idle', 'stopped', 'failed', 'interrupted'] as const)(
     'stops polling after the pump becomes %s',
     async (status) => {
