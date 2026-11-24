@@ -125,7 +125,7 @@ describe('DELETE /api/live/[id]', () => {
     );
   });
 
-  it('returns an actionable error and leaves the pump and row alone when no usable id resolves', async () => {
+  it('cleans up the local row when the node re-read reports it no longer exists', async () => {
     graphRequestMock.mockRejectedValue(
       new FacebookApiError("Unsupported get request. Object with ID 'fb-video-37' does not exist.", 100)
     );
@@ -135,16 +135,15 @@ describe('DELETE /api/live/[id]', () => {
       { params: Promise.resolve({ id: '37' }) }
     );
 
-    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ended: true });
     expect(graphPostFormMock).not.toHaveBeenCalled();
-    expect(managerMock.stop).not.toHaveBeenCalled();
-    const body = await response.json();
-    expect(body.error).toContain('Create a new live stream');
+    expect(managerMock.stop).toHaveBeenCalledWith(37);
     expect(
       sqlMock.mock.calls.some((call) =>
         queryText(call).includes("SET status = 'ENDED'")
       )
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it('asks the user to reconnect when the live video lookup rejects an expired token', async () => {

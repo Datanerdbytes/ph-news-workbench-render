@@ -145,15 +145,12 @@ export async function DELETE(
           liveVideoId: stream.facebook_video_id,
           accessToken: connection.accessToken,
         });
+        // If Facebook no longer recognizes the node as a broadcast (the observed
+        // failure quoted the stream key, e.g. "Object with ID '...' does not
+        // exist"), there is nothing left to end on Facebook — clean up locally
+        // instead of surfacing a failure the user cannot act on.
         if (!endVideoId) {
-          return NextResponse.json(
-            {
-              error:
-                'This live stream could not be ended because Facebook no longer recognizes it as a broadcast. Create a new live stream to broadcast again.',
-              code: 'live_end_unresolved',
-            },
-            { status: 502 }
-          );
+          return await endLocalStream(access.workspace.id, stream.id);
         }
 
         // End Facebook first; a failed end request must leave the pump and
