@@ -25,6 +25,18 @@ import {
 } from '@/lib/live/public-network';
 
 export const dynamic = 'force-dynamic';
+const STREAM_LIST_LIMIT = 50;
+
+/**
+ * A finished broadcast is history, not something the Live page should list.
+ * The rows stay in `live_streams` — only the read path hides them by default.
+ * Mirrored in the UI so the two agree on what counts as an active stream.
+ */
+export const ARCHIVED_LIVE_STATUSES = ['ENDED', 'VOD'] as const;
+
+export function isArchivedLiveStatus(status: string) {
+  return (ARCHIVED_LIVE_STATUSES as readonly string[]).includes(status);
+}
 
 type StreamRow = {
   id: number;
@@ -91,7 +103,9 @@ function toStream(row: StreamRow) {
 async function loadRows(
   workspaceId: string,
   refresh: boolean,
-  accessToken: string
+  accessToken: string,
+  includeHistory: boolean,
+  pollIds: number[] | null
 ): Promise<StreamRow[]> {
   const rows = (await sql`
     SELECT id, facebook_video_id, title, description, status, stream_key,
@@ -99,46 +113,65 @@ async function loadRows(
            source_url, source_mode, pump_status, pump_started_at, pump_error
     FROM live_streams
     WHERE workspace_id = ${workspaceId}
+      AND (${pollIds === null} OR id = ANY(${pollIds ?? []}::integer[]))
     ORDER BY created_at DESC
-    LIMIT 50
+    LIMIT ${STREAM_LIST_LIMIT}
   `) as unknown as StreamRow[];
 
-  if (!refresh) return rows;
-
-  for (const row of rows) {
-    if (row.status === 'ENDED' || row.status === 'VOD') continue;
-    try {
-      const live = await fetchPageLiveVideo(row.facebook_video_id, accessToken);
-      row.status = live.status;
-      row.title = live.title || row.title;
-      row.description = live.description || row.description;
-      row.permalink_url = live.permalink ?? row.permalink_url;
-      await sql`
-        UPDATE live_streams
-        SET status = ${row.status}, title = ${row.title},
-            description = ${row.description}, permalink_url = ${row.permalink_url},
-            updated_at = now()
-        WHERE id = ${row.id} AND workspace_id = ${workspaceId}
-      `;
-    } catch {
-      // A stream that Facebook no longer returns keeps its stored state.
+  if (refresh) {
+    for (const row of rows) {
+      if (isArchivedLiveStatus(row.status)) continue;
+      try {
+        const live = await fetchPageLiveVideo(row.facebook_video_id, accessToken);
+        row.status = live.status;
+        row.title = live.title || row.title;
+        row.description = live.description || row.description;
+        row.permalink_url = live.permalink ?? row.permalink_url;
+        await sql`
+          UPDATE live_streams
+          SET status = ${row.status}, title = ${row.title},
+              description = ${row.description}, permalink_url = ${row.permalink_url},
+              updated_at = now()
+          WHERE id = ${row.id} AND workspace_id = ${workspaceId}
+        `;
+      } catch {
+        // A stream that Facebook no longer returns keeps its stored state.
+      }
     }
   }
 
-  return rows;
+  // History is still fully persisted in live_streams. Only the default read
+  // for the Live page omits finished rows; ?history=1 is the explicit opt-in
+  // for inspecting the archive (debugging/admin, never used by the UI).
+  return includeHistory
+    ? rows
+    : rows.filter((row) => !isArchivedLiveStatus(row.status));
 }
 
 export async function GET(request: Request) {
   const result = await requirePublishingConnection(request, 'load live streams');
   if (result.response) return result.response;
 
-  const refresh = new URL(request.url).searchParams.get('refresh') === '1';
+  const params = new URL(request.url).searchParams;
+  const poll = params.get('pollIds');
+  const ids = poll === null ? null : poll.split(',');
+  if (ids && (ids.length > STREAM_LIST_LIMIT || ids.some(
+    (id) => !/^[1-9]\d{0,9}$/.test(id) || Number(id) > 2_147_483_647
+  ))) {
+    return NextResponse.json({ error: 'Invalid live stream IDs.' }, { status: 400 });
+  }
+  const pollIds = ids?.map(Number) ?? null;
+  // Poll the displayed IDs, including archived rows, using stored state only.
+  const refresh = pollIds === null && params.get('refresh') === '1';
+  const includeHistory = pollIds !== null || params.get('history') === '1';
 
   try {
     const rows = await loadRows(
       result.context.access.workspace.id,
       refresh,
-      result.context.connection.accessToken
+      result.context.connection.accessToken,
+      includeHistory,
+      pollIds
     );
     return NextResponse.json(
       { streams: rows.map(toStream) },

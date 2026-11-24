@@ -29,6 +29,15 @@ import {
   MediaPreviewMedia,
 } from '@/components/publishing/media-preview-card';
 
+// Kept in sync with the API's default read: finished broadcasts are history
+// and must not linger as cards on the Live page. The rows remain in the
+// database — this is only about what the page renders.
+const ARCHIVED_LIVE_STATUSES = ['ENDED', 'VOD'] as const;
+
+function isArchivedLiveStatus(status: string) {
+  return (ARCHIVED_LIVE_STATUSES as readonly string[]).includes(status);
+}
+
 type Stream = {
   id: number;
   facebookVideoId: string;
@@ -139,12 +148,13 @@ export default function LivePage() {
     let stopped = false;
     let inFlight = false;
     const controller = new AbortController();
+    const pollIds = streams.map((stream) => stream.id).join(',');
     const timer = setInterval(async () => {
       if (inFlight) return;
       inFlight = true;
       try {
         // Read runner state only; Facebook refresh remains a manual action.
-        const res = await fetch('/api/live', {
+        const res = await fetch(`/api/live?pollIds=${pollIds}`, {
           cache: 'no-store',
           signal: controller.signal,
         });
@@ -154,19 +164,25 @@ export default function LivePage() {
           data.streams.map((stream: Stream) => [stream.id, stream])
         );
         // Keep cards mounted and their editable fields unchanged. Only the
-        // pump status/error needs to follow the runner in the background.
+        // pump status/error follows the runner. Remove a card only when
+        // the stored status confirms it was archived.
         setStreams((current) =>
-          current.map((stream) => {
-            const updated = latest.get(stream.id);
-            return updated
-              ? {
-                  ...stream,
-                  pumpStatus: updated.pumpStatus,
-                  pumpStartedAt: updated.pumpStartedAt,
-                  pumpError: updated.pumpError,
-                }
-              : stream;
-          })
+          current
+            .filter((stream) => {
+              const updated = latest.get(stream.id);
+              return !updated || !isArchivedLiveStatus(updated.status);
+            })
+            .map((stream) => {
+              const updated = latest.get(stream.id);
+              return updated
+                ? {
+                    ...stream,
+                    pumpStatus: updated.pumpStatus,
+                    pumpStartedAt: updated.pumpStartedAt,
+                    pumpError: updated.pumpError,
+                  }
+                : stream;
+            })
         );
       } catch {
         // Transient read failures leave the card intact; retry next tick.
@@ -599,7 +615,7 @@ function StreamCard({
   const [commentsBusy, setCommentsBusy] = useState(false);
   const [commentsStopped, setCommentsStopped] = useState(false);
 
-  const ended = stream.status === 'ENDED' || stream.status === 'VOD';
+  const ended = isArchivedLiveStatus(stream.status);
   const commentsOpen = comments !== null;
 
   useEffect(() => {

@@ -123,7 +123,7 @@ describe('live pump status refresh', () => {
     title.focus();
 
     await advance();
-    expect(fetchMock).toHaveBeenNthCalledWith(3, '/api/live', {
+    expect(fetchMock).toHaveBeenNthCalledWith(3, '/api/live?pollIds=1', {
       cache: 'no-store',
       signal: expect.any(AbortSignal),
     });
@@ -151,6 +151,24 @@ describe('live pump status refresh', () => {
     expect(screen.getByLabelText('Stream description')).toHaveValue('Unsaved description');
     expect(screen.getByLabelText('Planned start time')).toHaveValue('2026-11-16T10:30');
     expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it.each(['ENDED', 'VOD'])('keeps a missing stream until a poll confirms %s', async (status) => {
+    fetchMock
+      .mockResolvedValueOnce(response([stream()]))
+      .mockResolvedValueOnce(response([]))
+      .mockResolvedValueOnce(response([{ ...stream('stopped'), status }]));
+    render(<LivePage />);
+    await flush();
+    expect(screen.getByLabelText('Stream title')).toBeInTheDocument();
+
+    // A missing row must not take away the running stream's Stop control.
+    await advance();
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled();
+
+    await advance();
+    expect(screen.queryByLabelText('Stream title')).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it.each(['idle', 'stopped', 'failed', 'interrupted'] as const)(
