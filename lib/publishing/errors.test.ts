@@ -5,6 +5,8 @@ vi.mock("@/lib/notifications", () => ({
 }));
 
 import { FacebookApiError } from "@/lib/facebook";
+import { InstagramApiError } from "@/lib/instagram";
+import { instagramErrorResponse } from "./errors";
 import { notifyPublishAttemptFailure } from "@/lib/notifications";
 import { facebookErrorResponse } from "./errors";
 
@@ -184,5 +186,61 @@ describe("facebookErrorResponse userMessage override", () => {
         "The live stream could not be ended. Try again. Reconnect the Page to refresh its permissions.",
       code: "permission",
     });
+  });
+});
+
+
+describe("instagramErrorResponse", () => {
+  it("maps Instagram permission codes to 403 with reconnect guidance", async () => {
+    for (const code of [10, 200, 190]) {
+      const { status, body } = await shape(
+        instagramErrorResponse(
+          new InstagramApiError("Instagram publishing permission was rejected.", code),
+          "publish_failed",
+          "fallback"
+        )
+      );
+      expect(status).toBe(403);
+      expect(body).toEqual({
+        error: "Instagram publishing permission was rejected. Reconnect Instagram to refresh its permissions.",
+        code: "permission",
+      });
+    }
+  });
+
+  it("passes other Instagram API failures through as 502", async () => {
+    const { status, body } = await shape(
+      instagramErrorResponse(
+        new InstagramApiError("Instagram media processing failed.", 12),
+        "publish_failed",
+        "fallback"
+      )
+    );
+    expect(status).toBe(502);
+    expect(body).toEqual({
+      error: "Instagram media processing failed.",
+      code: "publish_failed",
+    });
+  });
+
+  it("keeps FacebookApiError behaviour for the same codes", async () => {
+    for (const code of [10, 200, 190]) {
+      const { status } = await shape(
+        instagramErrorResponse(
+          new FacebookApiError("access_token=abc broke", code),
+          "publish_failed",
+          "fallback"
+        )
+      );
+      expect(status).toBe(403);
+    }
+  });
+
+  it("returns 500 for non-API errors", async () => {
+    const { status, body } = await shape(
+      instagramErrorResponse(new Error("boom"), "publish_failed", "fallback")
+    );
+    expect(status).toBe(500);
+    expect(body).toEqual({ error: "boom", code: "publish_failed" });
   });
 });
