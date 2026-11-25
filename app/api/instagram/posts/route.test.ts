@@ -14,6 +14,7 @@ vi.mock("@/lib/schedule-events", () => ({ recordScheduleEvent: vi.fn() }));
 vi.mock("@/lib/schedule-mirror", () => ({ recordNativeSchedule: vi.fn() }));
 
 import { sql } from "@/lib/db";
+import { InstagramApiError } from "@/lib/instagram";
 import { requireWorkspace } from "@/lib/session";
 import { assertStagedBlob } from "@/lib/blob";
 import { recordScheduleEvent } from "@/lib/schedule-events";
@@ -104,6 +105,40 @@ describe("POST /api/instagram/posts", () => {
     });
     const data = (await response.json()) as { scheduledFor: string | null };
     expect(data.scheduledFor).toBeUndefined();
+  });
+
+  it.each([10, 200, 190])(
+    "returns 403 with reconnect guidance for Instagram permission code %i",
+    async (code) => {
+      publishMock.mockRejectedValue(
+        new InstagramApiError("Instagram publishing permission was rejected.", code)
+      );
+
+      const response = await POST(post(stagedBody));
+
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({
+        error:
+          "Instagram publishing permission was rejected. Reconnect Instagram to refresh its permissions.",
+        code: "permission",
+      });
+      expect(mirrorMock).not.toHaveBeenCalled();
+    }
+  );
+
+  it("returns other Instagram API failures as 502", async () => {
+    publishMock.mockRejectedValue(
+      new InstagramApiError("Instagram media processing failed.", 12)
+    );
+
+    const response = await POST(post(stagedBody));
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: "Instagram media processing failed.",
+      code: "publish_failed",
+    });
+    expect(mirrorMock).not.toHaveBeenCalled();
   });
 
   it("stores a scheduled row instead of publishing", async () => {

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { FacebookApiError, redactTokens } from '@/lib/facebook';
+import { InstagramApiError } from '@/lib/instagram';
 import { notifyPublishAttemptFailure } from '@/lib/notifications';
 
 export async function facebookErrorResponse(
@@ -53,13 +54,14 @@ export async function instagramErrorResponse(
   fallback: string,
   notify?: { workspaceId: string; kind?: string | null }
 ): Promise<NextResponse> {
+  const apiError =
+    error instanceof FacebookApiError || error instanceof InstagramApiError;
   const permissionIssue =
-    error instanceof FacebookApiError &&
-    (error.code === 10 || error.code === 200 || error.code === 190);
+    apiError && (error.code === 10 || error.code === 200 || error.code === 190);
 
   let message: string;
   let outCode = code;
-  if (error instanceof FacebookApiError) {
+  if (apiError) {
     message = redactTokens(error.message);
     if (permissionIssue) {
       message = `${message} Reconnect Instagram to refresh its permissions.`;
@@ -78,7 +80,7 @@ export async function instagramErrorResponse(
   return NextResponse.json(
     { error: message, code: outCode },
     {
-      status: error instanceof FacebookApiError ? (permissionIssue ? 403 : 502) : 500,
+      status: apiError ? (permissionIssue ? 403 : 502) : 500,
     }
   );
 }

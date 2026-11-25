@@ -132,7 +132,9 @@ export async function publishInstagramImagePost({
         accessToken,
         containerId,
       });
-      const permalink = await fetchMediaPermalink(mediaId, accessToken);
+      const permalink = await fetchMediaPermalink(mediaId, accessToken).catch(
+        () => null
+      );
       return { id: mediaId, permalink };
     }
 

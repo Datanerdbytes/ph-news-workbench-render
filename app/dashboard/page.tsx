@@ -26,6 +26,7 @@ import { StatusPill } from "@/components/status-pill";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { ErrorState } from "@/components/ui/error-state";
 import { useFacebookConnection } from "@/components/facebook-connection";
+import { useInstagramConnection } from "@/components/instagram-connection";
 import { TimeAgo } from "@/components/time-ago";
 import { authClient } from "@/lib/auth-client";
 import { cn } from "cn";
@@ -141,7 +142,6 @@ function readPlatformStats(
 }
 
 const PLANNED = [
-  { platform: "instagram" as const, name: "Instagram", gate: "Meta App Review" },
   { platform: "youtube" as const, name: "YouTube", gate: "Google verification" },
   { platform: "tiktok" as const, name: "TikTok", gate: "Content Posting audit" },
   { platform: "linkedin" as const, name: "LinkedIn", gate: "Community API" },
@@ -282,6 +282,7 @@ function platformStatCards(
 
 export default function DashboardPage() {
   const connection = useFacebookConnection();
+  const instagram = useInstagramConnection();
   const { data: session } = authClient.useSession();
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [stories, setStories] = useState<Story[]>([]);
@@ -422,6 +423,7 @@ export default function DashboardPage() {
 
   const stats = platformStats[platform];
   const statCards = platformStatCards(platform, stats, statsFailed);
+  const instagramLive = instagram.connected && !instagram.unreachable;
 
   const steps = [
     {
@@ -779,6 +781,50 @@ export default function DashboardPage() {
                       : connection.connected
                         ? "Live"
                         : "Pending"}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2.5 rounded-lg px-2.5 py-1.5">
+                  <PlatformMark
+                    platform="instagram"
+                    className={cn(
+                      "size-7 rounded-md",
+                      !instagramLive && "opacity-45"
+                    )}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[11.5px] font-medium text-muted-foreground">
+                      Instagram
+                    </p>
+                    <p className="truncate text-[10px] text-muted-foreground">
+                      {instagram.loading
+                        ? "Checking Instagram…"
+                        : instagram.unreachable
+                          ? "Status unavailable"
+                          : instagramLive
+                            ? `@${instagram.ig?.username ?? "instagram"}`
+                            : "Ready to connect"}
+                    </p>
+                  </div>
+                  <span
+                    className={cn(
+                      "rounded-full px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-wider",
+                      instagram.loading
+                        ? "bg-surface-3 text-muted-foreground"
+                        : instagram.unreachable
+                          ? "bg-warning-soft text-warning"
+                          : instagramLive
+                            ? "bg-success-soft text-success"
+                            : "bg-warning-soft text-warning"
+                    )}
+                  >
+                    {instagram.loading
+                      ? "Checking"
+                      : instagram.unreachable
+                        ? "Unavailable"
+                        : instagramLive
+                          ? "Live"
+                          : "Pending"}
                   </span>
                 </div>
 
