@@ -172,6 +172,23 @@ describe("publishInstagramImagePost", () => {
     expect(result).toEqual({ id: "m-9", permalink: "https://instagram.com/p/9" });
   });
 
+  it("returns the published media when the permalink lookup fails", async () => {
+    (createImageMediaContainer as unknown as Mock).mockResolvedValue("c-9");
+    (getContainerStatus as unknown as Mock).mockResolvedValue({
+      statusCode: "FINISHED",
+      statusMessage: null,
+    });
+    (publishMediaContainer as unknown as Mock).mockResolvedValue("m-11");
+    (fetchMediaPermalink as unknown as Mock).mockRejectedValue(
+      new InstagramApiError("permalink lookup failed", 100)
+    );
+
+    await expect(publishInstagramImagePost(base)).resolves.toEqual({
+      id: "m-11",
+      permalink: null,
+    });
+  });
+
   it("polls IN_PROGRESS before FINISHED", async () => {
     (createImageMediaContainer as unknown as Mock).mockResolvedValue("c-2");
     (getContainerStatus as unknown as Mock)
