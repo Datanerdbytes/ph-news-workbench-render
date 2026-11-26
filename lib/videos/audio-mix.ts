@@ -5,6 +5,7 @@ export type AudioMix = {
   destination: MediaStreamAudioDestinationNode;
   duration: number;
   startNarration: () => void;
+  startAvatar: () => void;
   stop: () => void;
 };
 
@@ -30,32 +31,52 @@ export async function createAudioMix(
   context: AudioContext,
   options: {
     video?: HTMLVideoElement;
+    avatar?: HTMLVideoElement;
     narration?: Blob;
     originalVolume?: number;
   },
 ): Promise<AudioMix> {
+  if (options.narration && options.avatar) {
+    throw new Error("Choose either a voice-over or an avatar video for the bake.");
+  }
   const destination = context.createMediaStreamDestination();
-  const originalVolume = Math.max(
-    0,
-    Math.min(1, options.originalVolume ?? 1),
-  );
+  const requestedVolume = options.originalVolume ?? 1;
+  const originalVolume = Number.isFinite(requestedVolume)
+    ? Math.max(0, Math.min(1, requestedVolume))
+    : 1;
+  const monitors: GainNode[] = [];
   let videoSource: MediaElementAudioSourceNode | undefined;
   let originalGain: GainNode | undefined;
-  let monitor: GainNode | undefined;
+  let avatarSource: MediaElementAudioSourceNode | undefined;
+  let avatarGain: GainNode | undefined;
   let narrationSource: AudioBufferSourceNode | undefined;
   let narrationBuffer: AudioBuffer | undefined;
   let narrationStarted = false;
+  let avatarStarted = false;
+
+  function connectMedia(element: HTMLVideoElement, volume: number) {
+    const source = context.createMediaElementSource(element);
+    const gain = context.createGain();
+    gain.gain.value = volume;
+    source.connect(gain);
+    gain.connect(destination);
+    const monitor = context.createGain();
+    monitor.gain.value = 0;
+    source.connect(monitor);
+    monitor.connect(context.destination);
+    monitors.push(monitor);
+    return { source, gain };
+  }
 
   if (options.video) {
-    videoSource = context.createMediaElementSource(options.video);
-    originalGain = context.createGain();
-    originalGain.gain.value = originalVolume;
-    videoSource.connect(originalGain);
-    originalGain.connect(destination);
-    monitor = context.createGain();
-    monitor.gain.value = 0;
-    videoSource.connect(monitor);
-    monitor.connect(context.destination);
+    const connected = connectMedia(options.video, originalVolume);
+    videoSource = connected.source;
+    originalGain = connected.gain;
+  }
+  if (options.avatar) {
+    const connected = connectMedia(options.avatar, 1);
+    avatarSource = connected.source;
+    avatarGain = connected.gain;
   }
 
   await resumeAudioContext(context);
@@ -76,20 +97,39 @@ export async function createAudioMix(
     narrationSource.connect(destination);
   }
 
+  const avatarDuration =
+    options.avatar &&
+    Number.isFinite(options.avatar.duration) &&
+    options.avatar.duration > 0
+      ? options.avatar.duration
+      : 0;
+
   return {
     destination,
-    duration: narrationBuffer?.duration ?? 0,
+    duration: narrationBuffer?.duration ?? avatarDuration,
     startNarration: () => {
       if (narrationStarted) return;
       narrationSource?.start();
       narrationStarted = true;
+    },
+    startAvatar: () => {
+      if (avatarStarted) return;
+      avatarStarted = true;
+      if (!originalGain || !avatarDuration) return;
+      const now = context.currentTime;
+      originalGain.gain.cancelScheduledValues(now);
+      originalGain.gain.setValueAtTime(originalVolume, now);
+      originalGain.gain.setValueAtTime(originalVolume, now + avatarDuration);
+      originalGain.gain.linearRampToValueAtTime(1, now + avatarDuration + 0.2);
     },
     stop: () => {
       if (narrationStarted) narrationSource?.stop();
       narrationSource?.disconnect();
       videoSource?.disconnect();
       originalGain?.disconnect();
-      monitor?.disconnect();
+      avatarSource?.disconnect();
+      avatarGain?.disconnect();
+      for (const monitor of monitors) monitor.disconnect();
     },
   };
 }

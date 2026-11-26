@@ -58,7 +58,14 @@ export async function POST(
         AND avatar_jobs.workspace_id = eligible.workspace_id
         AND avatar_jobs.status = 'completed'
         AND avatar_jobs.publish_state = 'scheduled'
-        AND avatar_jobs.blob_url = eligible.image_url
+        AND avatar_jobs.blob_url IS NOT NULL
+        AND (
+          avatar_jobs.blob_url = eligible.image_url
+          OR (
+            eligible.image_url IS NOT NULL
+            AND strpos(eligible.image_url, '/compose/avatars/' || avatar_jobs.id || '/') > 0
+          )
+        )
       RETURNING avatar_jobs.id
     ), reset AS (
       UPDATE scheduled_posts AS scheduled

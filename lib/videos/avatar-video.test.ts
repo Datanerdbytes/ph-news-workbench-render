@@ -1,0 +1,176 @@
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { loadAvatarVideo } from "./avatar-video";
+
+function mp4Response(size = 16): Response {
+  const bytes = new Uint8Array(size);
+  bytes.set([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70], 0);
+  return new Response(bytes, {
+    status: 200,
+    headers: { "content-type": "video/mp4" },
+  });
+}
+
+describe("loadAvatarVideo", () => {
+  let video: {
+    src: string;
+    duration: number;
+    videoWidth: number;
+    videoHeight: number;
+    readyState: number;
+    currentTime: number;
+    onloadeddata: (() => void) | null;
+    onerror: (() => void) | null;
+    play: ReturnType<typeof vi.fn>;
+    pause: ReturnType<typeof vi.fn>;
+    load: ReturnType<typeof vi.fn>;
+    removeAttribute: ReturnType<typeof vi.fn>;
+  };
+  let createObjectURL: ReturnType<typeof vi.fn>;
+  let revokeObjectURL: ReturnType<typeof vi.fn>;
+  let originalCreateObjectURL: PropertyDescriptor | undefined;
+  let originalRevokeObjectURL: PropertyDescriptor | undefined;
+
+  beforeEach(() => {
+    let source = "";
+    let loaded = false;
+    video = {
+      src: "",
+      duration: 2,
+      videoWidth: 1920,
+      videoHeight: 1080,
+      readyState: 2,
+      currentTime: 0,
+      onloadeddata: null,
+      onerror: null,
+      play: vi.fn(() => Promise.resolve()),
+      pause: vi.fn(),
+      load: vi.fn(),
+      removeAttribute: vi.fn((name: string) => {
+        if (name === "src") source = "";
+      }),
+    };
+    Object.defineProperty(video, "src", {
+      get: () => source,
+      set: (value: string) => {
+        source = value;
+        if (value && !loaded) {
+          loaded = true;
+          queueMicrotask(() => video.onloadeddata?.());
+        }
+      },
+    });
+    const originalCreateElement = document.createElement;
+    vi.spyOn(document, "createElement").mockImplementation(((
+      tag: string,
+      options?: ElementCreationOptions
+    ) => {
+      if (tag === "video") return video as unknown as HTMLElement;
+      return originalCreateElement.call(document, tag, options);
+    }) as typeof document.createElement);
+
+    originalCreateObjectURL = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    originalRevokeObjectURL = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    createObjectURL = vi.fn(() => "blob:loaded-avatar");
+    revokeObjectURL = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: createObjectURL,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: revokeObjectURL,
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (originalCreateObjectURL) {
+      Object.defineProperty(URL, "createObjectURL", originalCreateObjectURL);
+    } else {
+      delete (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
+    }
+    if (originalRevokeObjectURL) {
+      Object.defineProperty(URL, "revokeObjectURL", originalRevokeObjectURL);
+    } else {
+      delete (URL as unknown as { revokeObjectURL?: unknown }).revokeObjectURL;
+    }
+  });
+
+  it("uses an existing blob URL without fetching or owning it", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const loaded = await loadAvatarVideo("blob:avatar");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(loaded.video.src).toBe("blob:avatar");
+    loaded.release();
+    expect(video.pause).toHaveBeenCalled();
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+  });
+
+  it("downloads an approved MP4 and revokes its object URL on release", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mp4Response());
+    vi.stubGlobal("fetch", fetchMock);
+    const loaded = await loadAvatarVideo(
+      "https://store.public.blob.vercel-storage.com/avatar/source.mp4",
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      new URL("https://store.public.blob.vercel-storage.com/avatar/source.mp4"),
+      expect.objectContaining({ credentials: "omit", redirect: "manual" }),
+    );
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(loaded.video.src).toBe("blob:loaded-avatar");
+    loaded.release();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:loaded-avatar");
+  });
+
+  it("rejects an unapproved host before making a request", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      loadAvatarVideo("https://avatar.example.com/source.mp4"),
+    ).rejects.toThrow("The avatar video source is not supported.");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a redirect to an unapproved host", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: { location: "https://avatar.example.com/source.mp4" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      loadAvatarVideo(
+        "https://store.public.blob.vercel-storage.com/avatar/source.mp4",
+      ),
+    ).rejects.toThrow("The avatar video redirect is not allowed.");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an oversized response before reading its body", async () => {
+    const response = mp4Response();
+    response.headers.set("content-length", String(256 * 1024 * 1024 + 1));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+    await expect(
+      loadAvatarVideo(
+        "https://store.public.blob.vercel-storage.com/avatar/source.mp4",
+      ),
+    ).rejects.toThrow("The avatar video is too large to composite in this browser.");
+    expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it("rejects a response that is not an MP4", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]))),
+    );
+    await expect(
+      loadAvatarVideo(
+        "https://store.public.blob.vercel-storage.com/avatar/source.mp4",
+      ),
+    ).rejects.toThrow("The avatar source is not a valid MP4 video.");
+    expect(createObjectURL).not.toHaveBeenCalled();
+  });
+});

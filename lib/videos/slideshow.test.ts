@@ -29,8 +29,10 @@ describe("bakeNarratedSlideshow", () => {
   let recorders: FakeRecorder[];
   let drawImage: ReturnType<typeof vi.fn>;
   let narrationStart: ReturnType<typeof vi.fn>;
+  let avatar: ReturnType<typeof makeAvatarVideo>;
   let capturedCanvases: HTMLCanvasElement[];
   let audioDuration = 2;
+  let avatarDuration = 2;
   let now = 0;
   let originalCaptureStream: unknown;
 
@@ -63,9 +65,52 @@ describe("bakeNarratedSlideshow", () => {
     }
   }
 
+  function makeAvatarVideo() {
+    let src = "";
+    let loaded = false;
+    const element = {
+      src: "",
+      currentTime: 0,
+      duration: avatarDuration,
+      videoWidth: 1920,
+      videoHeight: 1080,
+      readyState: 2,
+      onloadeddata: null as (() => void) | null,
+      onended: null as (() => void) | null,
+      onerror: null as (() => void) | null,
+      play: vi.fn(() => Promise.resolve()),
+      pause: vi.fn(),
+      load: vi.fn(),
+      removeAttribute: vi.fn((name: string) => {
+        if (name === "src") src = "";
+      }),
+    };
+    Object.defineProperty(element, "src", {
+      get: () => src,
+      set: (value: string) => {
+        src = value;
+        if (value && !loaded) {
+          loaded = true;
+          queueMicrotask(() => element.onloadeddata?.());
+        }
+      },
+    });
+    return element;
+  }
+
   class FakeAudioContext {
     state = "running";
     destination = {};
+    createMediaElementSource() {
+      return { connect: () => {}, disconnect: () => {} };
+    }
+    createGain() {
+      return {
+        gain: { value: 0 },
+        connect: () => {},
+        disconnect: () => {},
+      };
+    }
     decodeAudioData() {
       return Promise.resolve({ duration: audioDuration });
     }
@@ -97,7 +142,17 @@ describe("bakeNarratedSlideshow", () => {
     audioDuration = 2;
     drawImage = vi.fn();
     narrationStart = vi.fn();
+    avatarDuration = 2;
+    avatar = makeAvatarVideo();
     capturedCanvases = [];
+    const originalCreateElement = document.createElement;
+    vi.spyOn(document, "createElement").mockImplementation(((
+      tag: string,
+      options?: ElementCreationOptions
+    ) => {
+      if (tag === "video") return avatar as unknown as HTMLElement;
+      return originalCreateElement.call(document, tag, options);
+    }) as typeof document.createElement);
     vi.stubGlobal("Image", FakeImage);
     vi.stubGlobal("MediaRecorder", FakeRecorder);
     vi.stubGlobal("AudioContext", FakeAudioContext);
@@ -169,6 +224,68 @@ describe("bakeNarratedSlideshow", () => {
     expect(drawnPhotos[2]).toBe(drawnPhotos[3]);
     expect(drawnPhotos[0]).not.toBe(drawnPhotos[2]);
     expect(onProgress).toHaveBeenLastCalledWith(1);
+  });
+
+  it("draws the avatar over each photo and records its audio", async () => {
+    const onProgress = vi.fn();
+    const bake = bakeNarratedSlideshow({
+      images: ["photo-1", "photo-2"],
+      avatarUrl: "blob:avatar",
+      avatarPlacement: { x: 0.1, y: 0.2, width: 0.5 },
+      onProgress,
+    });
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+    expect(avatar.play).toHaveBeenCalledTimes(1);
+    expect(narrationStart).not.toHaveBeenCalled();
+
+    avatar.currentTime = 0.5;
+    now = 40;
+    frames.shift()?.(40);
+    expect(drawImage).toHaveBeenCalledTimes(4);
+    expect(drawImage.mock.calls[3]).toEqual([avatar, 192, 216, 960, 540]);
+
+    avatar.currentTime = 2;
+    now = 2_100;
+    frames.shift()?.(2_100);
+    await expect(bake).resolves.toBeInstanceOf(Blob);
+    expect(onProgress).toHaveBeenLastCalledWith(1);
+    expect(avatar.pause).toHaveBeenCalled();
+    expect(avatar.src).toBe("");
+  });
+
+  it("rejects a slideshow with both narration and an avatar", async () => {
+    await expect(
+      bakeNarratedSlideshow({
+        images: ["photo"],
+        narration: new Blob(["speech"], { type: "audio/mpeg" }),
+        avatarUrl: "blob:avatar",
+      }),
+    ).rejects.toThrow("Choose either a voice-over or an avatar video for the slideshow.");
+    expect(recorders).toHaveLength(0);
+  });
+
+  it("cleans up the avatar when playback is blocked", async () => {
+    avatar.play.mockRejectedValueOnce(new Error("blocked"));
+    await expect(
+      bakeNarratedSlideshow({
+        images: ["photo"],
+        avatarUrl: "blob:avatar",
+      }),
+    ).rejects.toThrow("Playback was blocked, so the avatar slideshow bake was skipped.");
+    expect(recorders[0].state).toBe("inactive");
+    expect(avatar.pause).toHaveBeenCalled();
+    expect(avatar.src).toBe("");
+  });
+
+  it("rejects avatar slideshows beyond the ten-minute cap before recording", async () => {
+    avatar.duration = 601;
+    await expect(
+      bakeNarratedSlideshow({
+        images: ["photo"],
+        avatarUrl: "blob:avatar",
+      }),
+    ).rejects.toThrow("Avatar slideshows are limited to 10 minutes.");
+    expect(recorders).toHaveLength(0);
   });
 
   it("rejects narration beyond the ten-minute cap before recording", async () => {

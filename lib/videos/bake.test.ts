@@ -144,17 +144,25 @@ describe("bakeVideoAnimation playback lifecycle", () => {
   let hidden = false;
   let video: Record<string, unknown> & {
     pause: ReturnType<typeof vi.fn>;
+    play: ReturnType<typeof vi.fn>;
     onended: (() => void) | null;
   };
+  let avatar: ReturnType<typeof makeVideo>;
   let frames: FrameRequestCallback[];
   let recorders: FakeRecorder[];
   let canvases: HTMLCanvasElement[];
   let drawImageCalls: unknown[][];
   let gains: Array<{
-    gain: { value: number };
+    gain: {
+      value: number;
+      cancelScheduledValues: ReturnType<typeof vi.fn>;
+      setValueAtTime: ReturnType<typeof vi.fn>;
+      linearRampToValueAtTime: ReturnType<typeof vi.fn>;
+    };
     connect: () => void;
     disconnect: () => void;
   }>;
+  let mediaSources: unknown[];
   let narrationSources: Array<{
     buffer: unknown;
     connect: ReturnType<typeof vi.fn>;
@@ -163,6 +171,7 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     disconnect: ReturnType<typeof vi.fn>;
   }>;
   let audioDuration = 2;
+  let avatarDuration = 2;
   let originalCreateElement: typeof document.createElement;
   let originalGetContext: typeof HTMLCanvasElement.prototype.getContext;
   let originalCaptureStream: unknown;
@@ -185,14 +194,17 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     }
     stop() {
       this.state = "inactive";
+      this.ondataavailable?.({ data: new Blob(["video"]) });
       this.onstop?.();
     }
   }
 
   class FakeAudioContext {
     state = "running";
+    currentTime = 0;
     destination = {};
-    createMediaElementSource() {
+    createMediaElementSource(element: unknown) {
+      mediaSources.push(element);
       return { connect: () => {}, disconnect: () => {} };
     }
     decodeAudioData() {
@@ -214,7 +226,12 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     }
     createGain() {
       const gain = {
-        gain: { value: 0 },
+        gain: {
+          value: 0,
+          cancelScheduledValues: vi.fn(),
+          setValueAtTime: vi.fn(),
+          linearRampToValueAtTime: vi.fn(),
+        },
         connect: () => {},
         disconnect: () => {},
       };
@@ -250,19 +267,27 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     }) as unknown as CanvasRenderingContext2D;
   }
 
-  function makeVideo() {
+  function makeVideo(duration = 1) {
     let src = "";
     let metadataFired = false;
+    let dataFired = false;
     const element = {
+      src: "",
       currentTime: 0,
-      duration: 1,
+      duration,
       videoWidth: 1920,
       videoHeight: 1080,
+      readyState: 2,
       onloadedmetadata: null as (() => void) | null,
+      onloadeddata: null as (() => void) | null,
       onended: null as (() => void) | null,
       onerror: null as (() => void) | null,
-      play: () => Promise.resolve(),
+      play: vi.fn(() => Promise.resolve()),
       pause: vi.fn(),
+      load: vi.fn(),
+      removeAttribute: vi.fn((name: string) => {
+        if (name === "src") src = "";
+      }),
     };
     Object.defineProperty(element, "src", {
       get: () => src,
@@ -270,7 +295,11 @@ describe("bakeVideoAnimation playback lifecycle", () => {
         src = value;
         if (value && !metadataFired) {
           metadataFired = true;
-          setTimeout(() => element.onloadedmetadata?.(), 0);
+          queueMicrotask(() => element.onloadedmetadata?.());
+        }
+        if (value && !dataFired) {
+          dataFired = true;
+          queueMicrotask(() => element.onloadeddata?.());
         }
       },
     });
@@ -284,16 +313,23 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     canvases = [];
     drawImageCalls = [];
     gains = [];
+    mediaSources = [];
     narrationSources = [];
     audioDuration = 2;
+    avatarDuration = 2;
     video = makeVideo();
+    avatar = makeVideo(avatarDuration);
+    let createdVideos = 0;
 
     originalCreateElement = document.createElement;
     vi.spyOn(document, "createElement").mockImplementation(((
       tag: string,
       options?: ElementCreationOptions
     ) => {
-      if (tag === "video") return video as unknown as HTMLElement;
+      if (tag === "video") {
+        const element = createdVideos++ === 0 ? video : avatar;
+        return element as unknown as HTMLElement;
+      }
       const element = originalCreateElement.call(document, tag, options);
       if (tag === "canvas") canvases.push(element as HTMLCanvasElement);
       return element;
@@ -421,6 +457,101 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     await expect(bake).rejects.toThrow("Recording failed.");
     expect(video.pause).toHaveBeenCalled();
   });
+  it("layers the avatar over footage and restores original audio after it ends", async () => {
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const bake = bakeVideoAnimation({
+      videoUrl: "blob:test",
+      attachments: [],
+      values: {},
+      aspectRatio: "16:9",
+      avatarUrl: "blob:avatar",
+      avatarPlacement: { x: 0.1, y: 0.2, width: 0.5 },
+      originalAudioVolume: 0.25,
+    });
+    await vi.waitFor(() => expect(recorders).toHaveLength(1));
+    expect(mediaSources).toEqual([video, avatar]);
+    expect(video.play).toHaveBeenCalledTimes(1);
+    expect(avatar.play).toHaveBeenCalledTimes(1);
+    expect(gains[0].gain.value).toBe(0.25);
+    expect(gains[0].gain.setValueAtTime).toHaveBeenCalledWith(0.25, 0);
+    expect(gains[0].gain.setValueAtTime).toHaveBeenCalledWith(0.25, 2);
+    expect(gains[0].gain.linearRampToValueAtTime).toHaveBeenCalledWith(1, 2.2);
+
+    video.currentTime = 0.5;
+    avatar.currentTime = 0.5;
+    now = 40;
+    frames.shift()?.(40);
+    expect(drawImageCalls).toHaveLength(2);
+    expect(drawImageCalls[0][0]).toBe(video);
+    expect(drawImageCalls[1]).toEqual([avatar, 192, 216, 960, 540]);
+
+    video.currentTime = 1;
+    avatar.currentTime = 2;
+    now = 2_100;
+    frames.shift()?.(2_100);
+    await expect(bake).resolves.toBeInstanceOf(Blob);
+    expect(avatar.pause).toHaveBeenCalled();
+    expect(avatar.src).toBe("");
+  });
+
+  it("removes the overlay after a shorter avatar ends", async () => {
+    avatar.duration = 0.5;
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const bake = bakeVideoAnimation({
+      videoUrl: "blob:test",
+      attachments: [],
+      values: {},
+      avatarUrl: "blob:avatar",
+    });
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+
+    video.currentTime = 0.1;
+    avatar.currentTime = 0.5;
+    now = 40;
+    frames.shift()?.(40);
+    expect(drawImageCalls.map((call) => call[0])).toEqual([video, avatar]);
+
+    video.currentTime = 0.2;
+    now = 80;
+    frames.shift()?.(80);
+    expect(drawImageCalls.map((call) => call[0])).toEqual([video, avatar, video]);
+    recorders[0].onerror?.();
+    await expect(bake).rejects.toThrow("Recording failed.");
+  });
+
+  it("rejects a stalled avatar without waiting for the full clip", async () => {
+    avatar.duration = 20;
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const bake = bakeVideoAnimation({
+      videoUrl: "blob:test",
+      attachments: [],
+      values: {},
+      avatarUrl: "blob:avatar",
+    });
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+    video.currentTime = 1;
+    now = 16_000;
+    frames.shift()?.(16_000);
+    await expect(bake).rejects.toThrow("The avatar stopped playing during the bake.");
+    expect(avatar.pause).toHaveBeenCalled();
+  });
+
+  it("rejects avatar composites beyond the ten-minute cap before recording", async () => {
+    avatar.duration = 601;
+    await expect(
+      bakeVideoAnimation({
+        videoUrl: "blob:test",
+        attachments: [],
+        values: {},
+        avatarUrl: "blob:avatar",
+      }),
+    ).rejects.toThrow("Avatar composite videos are limited to 10 minutes.");
+    expect(recorders).toHaveLength(0);
+  });
+
   it("mixes narration over lowered original audio without requiring animations", async () => {
     const bake = bakeVideoAnimation({
       videoUrl: "blob:test",

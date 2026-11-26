@@ -311,11 +311,13 @@ export async function claimAvatarForPublish(
   id: string,
   workspaceId: string,
   videoUrl: string,
+  allowComposite = false,
 ): Promise<string | null> {
   const rows = (await sql`
     UPDATE avatar_jobs SET publish_state = 'publishing', updated_at = now()
     WHERE id = ${id} AND workspace_id = ${workspaceId}
-      AND status = 'completed' AND publish_state = 'ready' AND blob_url = ${videoUrl}
+      AND status = 'completed' AND publish_state = 'ready' AND blob_url IS NOT NULL
+      ${allowComposite ? sql`` : sql`AND blob_url = ${videoUrl}`}
     RETURNING blob_url`) as unknown as { blob_url: string }[];
   return rows[0]?.blob_url ?? null;
 }

@@ -8,6 +8,8 @@ const {
   rescheduleMock,
   heldMock,
   cancelMock,
+  compositeMock,
+  deleteBlobsMock,
 } = vi.hoisted(() => ({
   sqlMock: vi.fn(),
   requireWorkspaceMock: vi.fn(),
@@ -16,6 +18,8 @@ const {
   rescheduleMock: vi.fn(),
   heldMock: vi.fn(),
   cancelMock: vi.fn(),
+  compositeMock: vi.fn(),
+  deleteBlobsMock: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({ sql: sqlMock }));
@@ -38,6 +42,8 @@ vi.mock("@/lib/facebook", () => ({
 vi.mock("@/lib/facebook-page-token", () => ({
   resolvePageToken: resolvePageTokenMock,
 }));
+vi.mock("@/lib/avatar/media", () => ({ isAvatarCompositeUrl: compositeMock }));
+vi.mock("@/lib/blob", () => ({ deleteStagedBlobs: deleteBlobsMock }));
 
 import { DELETE, PATCH } from "./route";
 
@@ -55,6 +61,7 @@ const localRow = {
   facebook_post_ids: null,
   page_id: null,
   avatar_job_id: null,
+  image_url: null,
 };
 
 const facebookRow = {
@@ -87,6 +94,8 @@ beforeEach(() => {
   vi.setSystemTime(new Date("2026-11-16T08:00:00Z"));
   requireWorkspaceMock.mockResolvedValue(access);
   recordEventMock.mockResolvedValue(undefined);
+  compositeMock.mockReturnValue(false);
+  deleteBlobsMock.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -461,8 +470,11 @@ describe("DELETE /api/schedule/[id]", () => {
   });
 
   it("releases an avatar only after its scheduled row is durably deleted", async () => {
+    const avatarUrl = "https://store.example/avatar-owned.mp4";
     sqlMock
-      .mockResolvedValueOnce([{ ...localRow, avatar_job_id: "avatar-1" }])
+      .mockResolvedValueOnce([
+        { ...localRow, avatar_job_id: "avatar-1", image_url: avatarUrl },
+      ])
       .mockResolvedValueOnce([{ id: 51 }])
       .mockResolvedValueOnce([
         {
@@ -470,6 +482,7 @@ describe("DELETE /api/schedule/[id]", () => {
           news_item_id: null,
           scheduled_for: localRow.scheduled_for,
           avatar_job_id: "avatar-1",
+          image_url: avatarUrl,
         },
       ])
       .mockResolvedValueOnce([{ id: "avatar-1" }]);
@@ -482,7 +495,9 @@ describe("DELETE /api/schedule/[id]", () => {
     expect(res.status).toBe(200);
     expect(sqlMock).toHaveBeenCalledTimes(4);
     const deleteText = (sqlMock.mock.calls[2][0] as string[]).join("?");
-    expect(deleteText).toContain("RETURNING id, news_item_id, scheduled_for, avatar_job_id");
+    expect(deleteText).toContain(
+      "RETURNING id, news_item_id, scheduled_for, avatar_job_id, image_url"
+    );
     const releaseText = (sqlMock.mock.calls[3][0] as string[]).join("?");
     expect(releaseText).toContain("UPDATE avatar_jobs SET publish_state = 'ready'");
     expect(releaseText).toContain("publish_state = 'scheduled'");
@@ -491,6 +506,45 @@ describe("DELETE /api/schedule/[id]", () => {
     expect(sqlMock.mock.calls[3]).toContain("ws1");
     expect(sqlMock.mock.invocationCallOrder[2]).toBeLessThan(
       sqlMock.mock.invocationCallOrder[3]
+    );
+    expect(deleteBlobsMock).not.toHaveBeenCalled();
+  });
+
+  it("deletes only the composite after durably deleting and releasing its avatar", async () => {
+    const compositeUrl =
+      "https://store.example/compose/avatars/avatar-1/123-avatar-composite.mp4";
+    compositeMock.mockReturnValue(true);
+    sqlMock
+      .mockResolvedValueOnce([
+        { ...localRow, avatar_job_id: "avatar-1", image_url: compositeUrl },
+      ])
+      .mockResolvedValueOnce([{ id: 51 }])
+      .mockResolvedValueOnce([
+        {
+          id: 51,
+          news_item_id: null,
+          scheduled_for: localRow.scheduled_for,
+          avatar_job_id: "avatar-1",
+          image_url: compositeUrl,
+        },
+      ])
+      .mockResolvedValueOnce([{ id: "avatar-1" }]);
+
+    const res = await DELETE(
+      new Request("http://localhost/api/schedule/51", { method: "DELETE" }),
+      params()
+    );
+
+    expect(res.status).toBe(200);
+    expect(compositeMock).toHaveBeenCalledWith("avatar-1", compositeUrl);
+    expect(deleteBlobsMock).toHaveBeenCalledTimes(1);
+    expect(deleteBlobsMock).toHaveBeenCalledWith([compositeUrl]);
+    expect(sqlMock).toHaveBeenCalledTimes(4);
+    expect(sqlMock.mock.invocationCallOrder[2]).toBeLessThan(
+      sqlMock.mock.invocationCallOrder[3]
+    );
+    expect(sqlMock.mock.invocationCallOrder[3]).toBeLessThan(
+      deleteBlobsMock.mock.invocationCallOrder[0]
     );
   });
 

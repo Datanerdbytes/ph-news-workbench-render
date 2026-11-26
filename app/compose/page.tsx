@@ -40,6 +40,7 @@ import {
   type NarrationMode,
 } from '@/components/compose/narration-mode-selector';
 import { TalkingAvatarPanel } from '@/components/compose/talking-avatar-panel';
+import { AvatarOverlayEditor } from '@/components/compose/avatar-overlay-editor';
 import { FacebookMark } from '@/components/facebook-mark';
 import { useFacebookConnection } from '@/components/facebook-connection';
 import { FacebookPreview } from '@/components/facebook-preview';
@@ -88,6 +89,10 @@ import { VideoAnimationPicker } from '@/components/videos/video-animation-picker
 import { VideoAnimationOverlay } from '@/components/videos/video-animation-overlay';
 import { bakeAndFinalizeVideo } from '@/lib/videos/bake';
 import { bakeAndFinalizeNarratedSlideshow } from '@/lib/videos/slideshow';
+import {
+  DEFAULT_AVATAR_PLACEMENT,
+  type AvatarPlacement,
+} from '@/lib/videos/composition';
 import {
   attachmentsFromSlots,
   presetDefaultValues,
@@ -236,6 +241,9 @@ function ComposeWorkspace() {
   const ttsAbortRef = useRef<AbortController | null>(null);
   const narrationUrlRef = useRef<string | null>(null);
   const [avatarId, setAvatarId] = useState<AvatarId>(DEFAULT_AVATAR_ID);
+  const [avatarPlacement, setAvatarPlacement] = useState<AvatarPlacement>(
+    DEFAULT_AVATAR_PLACEMENT,
+  );
   const [avatarJob, setAvatarJob] = useState<PublicAvatarJob | null>(null);
   const [avatarAction, setAvatarAction] = useState<
     'creating' | 'canceling' | 'removing' | null
@@ -450,6 +458,7 @@ function ComposeWorkspace() {
     avatarPollRef.current?.abort();
     avatarPollRef.current = null;
     updateAvatarJob(null);
+    setAvatarPlacement(DEFAULT_AVATAR_PLACEMENT);
     setAvatarAction(null);
     setAvatarError('');
     if (
@@ -942,8 +951,81 @@ function ComposeWorkspace() {
     }
   }
 
+  async function avatarCompositeMediaUrl(isCurrent?: () => boolean): Promise<string | null> {
+    if (!avatarReady || !avatarJob?.videoUrl) {
+      throw new Error('Generate the avatar video before publishing.');
+    }
+    if (!videoFile && !images.length) return avatarJob.videoUrl;
+    if (rendersInFlight.current >= MAX_CONCURRENT_BAKES) {
+      throw new Error(
+        'The previous media render is still finishing — try again in a moment.'
+      );
+    }
+    const bakeId = ++bakeSequence.current;
+    const ownsBake = () => bakeId === bakeSequence.current;
+    setBaking(true);
+    setBakePct(0);
+    try {
+      let finalized: File;
+      rendersInFlight.current += 1;
+      try {
+        if (videoUrl && videoPreviewUrl) {
+          finalized = await bakeAndFinalizeVideo({
+            videoUrl: videoPreviewUrl,
+            attachments: animations,
+            values: animValues,
+            aspectRatio: '16:9',
+            avatarUrl: avatarJob.videoUrl,
+            avatarPlacement,
+            originalAudioVolume: originalVolume,
+            onProgress: (pct) => {
+              if (ownsBake()) setBakePct(pct);
+            },
+          });
+        } else if (images.length) {
+          finalized = await bakeAndFinalizeNarratedSlideshow({
+            images,
+            avatarUrl: avatarJob.videoUrl,
+            avatarPlacement,
+            onProgress: (pct) => {
+              if (ownsBake()) setBakePct(pct);
+            },
+          });
+        } else {
+          throw new Error('Attach a photo or video for the avatar overlay.');
+        }
+      } finally {
+        rendersInFlight.current -= 1;
+      }
+      if (isCurrent && !isCurrent()) return null;
+      const staged = await stageUpload(
+        `compose/avatars/${avatarJob.id}/${Date.now()}-${finalized.name.replace(/[^\w.-]+/g, '_')}`,
+        finalized,
+        { contentType: 'video/mp4' }
+      );
+      return staged.url;
+    } catch (error) {
+      if (ownsBake()) {
+        toast.error('Avatar overlay could not be attached', {
+          description:
+            error instanceof Error
+              ? error.message
+              : 'The avatar composite could not be rendered in this browser.',
+        });
+      }
+      throw error;
+    } finally {
+      if (ownsBake()) {
+        setBaking(false);
+        setBakePct(null);
+      }
+    }
+  }
+
   async function postMediaUrl(isCurrent?: () => boolean): Promise<string | null> {
-    if (avatarReady && avatarJob?.videoUrl) return avatarJob.videoUrl;
+    if (avatarReady && avatarJob?.videoUrl) {
+      return avatarCompositeMediaUrl(isCurrent);
+    }
     if (voiceOverReady) return narratedMediaUrl(isCurrent);
     return videoUrl ? animatedVideoUrl(isCurrent) : null;
   }
@@ -1198,7 +1280,8 @@ function ComposeWorkspace() {
         if (
           res.status === 400 ||
           res.status === 401 ||
-          res.status === 404
+          res.status === 404 ||
+          (res.status === 409 && data?.code === 'avatar_unavailable')
         ) {
           discardBake();
         }
@@ -1321,6 +1404,14 @@ function ComposeWorkspace() {
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
+        if (
+          res.status === 409 &&
+          data?.code === 'avatar_unavailable' &&
+          finalVideoUrl &&
+          finalVideoUrl !== avatarJob?.videoUrl
+        ) {
+          deleteStagedBlob(finalVideoUrl);
+        }
         throw new Error(data?.error ?? 'The post could not be published.');
       }
 
@@ -1676,6 +1767,24 @@ function ComposeWorkspace() {
                           onGenerate={() => void generateAvatar()}
                           onCancel={() => void cancelAvatar()}
                           onRemove={() => void removeAvatar()}
+                        />
+                      ) : null}
+                      {avatarReady && hasMedia && avatarJob?.videoUrl ? (
+                        <AvatarOverlayEditor
+                          avatarUrl={avatarJob.videoUrl}
+                          baseVideoUrl={videoPreviewUrl}
+                          images={images}
+                          placement={avatarPlacement}
+                          onPlacementChange={setAvatarPlacement}
+                          originalAudioVolume={originalVolume}
+                          onOriginalAudioVolumeChange={setOriginalVolume}
+                          disabled={
+                            editorLocked ||
+                            drafting ||
+                            publishing ||
+                            scheduling ||
+                            deleting
+                          }
                         />
                       ) : null}
                     </div>

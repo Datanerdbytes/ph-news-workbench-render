@@ -196,7 +196,8 @@ export function TalkingAvatarPanel({
         ) : null}
         {hasMedia ? (
           <p className="text-xs leading-5 text-muted-foreground">
-            When this avatar is ready, its video replaces attached photos or clips for this post.
+            When this avatar is ready, position it over attached photos or clips and
+            bake both into one 16:9 video.
           </p>
         ) : null}
 
@@ -250,7 +251,7 @@ export function TalkingAvatarPanel({
             preload="metadata"
             src={job.videoUrl}
             className="aspect-video w-full rounded-lg border border-border bg-black"
-            aria-label="Talking avatar preview"
+            aria-label={hasMedia ? "Source talking avatar preview" : "Talking avatar preview"}
           />
         ) : null}
         {job?.durationSeconds ? (

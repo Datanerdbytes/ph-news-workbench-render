@@ -25,6 +25,7 @@ import {
 import { getPrimaryPage, resolvePageToken } from "@/lib/facebook-page-token";
 import { deleteStagedBlobs } from "@/lib/blob";
 import { releaseScheduledAvatar } from "@/lib/avatar/queue";
+import { isAvatarCompositeUrl } from "@/lib/avatar/media";
 import {
   downloadVideoFromUrl,
   publishPageVideo,
@@ -87,6 +88,7 @@ export type ScheduleRunOptions = {
 
 type PublicationCompletion = {
   id: number;
+  media_url: string | null;
   avatar_blob_url: string | null;
 };
 
@@ -113,7 +115,7 @@ async function completeSchedulePublication(input: {
         ${input.scheduledFor === undefined
           ? sql``
           : sql`AND scheduled_for = ${input.scheduledFor}`}
-      RETURNING id, workspace_id, avatar_job_id
+      RETURNING id, workspace_id, avatar_job_id, image_url
     ), completed_avatar AS (
       UPDATE avatar_jobs
       SET publish_state = 'published', updated_at = now()
@@ -124,7 +126,8 @@ async function completeSchedulePublication(input: {
         AND avatar_jobs.publish_state = 'scheduled'
       RETURNING avatar_jobs.id, avatar_jobs.blob_url
     )
-    SELECT published.id, completed_avatar.blob_url AS avatar_blob_url
+    SELECT published.id, published.image_url AS media_url,
+           completed_avatar.blob_url AS avatar_blob_url
     FROM published
     LEFT JOIN completed_avatar ON completed_avatar.id = published.avatar_job_id`) as unknown as PublicationCompletion[];
   return rows[0] ?? null;
@@ -157,10 +160,16 @@ async function persistPublishedMediaId(
       AND status = 'publishing'`;
 }
 
-async function deleteCompletedAvatar(blobUrl: string | null): Promise<void> {
-  if (!blobUrl) return;
+async function deleteCompletedAvatar(
+  mediaUrl: string | null,
+  avatarBlobUrl: string | null,
+): Promise<void> {
+  if (!avatarBlobUrl) return;
+  const urls = [...new Set([mediaUrl, avatarBlobUrl])].filter(
+    (url): url is string => Boolean(url)
+  );
   try {
-    await deleteStagedBlobs([blobUrl]);
+    await deleteStagedBlobs(urls);
   } catch {
     // The durable publication and ownership transition already succeeded.
   }
@@ -190,7 +199,14 @@ export async function publishDuePosts(
             AND avatar_jobs.workspace_id = scheduled_posts.workspace_id
             AND avatar_jobs.status = 'completed'
             AND avatar_jobs.publish_state = 'scheduled'
-            AND avatar_jobs.blob_url = scheduled_posts.image_url
+            AND avatar_jobs.blob_url IS NOT NULL
+            AND (
+              avatar_jobs.blob_url = scheduled_posts.image_url
+              OR (
+                scheduled_posts.image_url IS NOT NULL
+                AND strpos(scheduled_posts.image_url, '/compose/avatars/' || avatar_jobs.id || '/') > 0
+              )
+            )
         )
       )
       AND (attempts = 0
@@ -222,7 +238,14 @@ export async function publishDuePosts(
               AND avatar_jobs.workspace_id = post.workspace_id
               AND avatar_jobs.status = 'completed'
               AND avatar_jobs.publish_state = 'scheduled'
-              AND avatar_jobs.blob_url = post.image_url
+              AND avatar_jobs.blob_url IS NOT NULL
+              AND (
+                avatar_jobs.blob_url = post.image_url
+                OR (
+                  post.image_url IS NOT NULL
+                  AND strpos(post.image_url, '/compose/avatars/' || avatar_jobs.id || '/') > 0
+                )
+              )
           )
         )
         AND (attempts = 0
@@ -408,7 +431,7 @@ export async function publishDuePosts(
           // Cleanup only.
         }
       }
-      await deleteCompletedAvatar(completion.avatar_blob_url);
+      await deleteCompletedAvatar(completion.media_url, completion.avatar_blob_url);
 
       if (post.draft_id) {
         await sql`UPDATE drafts SET status = 'published' WHERE id = ${post.draft_id}`;
@@ -555,7 +578,7 @@ async function requeueStuckPosts(): Promise<void> {
             continue;
           }
           if (!completion) continue;
-          await deleteCompletedAvatar(completion.avatar_blob_url);
+          await deleteCompletedAvatar(completion.media_url, completion.avatar_blob_url);
           await recordScheduleEvent({
             workspaceId: row.workspace_id,
             scheduledPostId: row.id,
@@ -652,7 +675,7 @@ type NativeRow = {
 export async function recoverStaleReschedules(): Promise<number> {
   const stale = (await sql`
     SELECT id, workspace_id, source, kind, facebook_post_id, facebook_post_ids,
-           page_id, scheduled_for, error_message, avatar_job_id
+           page_id, scheduled_for, error_message, avatar_job_id, image_url
     FROM scheduled_posts
     WHERE status = 'rescheduling'
       AND updated_at < now() - interval '10 minutes'
@@ -667,6 +690,7 @@ export async function recoverStaleReschedules(): Promise<number> {
       scheduled_for: string;
       error_message: string | null;
       avatar_job_id: string | null;
+      image_url: string | null;
     }>;
 
   let recovered = 0;
@@ -764,16 +788,27 @@ export async function recoverStaleReschedules(): Promise<number> {
         WHERE id = ${row.id}
           AND status = 'rescheduling'
           AND error_message = ${recoveryClaim}
-        RETURNING id, news_item_id, scheduled_for, avatar_job_id`) as unknown as {
+        RETURNING id, news_item_id, scheduled_for, avatar_job_id, image_url`) as unknown as {
         id: number;
         news_item_id: number | null;
         scheduled_for: string;
         avatar_job_id: string | null;
+        image_url: string | null;
       }[];
 
       if (deleted.length) {
         if (deleted[0].avatar_job_id) {
           await releaseScheduledAvatar(deleted[0].avatar_job_id, row.workspace_id);
+          if (
+            deleted[0].image_url &&
+            isAvatarCompositeUrl(deleted[0].avatar_job_id, deleted[0].image_url)
+          ) {
+            try {
+              await deleteStagedBlobs([deleted[0].image_url]);
+            } catch {
+              // The schedule is already deleted; cleanup is best-effort.
+            }
+          }
         }
         await recordScheduleEvent({
           workspaceId: row.workspace_id,
@@ -936,7 +971,7 @@ export async function syncNativeSchedules(): Promise<number> {
           scheduledFor: row.scheduled_for,
         });
         if (!completion) continue;
-        await deleteCompletedAvatar(completion.avatar_blob_url);
+        await deleteCompletedAvatar(completion.media_url, completion.avatar_blob_url);
         await recordScheduleEvent({
           workspaceId: row.workspace_id,
           scheduledPostId: row.id,
@@ -982,7 +1017,7 @@ export async function syncNativeSchedules(): Promise<number> {
               scheduledFor: row.scheduled_for,
             });
             if (!completion) continue;
-            await deleteCompletedAvatar(completion.avatar_blob_url);
+            await deleteCompletedAvatar(completion.media_url, completion.avatar_blob_url);
             await recordScheduleEvent({
               workspaceId: row.workspace_id,
               scheduledPostId: row.id,
@@ -1092,7 +1127,7 @@ async function syncYouTubeSchedule(row: NativeRow): Promise<number> {
       scheduledFor: row.scheduled_for,
     });
     if (!completion) return 0;
-    await deleteCompletedAvatar(completion.avatar_blob_url);
+    await deleteCompletedAvatar(completion.media_url, completion.avatar_blob_url);
     await recordScheduleEvent({
       workspaceId: row.workspace_id,
       scheduledPostId: row.id,

@@ -6,6 +6,15 @@ import {
   type AudioMix,
 } from './audio-mix';
 import {
+  drawAvatarVideo,
+  loadAvatarVideo,
+  type LoadedAvatarVideo,
+} from './avatar-video';
+import {
+  DEFAULT_AVATAR_PLACEMENT,
+  type AvatarPlacement,
+} from './composition';
+import {
   getVideoPreset,
   planVideoEffects,
   plannedVideoFrames,
@@ -68,8 +77,11 @@ export type BakeVideoOptions = {
   aspectRatio?: 'source' | '16:9';
   /** Generated speech mixed at full volume over the footage. */
   narration?: Blob;
-  /** Original footage volume when narration is present; defaults to full. */
+  /** Original footage volume while narration or an avatar is present. */
   originalAudioVolume?: number;
+  /** Managed avatar MP4 composited above the footage. */
+  avatarUrl?: string;
+  avatarPlacement?: AvatarPlacement;
 };
 
 /**
@@ -116,8 +128,14 @@ export async function bakeVideoAnimation(
     aspectRatio = 'source',
     narration,
     originalAudioVolume,
+    avatarUrl,
+    avatarPlacement = DEFAULT_AVATAR_PLACEMENT,
   } = options;
+  const hasAvatar = Boolean(avatarUrl);
   const hasNarration = Boolean(narration);
+  if (hasAvatar && hasNarration) {
+    throw new Error('Choose either a voice-over or an avatar video for the bake.');
+  }
   const usable = attachments.some((attachment) => {
     const preset = getVideoPreset(attachment.presetId);
     return (
@@ -127,14 +145,18 @@ export async function bakeVideoAnimation(
       preset.slots.includes(attachment.slot)
     );
   });
-  if (!usable && !hasNarration) throw new Error('Unknown animation preset.');
+  if (!usable && !hasNarration && !hasAvatar) {
+    throw new Error('Unknown animation preset.');
+  }
 
   const mimeType = pickMimeType();
   if (!mimeType || typeof HTMLCanvasElement === 'undefined') {
     throw new Error(
-      hasNarration
-        ? 'This browser cannot record the voice-over.'
-        : 'This browser cannot record the animation.'
+      hasAvatar
+        ? 'This browser cannot record the avatar composite.'
+        : hasNarration
+          ? 'This browser cannot record the voice-over.'
+          : 'This browser cannot record the animation.'
     );
   }
 
@@ -148,6 +170,16 @@ export async function bakeVideoAnimation(
     video.onerror = () => reject(new Error('Could not read the video.'));
   });
 
+  let loadedAvatar: LoadedAvatarVideo | undefined;
+  if (avatarUrl) {
+    try {
+      loadedAvatar = await loadAvatarVideo(avatarUrl);
+    } catch (error) {
+      video.src = '';
+      throw error;
+    }
+  }
+  const avatar = loadedAvatar?.video;
   const box =
     aspectRatio === '16:9'
       ? widescreenSize(maxSide)
@@ -156,32 +188,58 @@ export async function bakeVideoAnimation(
   canvas.width = box.w;
   canvas.height = box.h;
   const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Canvas is unavailable.');
+  if (!ctx) {
+    loadedAvatar?.release();
+    video.src = '';
+    throw new Error('Canvas is unavailable.');
+  }
 
   const audioCtx = new AudioContext();
   let audioMix: AudioMix;
   try {
     audioMix = await createAudioMix(audioCtx, {
       video,
+      avatar,
       narration,
       originalVolume: originalAudioVolume,
     });
   } catch (error) {
+    loadedAvatar?.release();
+    video.src = '';
     await audioCtx.close().catch(() => {});
     throw error;
   }
   const videoDuration =
     Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+  const avatarDuration =
+    avatar && Number.isFinite(avatar.duration) && avatar.duration > 0
+      ? avatar.duration
+      : 0;
   const renderDuration = Math.max(videoDuration, audioMix.duration);
-  if (hasNarration && renderDuration > MAX_NARRATED_SECONDS) {
+  if ((hasNarration || hasAvatar) && renderDuration > MAX_NARRATED_SECONDS) {
     audioMix.stop();
+    loadedAvatar?.release();
+    video.src = '';
     await audioCtx.close().catch(() => {});
-    throw new Error('Narrated videos are limited to 10 minutes.');
+    throw new Error(
+      hasAvatar
+        ? 'Avatar composite videos are limited to 10 minutes.'
+        : 'Narrated videos are limited to 10 minutes.',
+    );
   }
 
-  const stream = canvas.captureStream(30);
-  for (const track of audioMix.destination.stream.getAudioTracks()) {
-    stream.addTrack(track);
+  let stream: MediaStream;
+  try {
+    stream = canvas.captureStream(30);
+    for (const track of audioMix.destination.stream.getAudioTracks()) {
+      stream.addTrack(track);
+    }
+  } catch (error) {
+    audioMix.stop();
+    loadedAvatar?.release();
+    video.src = '';
+    await audioCtx.close().catch(() => {});
+    throw error;
   }
 
   try {
@@ -205,23 +263,31 @@ export async function bakeVideoAnimation(
     });
 
     video.currentTime = 0;
+    if (avatar) avatar.currentTime = 0;
     try {
-      await video.play();
+      await Promise.all([
+        video.play(),
+        ...(avatar ? [avatar.play()] : []),
+      ]);
     } catch {
+      video.pause();
+      avatar?.pause();
       // Never retry muted: the audio is captured through the AudioContext from
-      // this element, so a muted play would bake a silent video. Fail loudly and
-      // let the caller post the original footage instead.
+      // these elements, so muted playback would bake silent video.
       throw new Error(
-        hasNarration
-          ? 'Playback was blocked, so the voice-over bake was skipped. Try posting again.'
-          : 'Playback was blocked, so the animation bake was skipped. Try posting again — the video still publishes without it.'
+        hasAvatar
+          ? 'Playback was blocked, so the avatar composite bake was skipped. Try posting again.'
+          : hasNarration
+            ? 'Playback was blocked, so the voice-over bake was skipped. Try posting again.'
+            : 'Playback was blocked, so the animation bake was skipped. Try posting again — the video still publishes without it.'
       );
     }
     recorder.start(250);
-    audioMix.startNarration();
+    if (hasAvatar) audioMix.startAvatar();
+    else audioMix.startNarration();
 
     const effects = planVideoEffects(attachments, videoDuration, values);
-    const holdForNarration = audioMix.duration > videoDuration;
+    const holdForAudio = audioMix.duration > videoDuration;
     const renderStartedAt = performance.now();
 
     let playbackError: Error | null = null;
@@ -232,8 +298,11 @@ export async function bakeVideoAnimation(
         const start = renderStartedAt;
         let lastFrameTime = start;
         let lastProgressAt = start;
+        let lastAvatarProgressAt = start;
         let lastPlayhead = 0;
+        let lastAvatarPlayhead = 0;
         let videoEnded = false;
+        let avatarEnded = false;
         let raf = 0;
         let settled = false;
         function finish(error?: Error) {
@@ -248,9 +317,11 @@ export async function bakeVideoAnimation(
           if (document.hidden) {
             finish(
               new Error(
-                hasNarration
-                  ? 'The tab was hidden, so the voice-over bake was stopped.'
-                  : 'The tab was hidden, so the animation bake was stopped.'
+                hasAvatar
+                  ? 'The tab was hidden, so the avatar composite bake was stopped.'
+                  : hasNarration
+                    ? 'The tab was hidden, so the voice-over bake was stopped.'
+                    : 'The tab was hidden, so the animation bake was stopped.'
               )
             );
           }
@@ -260,8 +331,12 @@ export async function bakeVideoAnimation(
           const playhead = videoEnded
             ? videoDuration
             : Math.min(video.currentTime, videoDuration || video.currentTime);
+          const avatarPlayhead =
+            avatar && !avatarEnded
+              ? Math.min(avatar.currentTime, avatarDuration || avatar.currentTime)
+              : avatarDuration;
           const elapsed = (now - renderStartedAt) / 1000;
-          const timeline = holdForNarration ? elapsed : playhead;
+          const timeline = holdForAudio ? elapsed : playhead;
           if (now - lastFrameTime >= minFrameMs) {
             do {
               lastFrameTime += minFrameMs;
@@ -274,6 +349,9 @@ export async function bakeVideoAnimation(
               (zoom) => drawFootage(ctx, video, box, zoom),
               box
             );
+            if (avatar && !avatarEnded) {
+              drawAvatarVideo(ctx, avatar, avatarPlacement, box.w, box.h);
+            }
             if (renderDuration) {
               onProgress?.(Math.min(1, timeline / renderDuration));
             }
@@ -281,7 +359,10 @@ export async function bakeVideoAnimation(
           if (!videoEnded && videoDuration && playhead >= videoDuration - 0.05) {
             videoEnded = true;
           }
-          if (holdForNarration) {
+          if (!avatarEnded && avatarDuration && avatarPlayhead >= avatarDuration - 0.05) {
+            avatarEnded = true;
+          }
+          if (holdForAudio) {
             if (elapsed >= audioMix.duration - 0.02) {
               finish();
               return;
@@ -294,7 +375,14 @@ export async function bakeVideoAnimation(
             lastPlayhead = playhead;
             lastProgressAt = now;
           } else if (!videoEnded && now - lastProgressAt > 15_000) {
-            finish(new Error('The video stopped playing during the bake.'));
+            finish(new Error('The attached video stopped playing during the bake.'));
+            return;
+          }
+          if (avatar && !avatarEnded && avatarPlayhead > lastAvatarPlayhead + 0.01) {
+            lastAvatarPlayhead = avatarPlayhead;
+            lastAvatarProgressAt = now;
+          } else if (avatar && !avatarEnded && now - lastAvatarProgressAt > 15_000) {
+            finish(new Error('The avatar stopped playing during the bake.'));
             return;
           }
           raf = requestAnimationFrame(tick);
@@ -315,10 +403,18 @@ export async function bakeVideoAnimation(
         });
         video.onended = () => {
           videoEnded = true;
-          if (!holdForNarration) finish();
+          if (!holdForAudio) finish();
         };
         video.onerror = () =>
-          finish(new Error('The video stopped playing during the bake.'));
+          finish(new Error('The attached video stopped playing during the bake.'));
+        if (avatar) {
+          avatar.onended = () => {
+            avatarEnded = true;
+            if (holdForAudio) finish();
+          };
+          avatar.onerror = () =>
+            finish(new Error('The avatar stopped playing during the bake.'));
+        }
       });
     } catch (error) {
       playbackError =
@@ -326,6 +422,13 @@ export async function bakeVideoAnimation(
     }
 
     video.pause();
+    avatar?.pause();
+    video.onended = null;
+    video.onerror = null;
+    if (avatar) {
+      avatar.onended = null;
+      avatar.onerror = null;
+    }
     if (recorder.state !== 'inactive') recorder.stop();
     let blob: Blob | null = null;
     try {
@@ -341,6 +444,7 @@ export async function bakeVideoAnimation(
     video.pause();
     stream.getTracks().forEach((track) => track.stop());
     audioMix.stop();
+    loadedAvatar?.release();
     await audioCtx.close().catch(() => {});
     video.src = '';
   }
@@ -359,6 +463,10 @@ export async function bakeAndFinalizeVideo(
   return finalizeBakedVideo(baked, options.onProgress, {
     preserveAspect: aspectRatio === 'source' && Boolean(options.narration),
     aspectRatio: aspectRatio === '16:9' ? '16:9' : undefined,
-    name: options.narration ? 'narrated-video.mp4' : undefined,
+    name: options.avatarUrl
+      ? 'avatar-composite.mp4'
+      : options.narration
+        ? 'narrated-video.mp4'
+        : undefined,
   });
 }

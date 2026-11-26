@@ -90,6 +90,7 @@ export async function recordNativeSchedule({
   newsItemId = null,
   draftId = null,
   avatarJobId = null,
+  mediaUrl = null,
 }: {
   workspaceId: string;
   userId: string;
@@ -102,6 +103,7 @@ export async function recordNativeSchedule({
   newsItemId?: number | null;
   draftId?: number | null;
   avatarJobId?: string | null;
+  mediaUrl?: string | null;
 }): Promise<number | null> {
   const success = results.find((result) => result.ok);
   const scheduled =
@@ -118,13 +120,13 @@ export async function recordNativeSchedule({
       INSERT INTO scheduled_posts
         (workspace_id, news_item_id, draft_id, text, scheduled_for, status,
          kind, source, facebook_post_id, facebook_post_ids, page_id,
-         error_message, created_by, avatar_job_id)
+         error_message, created_by, avatar_job_id, image_url)
       VALUES
         (${workspaceId}, ${newsItemId}, ${draftId}, ${text || '(no caption)'},
          ${(scheduledFor ?? new Date()).toISOString()}, ${status},
          ${kind}, ${platform}, ${success?.id ?? null},
          ${JSON.stringify(results)}::jsonb, ${success?.page.id ?? null},
-         ${errorMessage}, ${userId}, ${avatarJobId})
+         ${errorMessage}, ${userId}, ${avatarJobId}, ${mediaUrl})
       RETURNING id`) as unknown as { id: number }[];
 
     const scheduledPostId = rows[0]?.id;

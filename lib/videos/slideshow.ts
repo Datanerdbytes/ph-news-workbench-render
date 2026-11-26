@@ -5,6 +5,15 @@ import {
   MAX_NARRATED_SECONDS,
   type AudioMix,
 } from './audio-mix';
+import {
+  drawAvatarVideo,
+  loadAvatarVideo,
+  type LoadedAvatarVideo,
+} from './avatar-video';
+import {
+  DEFAULT_AVATAR_PLACEMENT,
+  type AvatarPlacement,
+} from './composition';
 
 const WIDTH = 1920;
 const HEIGHT = 1080;
@@ -12,7 +21,9 @@ const FPS = 30;
 
 export type NarratedSlideshowOptions = {
   images: string[];
-  narration: Blob;
+  narration?: Blob;
+  avatarUrl?: string;
+  avatarPlacement?: AvatarPlacement;
   onProgress?: (fraction: number) => void;
 };
 
@@ -42,7 +53,7 @@ function loadImage(source: string): Promise<HTMLImageElement> {
     const timer = setTimeout(() => {
       image.onload = null;
       image.onerror = null;
-      reject(new Error('A photo could not be loaded for the voice-over.'));
+      reject(new Error('A photo could not be loaded for the slideshow.'));
     }, 15_000);
     image.onload = () => {
       clearTimeout(timer);
@@ -50,7 +61,7 @@ function loadImage(source: string): Promise<HTMLImageElement> {
     };
     image.onerror = () => {
       clearTimeout(timer);
-      reject(new Error('A photo could not be loaded for the voice-over.'));
+      reject(new Error('A photo could not be loaded for the slideshow.'));
     };
     image.src = source;
   });
@@ -59,12 +70,21 @@ function loadImage(source: string): Promise<HTMLImageElement> {
 export async function bakeNarratedSlideshow(
   options: NarratedSlideshowOptions,
 ): Promise<Blob> {
+  const hasNarration = Boolean(options.narration);
+  const hasAvatar = Boolean(options.avatarUrl);
+  if (hasNarration === hasAvatar) {
+    throw new Error('Choose either a voice-over or an avatar video for the slideshow.');
+  }
   if (!options.images.length) {
     throw new Error('Add at least one photo for the voice-over.');
   }
   const mimeType = pickMimeType();
   if (!mimeType || typeof HTMLCanvasElement === 'undefined') {
-    throw new Error('This browser cannot record the voice-over slideshow.');
+    throw new Error(
+      hasAvatar
+        ? 'This browser cannot record the avatar slideshow.'
+        : 'This browser cannot record the voice-over slideshow.'
+    );
   }
 
   const canvas = document.createElement('canvas');
@@ -75,24 +95,43 @@ export async function bakeNarratedSlideshow(
 
   const audioContext = new AudioContext();
   let audioMix!: AudioMix;
+  let loadedAvatar: LoadedAvatarVideo | undefined;
   let images: HTMLImageElement[];
   try {
+    if (options.avatarUrl) {
+      loadedAvatar = await loadAvatarVideo(options.avatarUrl);
+    }
     audioMix = await createAudioMix(audioContext, {
       narration: options.narration,
+      avatar: loadedAvatar?.video,
     });
     if (audioMix.duration > MAX_NARRATED_SECONDS) {
-      throw new Error('Narrated slideshows are limited to 10 minutes.');
+      throw new Error(
+        hasAvatar
+          ? 'Avatar slideshows are limited to 10 minutes.'
+          : 'Narrated slideshows are limited to 10 minutes.'
+      );
     }
     images = await Promise.all(options.images.map(loadImage));
   } catch (error) {
     audioMix?.stop();
+    loadedAvatar?.release();
     await audioContext.close().catch(() => {});
     throw error;
   }
 
-  const stream = canvas.captureStream(FPS);
-  for (const track of audioMix.destination.stream.getAudioTracks()) {
-    stream.addTrack(track);
+  const avatar = loadedAvatar?.video;
+  let stream: MediaStream;
+  try {
+    stream = canvas.captureStream(FPS);
+    for (const track of audioMix.destination.stream.getAudioTracks()) {
+      stream.addTrack(track);
+    }
+  } catch (error) {
+    audioMix.stop();
+    loadedAvatar?.release();
+    await audioContext.close().catch(() => {});
+    throw error;
   }
 
   try {
@@ -114,9 +153,31 @@ export async function bakeNarratedSlideshow(
       recorder.onerror = () => reject(new Error('Recording failed.'));
     });
 
+    if (avatar) {
+      avatar.currentTime = 0;
+      try {
+        await avatar.play();
+      } catch {
+        avatar.pause();
+        throw new Error(
+          'Playback was blocked, so the avatar slideshow bake was skipped. Try posting again.'
+        );
+      }
+    }
+    context.clearRect(0, 0, WIDTH, HEIGHT);
     drawSlideshowImage(context, images[0]);
+    if (avatar) {
+      drawAvatarVideo(
+        context,
+        avatar,
+        options.avatarPlacement ?? DEFAULT_AVATAR_PLACEMENT,
+        WIDTH,
+        HEIGHT,
+      );
+    }
     recorder.start(250);
-    audioMix.startNarration();
+    if (hasAvatar) audioMix.startAvatar();
+    else audioMix.startNarration();
     const startedAt = performance.now();
     let playbackError: Error | null = null;
 
@@ -124,6 +185,9 @@ export async function bakeNarratedSlideshow(
       await new Promise<void>((resolve, reject) => {
         const minFrameMs = 1000 / FPS;
         let lastFrameAt = startedAt;
+        let lastAvatarProgressAt = startedAt;
+        let lastAvatarPlayhead = 0;
+        let avatarEnded = false;
         let raf = 0;
         let settled = false;
         const finish = (error?: Error) => {
@@ -138,7 +202,9 @@ export async function bakeNarratedSlideshow(
           if (document.hidden) {
             finish(
               new Error(
-                'The tab was hidden, so the voice-over slideshow was stopped.',
+                hasAvatar
+                  ? 'The tab was hidden, so the avatar slideshow was stopped.'
+                  : 'The tab was hidden, so the voice-over slideshow was stopped.',
               ),
             );
           }
@@ -146,6 +212,10 @@ export async function bakeNarratedSlideshow(
         const tick = () => {
           const now = performance.now();
           const elapsed = (now - startedAt) / 1000;
+          const avatarPlayhead =
+            avatar && !avatarEnded
+              ? Math.min(avatar.currentTime, audioMix.duration || avatar.currentTime)
+              : audioMix.duration;
           if (now - lastFrameAt >= minFrameMs) {
             do {
               lastFrameAt += minFrameMs;
@@ -156,10 +226,29 @@ export async function bakeNarratedSlideshow(
             );
             context.clearRect(0, 0, WIDTH, HEIGHT);
             drawSlideshowImage(context, images[index]);
+            if (avatar) {
+              drawAvatarVideo(
+                context,
+                avatar,
+                options.avatarPlacement ?? DEFAULT_AVATAR_PLACEMENT,
+                WIDTH,
+                HEIGHT,
+              );
+            }
             options.onProgress?.(Math.min(1, elapsed / audioMix.duration));
+          }
+          if (!avatarEnded && avatarPlayhead >= audioMix.duration - 0.05) {
+            avatarEnded = true;
           }
           if (elapsed >= audioMix.duration - 0.02) {
             finish();
+            return;
+          }
+          if (avatar && !avatarEnded && avatarPlayhead > lastAvatarPlayhead + 0.01) {
+            lastAvatarPlayhead = avatarPlayhead;
+            lastAvatarProgressAt = now;
+          } else if (avatar && !avatarEnded && now - lastAvatarProgressAt > 15_000) {
+            finish(new Error('The avatar stopped playing during the bake.'));
             return;
           }
           raf = requestAnimationFrame(tick);
@@ -173,12 +262,25 @@ export async function bakeNarratedSlideshow(
         finished.catch((error: unknown) => {
           finish(error instanceof Error ? error : new Error('Recording failed.'));
         });
+        if (avatar) {
+          avatar.onended = () => {
+            avatarEnded = true;
+            finish();
+          };
+          avatar.onerror = () =>
+            finish(new Error('The avatar stopped playing during the bake.'));
+        }
       });
     } catch (error) {
       playbackError =
         error instanceof Error ? error : new Error('The slideshow was interrupted.');
     }
 
+    avatar?.pause();
+    if (avatar) {
+      avatar.onended = null;
+      avatar.onerror = null;
+    }
     if (recorder.state !== 'inactive') recorder.stop();
     let blob: Blob | null = null;
     try {
@@ -195,6 +297,7 @@ export async function bakeNarratedSlideshow(
   } finally {
     stream.getTracks().forEach((track) => track.stop());
     audioMix.stop();
+    loadedAvatar?.release();
     await audioContext.close().catch(() => {});
   }
 }
@@ -205,6 +308,6 @@ export async function bakeAndFinalizeNarratedSlideshow(
   const baked = await bakeNarratedSlideshow(options);
   return finalizeBakedVideo(baked, options.onProgress, {
     aspectRatio: '16:9',
-    name: 'narrated-photos.mp4',
+    name: options.avatarUrl ? 'avatar-photos.mp4' : 'narrated-photos.mp4',
   });
 }

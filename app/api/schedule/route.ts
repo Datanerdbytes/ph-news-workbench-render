@@ -4,6 +4,10 @@ import { MAX_POST_IMAGES } from "@/lib/facebook";
 import { requireWorkspace, unauthorized } from "@/lib/session";
 import { stripMarkdown } from "@/lib/format";
 import { recordScheduleEvent } from "@/lib/schedule-events";
+import {
+  assertAvatarCompositeUrl,
+  isAvatarCompositeUrl,
+} from "@/lib/avatar/media";
 
 export const dynamic = "force-dynamic";
 
@@ -143,22 +147,36 @@ export async function POST(request: Request) {
     scheduledPageId = requestedPageId;
   }
 
+  const avatarComposite = Boolean(
+    avatarJobId && videoUrl && isAvatarCompositeUrl(avatarJobId, videoUrl)
+  );
+  if (avatarComposite && avatarJobId && videoUrl) {
+    try {
+      await assertAvatarCompositeUrl(avatarJobId, videoUrl);
+    } catch {
+      return NextResponse.json(
+        { error: "The avatar overlay is not a valid staged video." },
+        { status: 400 }
+      );
+    }
+  }
+
   const rows = (await (avatarJobId
     ? sql`
         WITH claimed_avatar AS (
           UPDATE avatar_jobs
           SET publish_state = 'scheduled', updated_at = now()
           WHERE id = ${avatarJobId} AND workspace_id = ${access.workspace.id}
-            AND status = 'completed' AND publish_state = 'ready'
-            AND blob_url = ${videoUrl}
-          RETURNING id, blob_url
+            AND status = 'completed' AND publish_state = 'ready' AND blob_url IS NOT NULL
+            ${avatarComposite ? sql`` : sql`AND blob_url = ${videoUrl}`}
+          RETURNING id
         ), inserted AS (
           INSERT INTO scheduled_posts
             (workspace_id, news_item_id, draft_id, text, image_url, image_urls,
              scheduled_for, kind, page_id, created_by, avatar_job_id)
           SELECT
             ${access.workspace.id}, ${verifiedNewsItemId}, ${verifiedDraftId},
-            ${text}, claimed_avatar.blob_url,
+            ${text}, ${videoUrl},
             ${imageUrls.length ? JSON.stringify(imageUrls) : null}::jsonb,
             ${scheduledFor.toISOString()}, ${kind}, ${scheduledPageId},
             ${access.user.id}, claimed_avatar.id

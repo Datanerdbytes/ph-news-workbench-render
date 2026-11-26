@@ -89,6 +89,7 @@ describe("POST /api/schedule/[id]/retry", () => {
     expect(query).toContain("UPDATE avatar_jobs");
     expect(query).toContain("publish_state = 'scheduled'");
     expect(query).toContain("avatar_jobs.blob_url = eligible.image_url");
+    expect(query).toContain("'/compose/avatars/' || avatar_jobs.id || '/'");
     expect(query).toContain("publish_started_at = NULL");
     expect(recordEventMock).toHaveBeenCalledWith(
       expect.objectContaining({ event: "retrying", scheduledPostId: 51 })

@@ -26,6 +26,10 @@ import {
   releaseAvatarPublish,
 } from '@/lib/avatar/queue';
 import { deleteStagedBlobs } from '@/lib/blob';
+import {
+  assertAvatarCompositeUrl,
+  isAvatarCompositeUrl,
+} from '@/lib/avatar/media';
 
 export const dynamic = 'force-dynamic';
 
@@ -167,14 +171,26 @@ export async function POST(request: Request) {
       : typeof body?.imageUrl === 'string'
         ? [body.imageUrl]
         : [];
-    let videoUrl =
+    const videoUrl =
       typeof body?.videoUrl === 'string' && body.videoUrl ? body.videoUrl : null;
 
     if (avatarJobId) {
+      const composite = isAvatarCompositeUrl(avatarJobId, videoUrl as string);
+      if (composite) {
+        try {
+          await assertAvatarCompositeUrl(avatarJobId, videoUrl as string);
+        } catch {
+          return NextResponse.json(
+            { error: 'The avatar overlay is not a valid staged video.' },
+            { status: 400 }
+          );
+        }
+      }
       const claimedUrl = await claimAvatarForPublish(
         avatarJobId,
         access.workspace.id,
-        videoUrl as string
+        videoUrl as string,
+        composite
       );
       if (!claimedUrl) {
         return NextResponse.json(
@@ -187,9 +203,8 @@ export async function POST(request: Request) {
       }
       claimedAvatarId = avatarJobId;
       avatarBlobUrl = claimedUrl;
-      // Every fetch and cleanup below uses the URL returned by the atomic
-      // ownership claim, never a second client-supplied location.
-      videoUrl = claimedUrl;
+      // A standalone avatar is fenced to the database URL by the claim. A
+      // composite was validated and bound to this avatar before the claim.
     }
 
     let published: { id: string; permalink: string | null };
@@ -299,7 +314,7 @@ export async function POST(request: Request) {
         ],
         newsItemId: story?.id ?? null,
         draftId: story?.draft_id ?? null,
-        ...(avatarJobId ? { avatarJobId } : {}),
+        ...(avatarJobId ? { avatarJobId, mediaUrl: videoUrl } : {}),
       });
     } catch (mirrorError) {
       console.error(
@@ -328,7 +343,11 @@ export async function POST(request: Request) {
               'Published, but the local avatar record is incomplete. The avatar media was kept for recovery.';
           } else if (avatarBlobUrl) {
             try {
-              await deleteStagedBlobs([avatarBlobUrl]);
+              await deleteStagedBlobs(
+                [...new Set([videoUrl, avatarBlobUrl])].filter(
+                  (url): url is string => Boolean(url)
+                )
+              );
             } catch {
               // The durable ownership transition succeeded; cleanup is best-effort.
             }

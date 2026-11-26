@@ -31,6 +31,10 @@ vi.mock("@/lib/publishing/videos", () => ({
 }));
 vi.mock("@/lib/reel-meta", () => ({ readMp4DurationSecondsFromFile: vi.fn() }));
 vi.mock("@/lib/blob", () => ({ deleteStagedBlobs: vi.fn() }));
+vi.mock("@/lib/avatar/media", () => ({
+  isAvatarCompositeUrl: vi.fn(),
+  assertAvatarCompositeUrl: vi.fn(),
+}));
 
 import { sql } from "@/lib/db";
 import { requireWorkspace } from "@/lib/session";
@@ -48,6 +52,10 @@ import {
 } from "@/lib/publishing/videos";
 import { readMp4DurationSecondsFromFile } from "@/lib/reel-meta";
 import { deleteStagedBlobs } from "@/lib/blob";
+import {
+  assertAvatarCompositeUrl,
+  isAvatarCompositeUrl,
+} from "@/lib/avatar/media";
 import { POST } from "./route";
 
 const sqlMock = sql as unknown as Mock;
@@ -62,6 +70,8 @@ const downloadMock = downloadVideoFromUrl as unknown as Mock;
 const videoMock = publishPageVideo as unknown as Mock;
 const durationMock = readMp4DurationSecondsFromFile as unknown as Mock;
 const deleteMock = deleteStagedBlobs as unknown as Mock;
+const compositeMock = isAvatarCompositeUrl as unknown as Mock;
+const assertCompositeMock = assertAvatarCompositeUrl as unknown as Mock;
 
 const access = {
   user: { id: "u1" },
@@ -103,6 +113,8 @@ beforeEach(() => {
   durationMock.mockResolvedValue(null);
   videoMock.mockResolvedValue({ id: "fb_avatar", permalink: null });
   deleteMock.mockResolvedValue(undefined);
+  compositeMock.mockReturnValue(false);
+  assertCompositeMock.mockResolvedValue(undefined);
   // 1) the connection scopes, 2) the story and its draft, 3) the draft flip.
   sqlMock
     .mockResolvedValueOnce([{ scopes: "pages_manage_posts" }])
@@ -202,22 +214,22 @@ describe("POST /api/publish", () => {
         newsItemId: 7,
         message: "Avatar update",
         avatarJobId: "avatar-1",
-        videoUrl: "https://client.example/not-trusted.mp4",
+        videoUrl: avatarDbUrl,
       })
     );
 
-    expect(claimMock).toHaveBeenCalledWith(
-      "avatar-1",
-      "ws_1",
-      "https://client.example/not-trusted.mp4"
-    );
+    expect(claimMock).toHaveBeenCalledWith("avatar-1", "ws_1", avatarDbUrl, false);
     expect(response.status).toBe(200);
     expect(downloadMock).toHaveBeenCalledWith(avatarDbUrl);
     expect(videoMock).toHaveBeenCalledWith(
       expect.objectContaining({ video: upload, description: "Avatar update" })
     );
     expect(mirrorMock).toHaveBeenCalledWith(
-      expect.objectContaining({ avatarJobId: "avatar-1", kind: "video" })
+      expect.objectContaining({
+        avatarJobId: "avatar-1",
+        mediaUrl: avatarDbUrl,
+        kind: "video",
+      })
     );
     expect(finishMock).toHaveBeenCalledWith("avatar-1", "ws_1", 77);
     expect(deleteMock).toHaveBeenCalledWith([avatarDbUrl]);
@@ -238,6 +250,56 @@ describe("POST /api/publish", () => {
     );
   });
 
+  it("publishes a validated composite and cleans up both it and the source avatar", async () => {
+    const compositeUrl =
+      "https://store.example/compose/avatars/avatar-1/avatar-composite.mp4";
+    compositeMock.mockReturnValue(true);
+
+    const response = await POST(
+      post({
+        newsItemId: 7,
+        message: "Avatar overlay",
+        avatarJobId: "avatar-1",
+        videoUrl: compositeUrl,
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(assertCompositeMock).toHaveBeenCalledWith("avatar-1", compositeUrl);
+    expect(claimMock).toHaveBeenCalledWith("avatar-1", "ws_1", compositeUrl, true);
+    expect(downloadMock).toHaveBeenCalledWith(compositeUrl);
+    expect(mirrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({ avatarJobId: "avatar-1", mediaUrl: compositeUrl })
+    );
+    expect(deleteMock).toHaveBeenCalledWith([compositeUrl, avatarDbUrl]);
+    expect(assertCompositeMock.mock.invocationCallOrder[0]).toBeLessThan(
+      claimMock.mock.invocationCallOrder[0]
+    );
+    expect(finishMock.mock.invocationCallOrder[0]).toBeLessThan(
+      deleteMock.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("rejects an unverified composite before claiming the avatar", async () => {
+    const compositeUrl =
+      "https://store.example/compose/avatars/avatar-1/avatar-composite.mp4";
+    compositeMock.mockReturnValue(true);
+    assertCompositeMock.mockRejectedValue(new Error("not staged"));
+
+    const response = await POST(
+      post({
+        newsItemId: 7,
+        message: "Avatar overlay",
+        avatarJobId: "avatar-1",
+        videoUrl: compositeUrl,
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(claimMock).not.toHaveBeenCalled();
+    expect(downloadMock).not.toHaveBeenCalled();
+  });
+
   it("rejects a stale or foreign avatar with 409 before downloading", async () => {
     claimMock.mockResolvedValue(null);
 
@@ -246,7 +308,7 @@ describe("POST /api/publish", () => {
         newsItemId: 7,
         message: "Avatar update",
         avatarJobId: "avatar-missing",
-        videoUrl: "https://store.example/avatar.mp4",
+        videoUrl: avatarDbUrl,
       })
     );
 
@@ -274,7 +336,7 @@ describe("POST /api/publish", () => {
         newsItemId: 7,
         message: "Avatar update",
         avatarJobId: "avatar-1",
-        videoUrl: "https://store.example/avatar.mp4",
+        videoUrl: avatarDbUrl,
       })
     );
 
@@ -296,7 +358,7 @@ describe("POST /api/publish", () => {
         newsItemId: 7,
         message: "Avatar update",
         avatarJobId: "avatar-1",
-        videoUrl: "https://store.example/avatar.mp4",
+        videoUrl: avatarDbUrl,
       })
     );
 
@@ -313,7 +375,7 @@ describe("POST /api/publish", () => {
         newsItemId: 7,
         message: "Avatar update",
         avatarJobId: "avatar-1",
-        videoUrl: "https://store.example/avatar.mp4",
+        videoUrl: avatarDbUrl,
       })
     );
 
@@ -333,7 +395,7 @@ describe("POST /api/publish", () => {
         newsItemId: 7,
         message: "Avatar update",
         avatarJobId: "avatar-1",
-        videoUrl: "https://store.example/avatar.mp4",
+        videoUrl: avatarDbUrl,
       })
     );
 
@@ -350,7 +412,7 @@ describe("POST /api/publish", () => {
         newsItemId: 7,
         message: "Avatar update",
         avatarJobId: "avatar-1",
-        videoUrl: "https://store.example/avatar.mp4",
+        videoUrl: avatarDbUrl,
       })
     );
 
@@ -369,7 +431,7 @@ describe("POST /api/publish", () => {
         newsItemId: 7,
         message: "Avatar update",
         avatarJobId: "avatar-1",
-        videoUrl: "https://store.example/avatar.mp4",
+        videoUrl: avatarDbUrl,
       })
     );
     const data = await response.json();
@@ -391,7 +453,7 @@ describe("POST /api/publish", () => {
         newsItemId: 7,
         message: "Avatar update",
         avatarJobId: "avatar-1",
-        videoUrl: "https://store.example/avatar.mp4",
+        videoUrl: avatarDbUrl,
       })
     );
 

@@ -72,6 +72,12 @@ function query(call: unknown[]) {
   return (call[0] as TemplateStringsArray).join("?");
 }
 
+function avatarClaimCall() {
+  return sqlMock.mock.calls.find((call) =>
+    query(call).includes("UPDATE avatar_jobs SET publish_state")
+  )!;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.useFakeTimers();
@@ -413,15 +419,39 @@ describe("removal and publishing", () => {
     await expect(
       claimAvatarForPublish("job-1", "ws-1", "https://store.test/avatar.mp4"),
     ).resolves.toBe("https://store.test/avatar.mp4");
-    const text = query(sqlMock.mock.calls[0]);
+    const claim = avatarClaimCall();
+    const text = query(claim);
+    const urlFence = sqlMock.mock.calls.find((call) =>
+      query(call).includes("AND blob_url = ?")
+    );
     expect(text).toContain("publish_state = 'publishing'");
     expect(text).toContain("status = 'completed' AND publish_state = 'ready'");
-    expect(text).toContain("blob_url = ?");
-    expect(sqlMock.mock.calls[0].slice(1)).toEqual([
-      "job-1",
-      "ws-1",
-      "https://store.test/avatar.mp4",
-    ]);
+    expect(urlFence).toBeDefined();
+    expect(urlFence!.slice(1)).toEqual(["https://store.test/avatar.mp4"]);
+    expect(claim.slice(1, 3)).toEqual(["job-1", "ws-1"]);
+  });
+
+  it("claims an owned avatar for a validated composite without trusting its URL as the source", async () => {
+    sqlMock.mockResolvedValue([{ blob_url: "https://store.test/avatar.mp4" }]);
+
+    await expect(
+      claimAvatarForPublish(
+        "job-1",
+        "ws-1",
+        "https://store.test/compose/avatars/job-1/composite.mp4",
+        true,
+      ),
+    ).resolves.toBe("https://store.test/avatar.mp4");
+    const claim = avatarClaimCall();
+    const text = query(claim);
+    expect(text).toContain("blob_url IS NOT NULL");
+    expect(
+      sqlMock.mock.calls.some((call) => query(call).includes("AND blob_url = ?"))
+    ).toBe(false);
+    expect(claim.slice(1, 3)).toEqual(["job-1", "ws-1"]);
+    expect(claim).not.toContain(
+      "https://store.test/compose/avatars/job-1/composite.mp4"
+    );
   });
 
   it("releases only a publishing claim in the same workspace", async () => {

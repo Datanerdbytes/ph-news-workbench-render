@@ -61,6 +61,7 @@ describe("recordNativeSchedule", () => {
       null,
       "u1",
       null, // avatarJobId
+      null, // mediaUrl
     ]);
     expect(events()[0]).toMatchObject({
       scheduledPostId: 77,
@@ -268,7 +269,9 @@ describe("recordNativeSchedule", () => {
     });
   });
 
-  it("stores the avatar ownership link and returns the durable row id", async () => {
+  it("stores the avatar ownership link and selected media URL", async () => {
+    const mediaUrl =
+      "https://store.example/compose/avatars/avatar-1/avatar-composite.mp4";
     await expect(
       recordNativeSchedule({
         workspaceId: "ws1",
@@ -278,10 +281,12 @@ describe("recordNativeSchedule", () => {
         scheduledFor: null,
         results: [okResult("fb_avatar")],
         avatarJobId: "avatar-1",
+        mediaUrl,
       })
     ).resolves.toBe(77);
 
     expect(insertValues()[13]).toBe("avatar-1");
+    expect(insertValues()[14]).toBe(mediaUrl);
     expect(events()[0].metadata).toMatchObject({ avatarJobId: "avatar-1" });
   });
 

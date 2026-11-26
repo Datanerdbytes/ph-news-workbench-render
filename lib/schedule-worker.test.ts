@@ -27,6 +27,7 @@ vi.mock("@/lib/publishing/instagram", () => ({
   resolveInstagramAccount: vi.fn(),
 }));
 vi.mock("@/lib/blob", () => ({ deleteStagedBlobs: vi.fn() }));
+vi.mock("@/lib/avatar/media", () => ({ isAvatarCompositeUrl: vi.fn() }));
 vi.mock("@/lib/publishing/videos", () => ({
   downloadVideoFromUrl: vi.fn(),
   publishPageVideo: vi.fn(),
@@ -55,6 +56,7 @@ import {
   resolveInstagramAccount,
 } from "@/lib/publishing/instagram";
 import { deleteStagedBlobs } from "@/lib/blob";
+import { isAvatarCompositeUrl } from "@/lib/avatar/media";
 import {
   downloadVideoFromUrl,
   publishPageVideo,
@@ -102,7 +104,7 @@ function useDb(overrides: {
     if (query.includes("source = 'local'")) return overrides.claim ?? [];
     if (query.includes("WITH published AS")) {
       if (overrides.completionError) throw overrides.completionError;
-      return overrides.completion ?? overrides.updatedRows ?? [{ id: 1, avatar_blob_url: null }];
+      return overrides.completion ?? overrides.updatedRows ?? [{ id: 1, media_url: null, avatar_blob_url: null }];
     }
     if (query.includes("RETURNING id"))
       return overrides.updatedRows ?? [{ id: 1 }];
@@ -149,6 +151,9 @@ function nativeRow(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(isAvatarCompositeUrl).mockImplementation((avatarJobId, url) =>
+    url.includes(`/compose/avatars/${avatarJobId}/`)
+  );
   useDb({});
 });
 
@@ -344,10 +349,10 @@ describe("publishDuePosts", () => {
       vi.mocked(publishPageVideo).mockResolvedValue({ id: "fb_avatar", permalink: null });
     });
 
-    it("atomically completes the avatar and deletes only the returned blob URL", async () => {
+    it("atomically completes the avatar and deduplicates its source media cleanup", async () => {
       useDb({
         claim: [avatarRow()],
-        completion: [{ id: 1, avatar_blob_url: avatarUrl }],
+        completion: [{ id: 1, media_url: avatarUrl, avatar_blob_url: avatarUrl }],
       });
 
       await expect(publishDuePosts({ source: "scheduler" })).resolves.toEqual({
@@ -379,10 +384,55 @@ describe("publishDuePosts", () => {
       );
     });
 
+    it("publishes the avatar-bound composite and cleans up both media files after completion", async () => {
+      const compositeUrl =
+        "https://store.example/compose/avatars/avatar-1/123-avatar-composite.mp4";
+      useDb({
+        claim: [avatarRow({ image_url: compositeUrl })],
+        completion: [
+          { id: 1, media_url: compositeUrl, avatar_blob_url: avatarUrl },
+        ],
+      });
+
+      await expect(publishDuePosts({ source: "scheduler" })).resolves.toEqual({
+        due: 1,
+        published: 1,
+        failed: 0,
+        synced: 0,
+      });
+
+      expect(downloadVideoFromUrl).toHaveBeenCalledWith(compositeUrl);
+      expect(deleteStagedBlobs).toHaveBeenCalledTimes(1);
+      expect(deleteStagedBlobs).toHaveBeenCalledWith([compositeUrl, avatarUrl]);
+      const sqlTexts = sqlMock.mock.calls.map((call) =>
+        (call[0] as TemplateStringsArray).join(" ")
+      );
+      expect(
+        sqlTexts.some(
+          (text) =>
+            text.includes("FROM scheduled_posts") &&
+            text.includes("avatar_jobs.blob_url = scheduled_posts.image_url") &&
+            text.includes("'/compose/avatars/' || avatar_jobs.id || '/'")
+        )
+      ).toBe(true);
+      expect(
+        sqlTexts.some(
+          (text) =>
+            text.includes("SET status = 'publishing', attempts = attempts + 1") &&
+            text.includes("'/compose/avatars/' || avatar_jobs.id || '/'")
+        )
+      ).toBe(true);
+      const completionCall = sqlMock.mock.calls.find((call) =>
+        (call[0] as TemplateStringsArray).join(" ").includes("WITH published AS")
+      )!;
+      expect(sqlMock.mock.invocationCallOrder[sqlMock.mock.calls.indexOf(completionCall)])
+        .toBeLessThan(vi.mocked(deleteStagedBlobs).mock.invocationCallOrder[0]);
+    });
+
     it("keeps avatar media when completion does not return its blob URL", async () => {
       useDb({
         claim: [avatarRow()],
-        completion: [{ id: 1, avatar_blob_url: null }],
+        completion: [{ id: 1, media_url: avatarUrl, avatar_blob_url: null }],
       });
 
       await publishDuePosts({ source: "scheduler" });
@@ -586,7 +636,7 @@ describe("publishDuePosts", () => {
             avatar_job_id: "avatar-1",
           },
         ],
-        completion: [{ id: 1, avatar_blob_url: avatarUrl }],
+        completion: [{ id: 1, media_url: avatarUrl, avatar_blob_url: avatarUrl }],
       });
       vi.mocked(resolvePageToken).mockResolvedValue("tok");
       vi.mocked(isFacebookVideoPublished).mockResolvedValue(true);
@@ -754,7 +804,11 @@ describe("syncNativeSchedules", () => {
   it("completes a linked avatar when a native row is confirmed published", async () => {
     useDb({
       native: [nativeRow({ avatar_job_id: "avatar-1" })],
-      completion: [{ id: 1, avatar_blob_url: "https://blob.example/avatar.mp4" }],
+      completion: [{
+        id: 1,
+        media_url: "https://blob.example/avatar.mp4",
+        avatar_blob_url: "https://blob.example/avatar.mp4",
+      }],
     });
     vi.mocked(resolvePageToken).mockResolvedValue("tok");
     vi.mocked(isFacebookPostPublished).mockResolvedValue(true);
@@ -1365,6 +1419,7 @@ describe("recoverStaleReschedules", () => {
           news_item_id: 7,
           scheduled_for: minutesAgo(30),
           avatar_job_id: "avatar-1",
+          image_url: "https://blob.example/avatar-owned.mp4",
         },
       ],
     });
@@ -1372,7 +1427,7 @@ describe("recoverStaleReschedules", () => {
     await expect(recoverStaleReschedules()).resolves.toBe(1);
 
     expect((deleteCalls()[0][0] as TemplateStringsArray).join(" ")).toContain(
-      "RETURNING id, news_item_id, scheduled_for, avatar_job_id"
+      "RETURNING id, news_item_id, scheduled_for, avatar_job_id, image_url"
     );
     const releaseCall = sqlMock.mock.calls.find((call) =>
       (call[0] as TemplateStringsArray).join(" ").includes("UPDATE avatar_jobs SET publish_state = 'ready'")
@@ -1380,6 +1435,41 @@ describe("recoverStaleReschedules", () => {
     expect(releaseCall).toBeDefined();
     expect(releaseCall).toContain("avatar-1");
     expect(releaseCall).toContain("ws1");
+    expect(deleteStagedBlobs).not.toHaveBeenCalled();
+  });
+
+  it("deletes only the composite after recovering a durable local deletion", async () => {
+    const compositeUrl =
+      "https://store.example/compose/avatars/avatar-1/123-avatar-composite.mp4";
+    useRecoveryDb({
+      staleRescheduling: [
+        staleRow({
+          source: "local",
+          avatar_job_id: "avatar-1",
+          error_message: JSON.stringify({ claim: "c1", action: "delete" }),
+        }),
+      ],
+      deleted: [
+        {
+          id: 42,
+          news_item_id: 7,
+          scheduled_for: minutesAgo(30),
+          avatar_job_id: "avatar-1",
+          image_url: compositeUrl,
+        },
+      ],
+    });
+
+    await expect(recoverStaleReschedules()).resolves.toBe(1);
+
+    expect(deleteStagedBlobs).toHaveBeenCalledTimes(1);
+    expect(deleteStagedBlobs).toHaveBeenCalledWith([compositeUrl]);
+    const releaseCall = sqlMock.mock.calls.find((call) =>
+      (call[0] as TemplateStringsArray).join(" ").includes("UPDATE avatar_jobs SET publish_state = 'ready'")
+    );
+    expect(releaseCall).toBeDefined();
+    expect(sqlMock.mock.invocationCallOrder[sqlMock.mock.calls.indexOf(releaseCall!)])
+      .toBeLessThan(vi.mocked(deleteStagedBlobs).mock.invocationCallOrder[0]);
   });
 
   it("deletes without re-canceling a Page Facebook no longer holds", async () => {

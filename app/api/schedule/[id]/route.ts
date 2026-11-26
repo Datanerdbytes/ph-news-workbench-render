@@ -14,6 +14,8 @@ import {
 import { facebookTargets } from "@/lib/facebook-schedule";
 import { resolvePageToken } from "@/lib/facebook-page-token";
 import { releaseScheduledAvatar } from "@/lib/avatar/queue";
+import { isAvatarCompositeUrl } from "@/lib/avatar/media";
+import { deleteStagedBlobs } from "@/lib/blob";
 
 export const dynamic = "force-dynamic";
 
@@ -29,6 +31,7 @@ type TargetRow = {
   facebook_post_ids: unknown;
   page_id: string | null;
   avatar_job_id: string | null;
+  image_url: string | null;
 };
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -49,7 +52,7 @@ export async function DELETE(
 
   const existing = (await sql`
     SELECT id, workspace_id, news_item_id, kind, source, status, scheduled_for,
-           facebook_post_id, facebook_post_ids, page_id, avatar_job_id
+           facebook_post_id, facebook_post_ids, page_id, avatar_job_id, image_url
     FROM scheduled_posts
     WHERE id = ${id} AND workspace_id = ${access.workspace.id}
   `) as unknown as TargetRow[];
@@ -132,11 +135,12 @@ export async function DELETE(
         (status = 'rescheduling' AND error_message = ${deleteClaim})
         OR status = ${row.status}
       )
-    RETURNING id, news_item_id, scheduled_for, avatar_job_id`) as unknown as {
+    RETURNING id, news_item_id, scheduled_for, avatar_job_id, image_url`) as unknown as {
     id: number;
     news_item_id: number | null;
     scheduled_for: string;
     avatar_job_id: string | null;
+    image_url: string | null;
   }[];
 
   if (!rows.length) {
@@ -149,6 +153,16 @@ export async function DELETE(
   const canceled = rows[0];
   if (canceled.avatar_job_id) {
     await releaseScheduledAvatar(canceled.avatar_job_id, access.workspace.id);
+    if (
+      canceled.image_url &&
+      isAvatarCompositeUrl(canceled.avatar_job_id, canceled.image_url)
+    ) {
+      try {
+        await deleteStagedBlobs([canceled.image_url]);
+      } catch {
+        // The schedule is already deleted; cleanup is best-effort.
+      }
+    }
   }
   await recordScheduleEvent({
     workspaceId: access.workspace.id,
@@ -193,7 +207,7 @@ export async function PATCH(
 
   const rows = (await sql`
     SELECT id, workspace_id, news_item_id, kind, source, status, scheduled_for,
-           facebook_post_id, facebook_post_ids, page_id, avatar_job_id
+           facebook_post_id, facebook_post_ids, page_id, avatar_job_id, image_url
     FROM scheduled_posts
     WHERE id = ${id} AND workspace_id = ${access.workspace.id}
   `) as unknown as TargetRow[];
