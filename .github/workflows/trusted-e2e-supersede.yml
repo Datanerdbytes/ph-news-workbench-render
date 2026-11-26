@@ -26,10 +26,12 @@ on:
     branches: [main]
 
 permissions:
-  # Cancelling a workflow run needs write access to Actions. Nothing else:
-  # the job makes API calls only and never checks the repository out, so no
-  # pull request code is fetched or executed here.
+  # Cancelling a workflow run needs write access to Actions; rechecking the
+  # live PR head needs read access to pull requests. Nothing else: the job
+  # makes API calls only and never checks the repository out, so no pull
+  # request code is fetched or executed here.
   actions: write
+  pull-requests: read
 
 # One supersede per pull request — a newer push makes an older one moot.
 concurrency:
