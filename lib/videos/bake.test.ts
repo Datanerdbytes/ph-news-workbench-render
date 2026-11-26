@@ -1,6 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { bakeVideoAnimation, composeVideoFrame, outputSize } from "./bake";
+import {
+  bakeVideoAnimation,
+  composeVideoFrame,
+  outputSize,
+  widescreenSize,
+} from "./bake";
 import { getVideoPreset, type PlannedVideoEffect } from "./presets";
 
 function stubCtx() {
@@ -39,6 +44,16 @@ describe("outputSize", () => {
   it("falls back to 1080p when the source reports no size", () => {
     expect(outputSize(0, 0)).toEqual({ w: 1920, h: 1080 });
     expect(outputSize(Number.NaN, Number.NaN)).toEqual({ w: 1920, h: 1080 });
+  });
+});
+
+describe("widescreenSize", () => {
+  it("uses a 1920x1080 canvas for 16:9 bakes", () => {
+    expect(widescreenSize()).toEqual({ w: 1920, h: 1080 });
+  });
+
+  it("uses 1280x720 when maxSide is 1280", () => {
+    expect(widescreenSize(1280)).toEqual({ w: 1280, h: 720 });
   });
 });
 
@@ -133,6 +148,21 @@ describe("bakeVideoAnimation playback lifecycle", () => {
   };
   let frames: FrameRequestCallback[];
   let recorders: FakeRecorder[];
+  let canvases: HTMLCanvasElement[];
+  let drawImageCalls: unknown[][];
+  let gains: Array<{
+    gain: { value: number };
+    connect: () => void;
+    disconnect: () => void;
+  }>;
+  let narrationSources: Array<{
+    buffer: unknown;
+    connect: ReturnType<typeof vi.fn>;
+    start: ReturnType<typeof vi.fn>;
+    stop: ReturnType<typeof vi.fn>;
+    disconnect: ReturnType<typeof vi.fn>;
+  }>;
+  let audioDuration = 2;
   let originalCreateElement: typeof document.createElement;
   let originalGetContext: typeof HTMLCanvasElement.prototype.getContext;
   let originalCaptureStream: unknown;
@@ -163,13 +193,33 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     state = "running";
     destination = {};
     createMediaElementSource() {
-      return { connect: () => {} };
+      return { connect: () => {}, disconnect: () => {} };
+    }
+    decodeAudioData() {
+      return Promise.resolve({ duration: audioDuration });
+    }
+    createBufferSource() {
+      const source = {
+        buffer: null as unknown,
+        connect: vi.fn(),
+        start: vi.fn(),
+        stop: vi.fn(),
+        disconnect: vi.fn(),
+      };
+      narrationSources.push(source);
+      return source;
     }
     createMediaStreamDestination() {
       return { stream: { getAudioTracks: () => [{ stop: () => {} }] } };
     }
     createGain() {
-      return { gain: { value: 0 }, connect: () => {} };
+      const gain = {
+        gain: { value: 0 },
+        connect: () => {},
+        disconnect: () => {},
+      };
+      gains.push(gain);
+      return gain;
     }
     resume() {
       return Promise.resolve();
@@ -184,6 +234,9 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     const gradient = { addColorStop: () => {} };
     return new Proxy(store, {
       get(target, prop) {
+        if (prop === "drawImage") {
+          return (...args: unknown[]) => drawImageCalls.push(args);
+        }
         if (prop === "measureText") return () => ({ width: 10 });
         if (prop === "createLinearGradient") return () => gradient;
         if (prop === "createRadialGradient") return () => gradient;
@@ -228,16 +281,23 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     hidden = false;
     frames = [];
     recorders = [];
+    canvases = [];
+    drawImageCalls = [];
+    gains = [];
+    narrationSources = [];
+    audioDuration = 2;
     video = makeVideo();
 
     originalCreateElement = document.createElement;
     vi.spyOn(document, "createElement").mockImplementation(((
       tag: string,
       options?: ElementCreationOptions
-    ) =>
-      tag === "video"
-        ? (video as unknown as HTMLElement)
-        : originalCreateElement.call(document, tag, options)) as typeof document.createElement);
+    ) => {
+      if (tag === "video") return video as unknown as HTMLElement;
+      const element = originalCreateElement.call(document, tag, options);
+      if (tag === "canvas") canvases.push(element as HTMLCanvasElement);
+      return element;
+    }) as typeof document.createElement);
 
     Object.defineProperty(document, "hidden", {
       configurable: true,
@@ -291,6 +351,38 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     globalThis.cancelAnimationFrame = originalCaf;
   });
 
+  it("cover-crops portrait footage onto a 16:9 canvas", async () => {
+    video.videoWidth = 1080;
+    video.videoHeight = 1920;
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const bake = bakeVideoAnimation({
+      videoUrl: "blob:test",
+      attachments,
+      values: {},
+      aspectRatio: "16:9",
+    });
+    await vi.waitFor(() => expect(recorders).toHaveLength(1));
+    expect(canvases).toHaveLength(1);
+    expect({ width: canvases[0].width, height: canvases[0].height }).toEqual({
+      width: 1920,
+      height: 1080,
+    });
+
+    now = 34;
+    frames.shift()?.(34);
+    expect(drawImageCalls).toHaveLength(1);
+    const [source, x, y, width, height] = drawImageCalls[0];
+    expect(source).toBe(video);
+    expect(x).toBe(0);
+    expect(y).toBeCloseTo(-1166.6666667);
+    expect(width).toBe(1920);
+    expect(height).toBeCloseTo(3413.3333333);
+
+    recorders[0].onerror?.();
+    await expect(bake).rejects.toThrow("Recording failed.");
+  });
+
   it("rejects a bake that starts while the tab is already hidden", async () => {
     hidden = true;
     await expect(
@@ -328,6 +420,34 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     recorders[0].onerror?.();
     await expect(bake).rejects.toThrow("Recording failed.");
     expect(video.pause).toHaveBeenCalled();
+  });
+  it("mixes narration over lowered original audio without requiring animations", async () => {
+    const bake = bakeVideoAnimation({
+      videoUrl: "blob:test",
+      attachments: [],
+      values: {},
+      narration: new Blob(["speech"], { type: "audio/mpeg" }),
+      originalAudioVolume: 0.25,
+    });
+    await vi.waitFor(() => expect(recorders).toHaveLength(1));
+    expect(gains[0].gain.value).toBe(0.25);
+    expect(narrationSources).toHaveLength(1);
+    expect(narrationSources[0].start).toHaveBeenCalledTimes(1);
+    recorders[0].onerror?.();
+    await expect(bake).rejects.toThrow("Recording failed.");
+  });
+
+  it("rejects narration longer than the ten-minute render cap", async () => {
+    audioDuration = 601;
+    await expect(
+      bakeVideoAnimation({
+        videoUrl: "blob:test",
+        attachments,
+        values: {},
+        narration: new Blob(["speech"], { type: "audio/mpeg" }),
+      }),
+    ).rejects.toThrow("Narrated videos are limited to 10 minutes.");
+    expect(recorders).toHaveLength(0);
   });
 });
 

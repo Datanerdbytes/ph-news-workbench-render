@@ -54,6 +54,7 @@ const localRow = {
   facebook_post_id: null,
   facebook_post_ids: null,
   page_id: null,
+  avatar_job_id: null,
 };
 
 const facebookRow = {
@@ -416,6 +417,22 @@ describe("DELETE /api/schedule/[id]", () => {
     expect(sqlMock).toHaveBeenCalledTimes(1);
   });
 
+  it("refuses to delete a post while its platform publish is in flight", async () => {
+    sqlMock.mockResolvedValueOnce([
+      { ...localRow, status: "publishing", avatar_job_id: "avatar-1" },
+    ]);
+
+    const res = await DELETE(
+      new Request("http://localhost/api/schedule/51", { method: "DELETE" }),
+      params()
+    );
+    const data = await res.json();
+
+    expect(res.status).toBe(409);
+    expect(data.error).toContain("publishing now");
+    expect(sqlMock).toHaveBeenCalledTimes(1);
+  });
+
   it("claims the row atomically and deletes a scheduled post", async () => {
     sqlMock
       .mockResolvedValueOnce([localRow])
@@ -441,6 +458,40 @@ describe("DELETE /api/schedule/[id]", () => {
     const deleteText = (sqlMock.mock.calls[2][0] as string[]).join("?");
     expect(deleteText).toContain("DELETE FROM scheduled_posts");
     expect(deleteText).toContain("status = 'rescheduling'");
+  });
+
+  it("releases an avatar only after its scheduled row is durably deleted", async () => {
+    sqlMock
+      .mockResolvedValueOnce([{ ...localRow, avatar_job_id: "avatar-1" }])
+      .mockResolvedValueOnce([{ id: 51 }])
+      .mockResolvedValueOnce([
+        {
+          id: 51,
+          news_item_id: null,
+          scheduled_for: localRow.scheduled_for,
+          avatar_job_id: "avatar-1",
+        },
+      ])
+      .mockResolvedValueOnce([{ id: "avatar-1" }]);
+
+    const res = await DELETE(
+      new Request("http://localhost/api/schedule/51", { method: "DELETE" }),
+      params()
+    );
+
+    expect(res.status).toBe(200);
+    expect(sqlMock).toHaveBeenCalledTimes(4);
+    const deleteText = (sqlMock.mock.calls[2][0] as string[]).join("?");
+    expect(deleteText).toContain("RETURNING id, news_item_id, scheduled_for, avatar_job_id");
+    const releaseText = (sqlMock.mock.calls[3][0] as string[]).join("?");
+    expect(releaseText).toContain("UPDATE avatar_jobs SET publish_state = 'ready'");
+    expect(releaseText).toContain("publish_state = 'scheduled'");
+    expect(releaseText).toContain("NOT EXISTS");
+    expect(sqlMock.mock.calls[3]).toContain("avatar-1");
+    expect(sqlMock.mock.calls[3]).toContain("ws1");
+    expect(sqlMock.mock.invocationCallOrder[2]).toBeLessThan(
+      sqlMock.mock.invocationCallOrder[3]
+    );
   });
 
   it("interleaving 1: refuses when reschedule claims row between DELETE read and claim", async () => {

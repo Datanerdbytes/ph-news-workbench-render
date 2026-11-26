@@ -154,6 +154,9 @@ const requiredTables = [
   "scheduled_posts",
   "scheduled_post_events",
   "usage_daily",
+  "tts_usage_daily",
+  "avatar_jobs",
+  "avatar_usage_daily",
   "facebook_connections",
   "facebook_pages",
   "youtube_connections",
@@ -175,6 +178,8 @@ if (missing.length) {
 const requiredColumns = [
   ["drafts", "user_id"],
   ["drafts", "workspace_id"],
+  ["scheduled_posts", "avatar_job_id"],
+  ["scheduled_posts", "publish_started_at"],
   ["feeds", "workspace_id"],
   ["news_items", "workspace_id"],
   ["facebook_connections", "workspace_id"],

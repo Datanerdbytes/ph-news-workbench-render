@@ -1,6 +1,11 @@
 import { pickMimeType } from '@/lib/reels/bake';
 import { finalizeBakedVideo } from '@/lib/reels/browser-normalize';
 import {
+  createAudioMix,
+  MAX_NARRATED_SECONDS,
+  type AudioMix,
+} from './audio-mix';
+import {
   getVideoPreset,
   planVideoEffects,
   plannedVideoFrames,
@@ -12,18 +17,17 @@ import {
 } from './presets';
 
 /**
- * Bakes video overlays into footage, in the browser, at the source aspect
+ * Bakes video overlays into footage, in the browser, at the requested aspect
  * ratio.
  *
- * The video plays through once while each frame is composited onto a canvas the
- * same shape as the source (longest side capped at 1920): cover-cropped
- * footage, any camera zoom, then every attached overlay. The canvas stream is
- * recorded together with the video's audio, and the caller finalizes the
- * recording with finalizeBakedVideo (browser-normalize.ts) before publishing.
+ * The video plays through once while each frame is composited onto a
+ * source-aspect canvas (longest side capped at 1920) or a cover-cropped 16:9
+ * canvas: footage, any camera zoom, then every attached overlay. The canvas
+ * stream is recorded together with the video's audio, and the caller finalizes
+ * the recording with finalizeBakedVideo (browser-normalize.ts) before publishing.
  */
 
 const MAX_SIDE = 1920;
-const AUDIO_START_TIMEOUT_MS = 3000;
 
 /** Output canvas size for source footage, keeping aspect and even dimensions. */
 export function outputSize(vw: number, vh: number, maxSide = MAX_SIDE) {
@@ -32,6 +36,10 @@ export function outputSize(vw: number, vh: number, maxSide = MAX_SIDE) {
   const scale = Math.min(1, maxSide / Math.max(width, height));
   const even = (value: number) => Math.max(2, Math.round(value / 2) * 2);
   return { w: even(width * scale), h: even(height * scale) };
+}
+
+export function widescreenSize(maxSide = MAX_SIDE) {
+  return outputSize(1920, 1080, maxSide);
 }
 
 /** Draw the current video frame cover-cropped into the output box. */
@@ -57,6 +65,11 @@ export type BakeVideoOptions = {
   onProgress?: (fraction: number) => void;
   /** Longest output side; defaults to 1920. */
   maxSide?: number;
+  aspectRatio?: 'source' | '16:9';
+  /** Generated speech mixed at full volume over the footage. */
+  narration?: Blob;
+  /** Original footage volume when narration is present; defaults to full. */
+  originalAudioVolume?: number;
 };
 
 /**
@@ -94,7 +107,17 @@ export function composeVideoFrame(
 export async function bakeVideoAnimation(
   options: BakeVideoOptions
 ): Promise<Blob> {
-  const { videoUrl, attachments, values, onProgress, maxSide } = options;
+  const {
+    videoUrl,
+    attachments,
+    values,
+    onProgress,
+    maxSide,
+    aspectRatio = 'source',
+    narration,
+    originalAudioVolume,
+  } = options;
+  const hasNarration = Boolean(narration);
   const usable = attachments.some((attachment) => {
     const preset = getVideoPreset(attachment.presetId);
     return (
@@ -104,11 +127,15 @@ export async function bakeVideoAnimation(
       preset.slots.includes(attachment.slot)
     );
   });
-  if (!usable) throw new Error('Unknown animation preset.');
+  if (!usable && !hasNarration) throw new Error('Unknown animation preset.');
 
   const mimeType = pickMimeType();
   if (!mimeType || typeof HTMLCanvasElement === 'undefined') {
-    throw new Error('This browser cannot record the animation.');
+    throw new Error(
+      hasNarration
+        ? 'This browser cannot record the voice-over.'
+        : 'This browser cannot record the animation.'
+    );
   }
 
   const video = document.createElement('video');
@@ -121,50 +148,41 @@ export async function bakeVideoAnimation(
     video.onerror = () => reject(new Error('Could not read the video.'));
   });
 
-  const box = outputSize(video.videoWidth, video.videoHeight, maxSide);
+  const box =
+    aspectRatio === '16:9'
+      ? widescreenSize(maxSide)
+      : outputSize(video.videoWidth, video.videoHeight, maxSide);
   const canvas = document.createElement('canvas');
   canvas.width = box.w;
   canvas.height = box.h;
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('Canvas is unavailable.');
 
-  // Route the video's audio into the recording while keeping the speakers
-  // silent (unmuted capture through a zero-gain monitor).
   const audioCtx = new AudioContext();
-  const source = audioCtx.createMediaElementSource(video);
-  const dest = audioCtx.createMediaStreamDestination();
-  source.connect(dest);
-  const monitor = audioCtx.createGain();
-  monitor.gain.value = 0;
-  source.connect(monitor);
-  monitor.connect(audioCtx.destination);
-  if (audioCtx.state === 'suspended') {
-    // A blocked context never resumes; bound the wait so the caller's
-    // original-clip fallback runs instead of hanging on the bake.
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        audioCtx.resume(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () =>
-              reject(
-                new Error('The browser blocked audio for the animation bake.')
-              ),
-            AUDIO_START_TIMEOUT_MS
-          );
-        }),
-      ]);
-    } catch (error) {
-      await audioCtx.close().catch(() => {});
-      throw error;
-    } finally {
-      clearTimeout(timer);
-    }
+  let audioMix: AudioMix;
+  try {
+    audioMix = await createAudioMix(audioCtx, {
+      video,
+      narration,
+      originalVolume: originalAudioVolume,
+    });
+  } catch (error) {
+    await audioCtx.close().catch(() => {});
+    throw error;
+  }
+  const videoDuration =
+    Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+  const renderDuration = Math.max(videoDuration, audioMix.duration);
+  if (hasNarration && renderDuration > MAX_NARRATED_SECONDS) {
+    audioMix.stop();
+    await audioCtx.close().catch(() => {});
+    throw new Error('Narrated videos are limited to 10 minutes.');
   }
 
   const stream = canvas.captureStream(30);
-  for (const track of dest.stream.getAudioTracks()) stream.addTrack(track);
+  for (const track of audioMix.destination.stream.getAudioTracks()) {
+    stream.addTrack(track);
+  }
 
   try {
     const recorder = new MediaRecorder(stream, {
@@ -194,26 +212,28 @@ export async function bakeVideoAnimation(
       // this element, so a muted play would bake a silent video. Fail loudly and
       // let the caller post the original footage instead.
       throw new Error(
-        'Playback was blocked, so the animation bake was skipped. Try posting again — the video still publishes without it.'
+        hasNarration
+          ? 'Playback was blocked, so the voice-over bake was skipped. Try posting again.'
+          : 'Playback was blocked, so the animation bake was skipped. Try posting again — the video still publishes without it.'
       );
     }
     recorder.start(250);
+    audioMix.startNarration();
 
-    const duration =
-      Number.isFinite(video.duration) && video.duration > 0
-        ? video.duration
-        : 0;
-    const effects = planVideoEffects(attachments, duration, values);
+    const effects = planVideoEffects(attachments, videoDuration, values);
+    const holdForNarration = audioMix.duration > videoDuration;
+    const renderStartedAt = performance.now();
 
     let playbackError: Error | null = null;
     try {
       await new Promise<void>((resolve, reject) => {
         const fps = 30;
         const minFrameMs = 1000 / fps;
-        const start = performance.now();
+        const start = renderStartedAt;
         let lastFrameTime = start;
         let lastProgressAt = start;
         let lastPlayhead = 0;
+        let videoEnded = false;
         let raf = 0;
         let settled = false;
         function finish(error?: Error) {
@@ -228,14 +248,20 @@ export async function bakeVideoAnimation(
           if (document.hidden) {
             finish(
               new Error(
-                'The tab was hidden, so the animation bake was stopped.'
+                hasNarration
+                  ? 'The tab was hidden, so the voice-over bake was stopped.'
+                  : 'The tab was hidden, so the animation bake was stopped.'
               )
             );
           }
         }
         const tick = () => {
           const now = performance.now();
-          const playhead = video.currentTime;
+          const playhead = videoEnded
+            ? videoDuration
+            : Math.min(video.currentTime, videoDuration || video.currentTime);
+          const elapsed = (now - renderStartedAt) / 1000;
+          const timeline = holdForNarration ? elapsed : playhead;
           if (now - lastFrameTime >= minFrameMs) {
             do {
               lastFrameTime += minFrameMs;
@@ -244,20 +270,30 @@ export async function bakeVideoAnimation(
             composeVideoFrame(
               ctx,
               effects,
-              playhead,
+              timeline,
               (zoom) => drawFootage(ctx, video, box, zoom),
               box
             );
-            if (duration) onProgress?.(Math.min(1, playhead / duration));
+            if (renderDuration) {
+              onProgress?.(Math.min(1, timeline / renderDuration));
+            }
           }
-          if (duration && playhead >= duration - 0.05) {
+          if (!videoEnded && videoDuration && playhead >= videoDuration - 0.05) {
+            videoEnded = true;
+          }
+          if (holdForNarration) {
+            if (elapsed >= audioMix.duration - 0.02) {
+              finish();
+              return;
+            }
+          } else if (videoDuration && playhead >= videoDuration - 0.05) {
             finish();
             return;
           }
-          if (playhead > lastPlayhead + 0.01) {
+          if (!videoEnded && playhead > lastPlayhead + 0.01) {
             lastPlayhead = playhead;
             lastProgressAt = now;
-          } else if (now - lastProgressAt > 15_000) {
+          } else if (!videoEnded && now - lastProgressAt > 15_000) {
             finish(new Error('The video stopped playing during the bake.'));
             return;
           }
@@ -277,7 +313,10 @@ export async function bakeVideoAnimation(
         finished.catch((error: unknown) => {
           finish(error instanceof Error ? error : new Error('Recording failed.'));
         });
-        video.onended = () => finish();
+        video.onended = () => {
+          videoEnded = true;
+          if (!holdForNarration) finish();
+        };
         video.onerror = () =>
           finish(new Error('The video stopped playing during the bake.'));
       });
@@ -301,6 +340,7 @@ export async function bakeVideoAnimation(
   } finally {
     video.pause();
     stream.getTracks().forEach((track) => track.stop());
+    audioMix.stop();
     await audioCtx.close().catch(() => {});
     video.src = '';
   }
@@ -315,5 +355,10 @@ export async function bakeAndFinalizeVideo(
   options: BakeVideoOptions
 ): Promise<File> {
   const baked = await bakeVideoAnimation(options);
-  return finalizeBakedVideo(baked, options.onProgress);
+  const aspectRatio = options.aspectRatio ?? 'source';
+  return finalizeBakedVideo(baked, options.onProgress, {
+    preserveAspect: aspectRatio === 'source' && Boolean(options.narration),
+    aspectRatio: aspectRatio === '16:9' ? '16:9' : undefined,
+    name: options.narration ? 'narrated-video.mp4' : undefined,
+  });
 }

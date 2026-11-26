@@ -1,0 +1,228 @@
+import { sql } from "@/lib/db";
+import {
+  getTtsVoice,
+  MAX_TTS_SPEED,
+  MIN_TTS_SPEED,
+  type TtsVoiceId,
+} from "./voices";
+
+const TIMEOUT_MS = 60_000;
+const OUTPUT_FORMAT = "audio-48khz-192kbitrate-mono-mp3";
+
+export class TtsError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "TtsError";
+  }
+}
+
+export type TtsSynthesisResult = {
+  audio: ArrayBuffer;
+  voiceId: TtsVoiceId;
+  characters: number;
+};
+
+function positiveInteger(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+function speechEndpoint(): { key: string; url: string } {
+  const key = process.env.AZURE_SPEECH_KEY?.trim();
+  const region = process.env.AZURE_SPEECH_REGION?.trim();
+  if (!key || !region) {
+    throw new TtsError(
+      503,
+      "not_configured",
+      "Voice-over is not configured. Add AZURE_SPEECH_KEY and AZURE_SPEECH_REGION.",
+    );
+  }
+  if (!/^[a-z0-9-]+$/i.test(region)) {
+    throw new TtsError(503, "not_configured", "AZURE_SPEECH_REGION is invalid.");
+  }
+
+  const configured = process.env.AZURE_SPEECH_ENDPOINT?.trim();
+  const base = configured || `https://${region}.tts.speech.microsoft.com`;
+  let parsed: URL;
+  try {
+    parsed = new URL(base);
+  } catch {
+    throw new TtsError(503, "not_configured", "AZURE_SPEECH_ENDPOINT is invalid.");
+  }
+  if (parsed.protocol !== "https:") {
+    throw new TtsError(
+      503,
+      "not_configured",
+      "AZURE_SPEECH_ENDPOINT must use HTTPS.",
+    );
+  }
+  return { key, url: `${base.replace(/\/+$/, "")}/cognitiveservices/v1` };
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+export function buildTtsSsml(
+  text: string,
+  voiceId: TtsVoiceId,
+  speed: number,
+): string {
+  const voice = getTtsVoice(voiceId);
+  const rate = Math.round((speed - 1) * 100);
+  const rateValue = `${rate >= 0 ? "+" : ""}${rate}%`;
+  return `<speak version="1.0" xml:lang="${voice.locale}"><voice name="${voice.id}"><prosody rate="${rateValue}">${escapeXml(text)}</prosody></voice></speak>`;
+}
+
+async function reserveQuota(
+  workspaceId: string,
+  characters: number,
+): Promise<void> {
+  const requestCap = positiveInteger("TTS_DAILY_REQUEST_CAP", 25);
+  const characterCap = positiveInteger("TTS_DAILY_CHARACTER_CAP", 100_000);
+  if (characters > characterCap) {
+    throw new TtsError(
+      429,
+      "quota_exceeded",
+      "This voice-over exceeds the daily character allowance. Try a shorter draft.",
+    );
+  }
+
+  const day = new Date().toISOString().slice(0, 10);
+  const rows = (await sql`
+    INSERT INTO tts_usage_daily (day, workspace_id, requests, characters)
+    VALUES (${day}, ${workspaceId}, 1, ${characters})
+    ON CONFLICT (day, workspace_id) DO UPDATE
+    SET requests = tts_usage_daily.requests + 1,
+        characters = tts_usage_daily.characters + ${characters}
+    WHERE tts_usage_daily.requests < ${requestCap}
+      AND tts_usage_daily.characters + ${characters} <= ${characterCap}
+    RETURNING requests, characters`) as unknown as Array<{
+    requests: number;
+    characters: number;
+  }>;
+
+  if (!rows.length) {
+    throw new TtsError(
+      429,
+      "quota_exceeded",
+      "The daily voice-over allowance is used up. Try again tomorrow.",
+    );
+  }
+}
+
+function providerError(status: number): TtsError {
+  if (status === 429) {
+    return new TtsError(
+      429,
+      "rate_limited",
+      "The speech service is busy. Please try again shortly.",
+    );
+  }
+  if (status === 401 || status === 403) {
+    return new TtsError(
+      503,
+      "not_configured",
+      "Voice-over credentials were rejected. Check the Azure Speech configuration.",
+    );
+  }
+  if (status === 400) {
+    return new TtsError(
+      502,
+      "speech_rejected",
+      "The speech service could not read this draft. Edit it and try again.",
+    );
+  }
+  return new TtsError(
+    502,
+    "provider_error",
+    "The speech service is unavailable. Please try again shortly.",
+  );
+}
+
+export async function synthesizeSpeech(input: {
+  text: string;
+  voiceId: TtsVoiceId;
+  speed: number;
+  workspaceId: string;
+  correlationId: string;
+}): Promise<TtsSynthesisResult> {
+  if (
+    !Number.isFinite(input.speed) ||
+    input.speed < MIN_TTS_SPEED ||
+    input.speed > MAX_TTS_SPEED
+  ) {
+    throw new TtsError(400, "invalid_speed", "The speaking speed is invalid.");
+  }
+
+  const { key, url } = speechEndpoint();
+  const ssml = buildTtsSsml(input.text, input.voiceId, input.speed);
+  await reserveQuota(input.workspaceId, input.text.length);
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/ssml+xml",
+        "Ocp-Apim-Subscription-Key": key,
+        "X-Microsoft-OutputFormat": OUTPUT_FORMAT,
+        "User-Agent": "PH-News-Workbench/1.0",
+      },
+      body: ssml,
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+  } catch (error) {
+    const timedOut = error instanceof Error && error.name === "TimeoutError";
+    console.warn(
+      JSON.stringify({
+        route: "tts",
+        event: "provider_request_failed",
+        correlationId: input.correlationId,
+        timedOut,
+      }),
+    );
+    throw new TtsError(
+      timedOut ? 504 : 502,
+      timedOut ? "timeout" : "provider_error",
+      timedOut
+        ? "The speech service took too long. Please try again."
+        : "The speech service could not be reached. Please try again.",
+    );
+  }
+
+  if (!response.ok) {
+    console.warn(
+      JSON.stringify({
+        route: "tts",
+        event: "provider_rejected",
+        correlationId: input.correlationId,
+        status: response.status,
+      }),
+    );
+    throw providerError(response.status);
+  }
+
+  const audio = await response.arrayBuffer();
+  if (audio.byteLength === 0) {
+    throw new TtsError(
+      502,
+      "empty_audio",
+      "The speech service returned no audio. Please try again.",
+    );
+  }
+  return {
+    audio,
+    voiceId: input.voiceId,
+    characters: input.text.length,
+  };
+}

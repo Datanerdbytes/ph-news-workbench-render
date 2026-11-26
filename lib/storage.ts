@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import {
@@ -12,7 +13,7 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { del, head, list } from '@vercel/blob';
+import { del, head, list, put } from '@vercel/blob';
 import { deleteFiles, uploadFile } from '@huggingface/hub';
 
 /**
@@ -422,6 +423,69 @@ export async function presignStagedUpload(
   });
   const uploadUrl = await getSignedUrl(s3(), command, { expiresIn: 3600 });
   return { uploadUrl, publicUrl: `${s3PublicBase()}/${key}` };
+}
+
+export async function stageServerFile(
+  pathname: string,
+  filePath: string,
+  contentType: string,
+  maxBytes = 1024 * 1024 * 1024,
+  abortSignal?: AbortSignal,
+): Promise<{ url: string; pathname: string; contentType: string }> {
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(pathname) ||
+    pathname.includes('..') ||
+    pathname.includes('//')
+  ) {
+    throw new Error('The staged upload path is invalid.');
+  }
+  const info = await stat(filePath);
+  if (!info.isFile() || info.size === 0 || info.size > maxBytes) {
+    throw new Error('The staged upload has an invalid file size.');
+  }
+
+  const extension = path.posix.extname(pathname);
+  const base = extension ? pathname.slice(0, -extension.length) : pathname;
+  const key = `${base}-${randomUUID().slice(0, 8)}${extension}`;
+  const driver = getStorageDriver();
+
+  if (driver === 'blob') {
+    const blob = await put(key, createReadStream(filePath), {
+      access: 'public',
+      contentType,
+      addRandomSuffix: false,
+      multipart: true,
+      abortSignal,
+    });
+    return { url: blob.url, pathname: blob.pathname, contentType };
+  }
+  if (driver === 's3') {
+    requireS3Config();
+    await s3().send(
+      new PutObjectCommand({
+        Bucket: s3Bucket(),
+        Key: key,
+        Body: createReadStream(filePath),
+        ContentType: contentType,
+        ContentLength: info.size,
+        ...(abortSignal ? { abortSignal } : {}),
+      }),
+    );
+    return { url: `${s3PublicBase()}/${key}`, pathname: key, contentType };
+  }
+
+  const token = requireHfConfig();
+  await uploadFile({
+    repo: { type: 'dataset', name: hfRepo() },
+    file: { path: key, content: pathToFileURL(filePath) },
+    credentials: { accessToken: token },
+    ...(abortSignal ? { abortSignal } : {}),
+  });
+  return {
+    url: `${HF_RESOLVE_PREFIX}${hfRepo()}/resolve/main/${key}`,
+    pathname: key,
+    contentType,
+  };
 }
 
 /**

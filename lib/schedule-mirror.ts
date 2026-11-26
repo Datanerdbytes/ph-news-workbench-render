@@ -89,6 +89,7 @@ export async function recordNativeSchedule({
   platform = 'facebook',
   newsItemId = null,
   draftId = null,
+  avatarJobId = null,
 }: {
   workspaceId: string;
   userId: string;
@@ -100,7 +101,8 @@ export async function recordNativeSchedule({
   platform?: NativeSchedulePlatform;
   newsItemId?: number | null;
   draftId?: number | null;
-}): Promise<void> {
+  avatarJobId?: string | null;
+}): Promise<number | null> {
   const success = results.find((result) => result.ok);
   const scheduled =
     scheduledFor !== null && scheduledFor.getTime() > Date.now() + IMMEDIATE_PUBLISH_WINDOW_MS;
@@ -116,18 +118,21 @@ export async function recordNativeSchedule({
       INSERT INTO scheduled_posts
         (workspace_id, news_item_id, draft_id, text, scheduled_for, status,
          kind, source, facebook_post_id, facebook_post_ids, page_id,
-         error_message, created_by)
+         error_message, created_by, avatar_job_id)
       VALUES
         (${workspaceId}, ${newsItemId}, ${draftId}, ${text || '(no caption)'},
          ${(scheduledFor ?? new Date()).toISOString()}, ${status},
          ${kind}, ${platform}, ${success?.id ?? null},
          ${JSON.stringify(results)}::jsonb, ${success?.page.id ?? null},
-         ${errorMessage}, ${userId})
+         ${errorMessage}, ${userId}, ${avatarJobId})
       RETURNING id`) as unknown as { id: number }[];
+
+    const scheduledPostId = rows[0]?.id;
+    if (scheduledPostId === undefined) return null;
 
     await recordScheduleEvent({
       workspaceId,
-      scheduledPostId: rows[0].id,
+      scheduledPostId,
       newsItemId,
       event: status === 'failed' ? 'failed' : status === 'scheduled' ? 'scheduled' : 'published',
       source: 'composer',
@@ -140,8 +145,10 @@ export async function recordNativeSchedule({
         scheduledFor: scheduledFor?.toISOString() ?? null,
         pages: results.length,
         published: results.filter((result) => result.ok).length,
+        ...(avatarJobId ? { avatarJobId } : {}),
       },
     });
+    return scheduledPostId;
   } catch (error) {
     console.error(
       JSON.stringify({
@@ -151,5 +158,6 @@ export async function recordNativeSchedule({
         error: error instanceof Error ? error.message : String(error),
       })
     );
+    return null;
   }
 }

@@ -129,7 +129,8 @@ export async function publishPageVideo({
     finishFields,
     accessToken,
     thumbnail ? [{ field: 'thumb', ...thumbnail }] : [],
-    CHUNK_TIMEOUT_MS
+    CHUNK_TIMEOUT_MS,
+    true
   );
 
   let permalink: string | null = null;

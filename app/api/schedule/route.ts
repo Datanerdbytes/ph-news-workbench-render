@@ -60,6 +60,26 @@ export async function POST(request: Request) {
   // video feed post, so video wins and imageUrls are ignored.
   const videoUrl =
     typeof body?.videoUrl === "string" && body.videoUrl ? body.videoUrl : null;
+  const avatarJobId =
+    typeof body?.avatarJobId === "string" && body.avatarJobId.trim()
+      ? body.avatarJobId.trim()
+      : null;
+  if (
+    body?.avatarJobId !== undefined &&
+    body.avatarJobId !== null &&
+    !avatarJobId
+  ) {
+    return NextResponse.json(
+      { error: "Choose a valid avatar video." },
+      { status: 400 }
+    );
+  }
+  if (avatarJobId && !videoUrl) {
+    return NextResponse.json(
+      { error: "An avatar video URL is required." },
+      { status: 400 }
+    );
+  }
   const rawImages = Array.isArray(body?.imageUrls)
     ? body.imageUrls
     : typeof body?.imageUrl === "string"
@@ -123,7 +143,30 @@ export async function POST(request: Request) {
     scheduledPageId = requestedPageId;
   }
 
-  const rows = (await sql`
+  const rows = (await (avatarJobId
+    ? sql`
+        WITH claimed_avatar AS (
+          UPDATE avatar_jobs
+          SET publish_state = 'scheduled', updated_at = now()
+          WHERE id = ${avatarJobId} AND workspace_id = ${access.workspace.id}
+            AND status = 'completed' AND publish_state = 'ready'
+            AND blob_url = ${videoUrl}
+          RETURNING id, blob_url
+        ), inserted AS (
+          INSERT INTO scheduled_posts
+            (workspace_id, news_item_id, draft_id, text, image_url, image_urls,
+             scheduled_for, kind, page_id, created_by, avatar_job_id)
+          SELECT
+            ${access.workspace.id}, ${verifiedNewsItemId}, ${verifiedDraftId},
+            ${text}, claimed_avatar.blob_url,
+            ${imageUrls.length ? JSON.stringify(imageUrls) : null}::jsonb,
+            ${scheduledFor.toISOString()}, ${kind}, ${scheduledPageId},
+            ${access.user.id}, claimed_avatar.id
+          FROM claimed_avatar
+          RETURNING id, news_item_id, scheduled_for, status
+        )
+        SELECT * FROM inserted`
+    : sql`
     INSERT INTO scheduled_posts
       (workspace_id, news_item_id, draft_id, text, image_url, image_urls, scheduled_for, kind, page_id, created_by)
     VALUES
@@ -134,7 +177,7 @@ export async function POST(request: Request) {
        ${videoUrl ?? imageUrls[0] ?? null},
        ${imageUrls.length ? JSON.stringify(imageUrls) : null}::jsonb,
        ${scheduledFor.toISOString()}, ${kind}, ${scheduledPageId}, ${access.user.id})
-    RETURNING id, news_item_id, scheduled_for, status`) as unknown as {
+    RETURNING id, news_item_id, scheduled_for, status`)) as unknown as {
     id: number;
     news_item_id: number | null;
     scheduled_for: string;
@@ -142,6 +185,15 @@ export async function POST(request: Request) {
   }[];
 
   const created = rows[0];
+  if (!created) {
+    return NextResponse.json(
+      {
+        error: "This avatar video is not ready or has already been used.",
+        code: "avatar_unavailable",
+      },
+      { status: 409 }
+    );
+  }
 
   await recordScheduleEvent({
     workspaceId: access.workspace.id,
@@ -153,6 +205,7 @@ export async function POST(request: Request) {
     metadata: {
       scheduledFor: scheduledFor.toISOString(),
       imageCount: imageUrls.length,
+      ...(avatarJobId ? { avatarJobId } : {}),
     },
   });
 

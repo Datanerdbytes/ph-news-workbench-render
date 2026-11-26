@@ -16,6 +16,7 @@ vi.mock("@/lib/session", () => ({
 }));
 vi.mock("@/lib/schedule-events", () => ({ recordScheduleEvent: vi.fn() }));
 
+import { recordScheduleEvent } from "@/lib/schedule-events";
 import { POST } from "./route";
 
 const sqlMockTyped = sqlMock as unknown as Mock;
@@ -150,5 +151,67 @@ describe("POST /api/schedule", () => {
     expect(insert![5]).toBe("https://store.example/video.mp4");
     expect(insert![6]).toBeNull();
     expect(insert![8]).toBe("video");
+  });
+
+  it("atomically claims an avatar and inserts its database URL in one statement", async () => {
+    useDb({});
+    const scheduledFor = new Date(Date.now() + 3_600_000).toISOString();
+
+    const res = await post({
+      text: "hello",
+      scheduledFor,
+      avatarJobId: "avatar-1",
+      videoUrl: "https://store.example/avatar.mp4",
+    });
+
+    expect(res.status).toBe(201);
+    expect(sqlMockTyped).toHaveBeenCalledTimes(1);
+    const claimInsert = sqlMockTyped.mock.calls[0];
+    const query = queryText(claimInsert);
+    expect(query).toContain("WITH claimed_avatar AS");
+    expect(query).toContain("UPDATE avatar_jobs");
+    expect(query).toContain("publish_state = 'scheduled'");
+    expect(query).toContain("status = 'completed' AND publish_state = 'ready'");
+    expect(query).toContain("blob_url =");
+    expect(query).toContain("INSERT INTO scheduled_posts");
+    expect(query).toContain("claimed_avatar.blob_url");
+    expect(query).toContain("claimed_avatar.id");
+    expect(claimInsert[1]).toBe("avatar-1");
+    expect(claimInsert[2]).toBe("ws1");
+    expect(claimInsert[3]).toBe("https://store.example/avatar.mp4");
+    expect(claimInsert[8]).toBeNull();
+    expect(claimInsert[9]).toBe(scheduledFor);
+    expect(recordScheduleEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "scheduled",
+        metadata: expect.objectContaining({ avatarJobId: "avatar-1" }),
+      })
+    );
+  });
+
+  it("returns 409 without an event when the atomic avatar claim inserts no row", async () => {
+    useDb({ insert: [] });
+
+    const res = await post({
+      text: "hello",
+      scheduledFor: new Date(Date.now() + 3_600_000).toISOString(),
+      avatarJobId: "avatar-stale",
+      videoUrl: "https://store.example/avatar.mp4",
+    });
+
+    expect(res.status).toBe(409);
+    expect(sqlMockTyped).toHaveBeenCalledTimes(1);
+    expect(recordScheduleEvent).not.toHaveBeenCalled();
+  });
+
+  it("requires a video URL before claiming an avatar", async () => {
+    const res = await post({
+      text: "hello",
+      scheduledFor: new Date(Date.now() + 3_600_000).toISOString(),
+      avatarJobId: "avatar-1",
+    });
+
+    expect(res.status).toBe(400);
+    expect(sqlMockTyped).not.toHaveBeenCalled();
   });
 });

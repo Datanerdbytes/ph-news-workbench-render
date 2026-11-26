@@ -159,6 +159,24 @@ describe("publishInstagramImagePost", () => {
     caption: "Hello",
   };
 
+  it("persists the publish marker immediately before media_publish", async () => {
+    (createImageMediaContainer as unknown as Mock).mockResolvedValue("c-1");
+    (getContainerStatus as unknown as Mock).mockResolvedValue({
+      statusCode: "FINISHED",
+      statusMessage: null,
+    });
+    (publishMediaContainer as unknown as Mock).mockResolvedValue("m-9");
+    (fetchMediaPermalink as unknown as Mock).mockResolvedValue(null);
+    const beforePublish = vi.fn().mockResolvedValue(undefined);
+
+    await publishInstagramImagePost({ ...base, beforePublish });
+
+    expect(beforePublish).toHaveBeenCalledTimes(1);
+    expect(beforePublish.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(publishMediaContainer).mock.invocationCallOrder[0]
+    );
+  });
+
   it("publishes a finished container and returns the permalink", async () => {
     (createImageMediaContainer as unknown as Mock).mockResolvedValue("c-1");
     (getContainerStatus as unknown as Mock).mockResolvedValue({

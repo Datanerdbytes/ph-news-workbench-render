@@ -14,6 +14,7 @@
     "pretest:e2e:local": "NEON_LOCAL_NEXT_MODE=development NODE_OPTIONS=\"--import ./scripts/neon-local.mjs\" node scripts/require-local-db.mjs",
     "test:e2e:local": "NEON_LOCAL_NEXT_MODE=development NODE_OPTIONS=\"--import ./scripts/neon-local.mjs\" playwright test",
     "worker": "NODE_OPTIONS=\"--import ./scripts/neon-local.mjs\" node --env-file=.env.local download-worker.ts",
+    "worker:avatar": "NODE_OPTIONS=\"--import ./scripts/neon-local.mjs\" tsx --env-file=.env.local avatar-worker.ts",
     "worker:install": "bash scripts/install-download-worker.sh",
     "media-runner": "NODE_OPTIONS=\"--import ./scripts/neon-local.mjs\" tsx --env-file=.env.local media-runner.ts",
     "scheduler:sweep": "NODE_OPTIONS=\"--import ./scripts/neon-local.mjs\" node --env-file=.env.local scripts/scheduler-sweep.mjs",

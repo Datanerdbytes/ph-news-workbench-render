@@ -101,6 +101,7 @@ export async function publishInstagramImagePost({
   caption,
   deadlineMs = 90_000,
   pollMs = 2000,
+  beforePublish,
 }: {
   account: InstagramAccount;
   accessToken: string;
@@ -109,6 +110,7 @@ export async function publishInstagramImagePost({
   /** Injected only by tests to keep them off real wait loops. */
   deadlineMs?: number;
   pollMs?: number;
+  beforePublish?: () => Promise<void>;
 }): Promise<InstagramPublishResult> {
   const containerId = await createImageMediaContainer({
     igUserId: account.id,
@@ -127,6 +129,7 @@ export async function publishInstagramImagePost({
     lastMessage = status.statusMessage;
 
     if (status.statusCode === 'FINISHED') {
+      await beforePublish?.();
       const mediaId = await publishMediaContainer({
         igUserId: account.id,
         accessToken,

@@ -35,14 +35,16 @@ describe("recordNativeSchedule", () => {
   it("records a scheduled publish beyond the immediate window", async () => {
     const scheduledFor = new Date(Date.now() + 60 * 60_000);
 
-    await recordNativeSchedule({
-      workspaceId: "ws1",
-      userId: "u1",
-      kind: "reel",
-      text: "caption",
-      scheduledFor,
-      results: [okResult()],
-    });
+    await expect(
+      recordNativeSchedule({
+        workspaceId: "ws1",
+        userId: "u1",
+        kind: "reel",
+        text: "caption",
+        scheduledFor,
+        results: [okResult()],
+      })
+    ).resolves.toBe(77);
 
     expect(insertValues()).toEqual([
       "ws1",
@@ -58,6 +60,7 @@ describe("recordNativeSchedule", () => {
       "p1",
       null,
       "u1",
+      null, // avatarJobId
     ]);
     expect(events()[0]).toMatchObject({
       scheduledPostId: 77,
@@ -265,6 +268,23 @@ describe("recordNativeSchedule", () => {
     });
   });
 
+  it("stores the avatar ownership link and returns the durable row id", async () => {
+    await expect(
+      recordNativeSchedule({
+        workspaceId: "ws1",
+        userId: "u1",
+        kind: "video",
+        text: "Avatar update",
+        scheduledFor: null,
+        results: [okResult("fb_avatar")],
+        avatarJobId: "avatar-1",
+      })
+    ).resolves.toBe(77);
+
+    expect(insertValues()[13]).toBe("avatar-1");
+    expect(events()[0].metadata).toMatchObject({ avatarJobId: "avatar-1" });
+  });
+
   it("never lets a recording failure fail the publish", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     sqlMock.mockRejectedValue(new Error("connection refused"));
@@ -278,7 +298,7 @@ describe("recordNativeSchedule", () => {
         scheduledFor: null,
         results: [okResult()],
       })
-    ).resolves.toBeUndefined();
+    ).resolves.toBeNull();
 
     expect(errorSpy.mock.calls[0][0]).toContain("schedule-mirror");
     expect(recordScheduleEvent).not.toHaveBeenCalled();

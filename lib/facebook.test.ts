@@ -9,6 +9,7 @@ import {
   facebookGraphVersion,
   facebookRedirectUri,
   graphDelete,
+  graphPostForm,
   graphRequest,
   fetchInstagramOverview,
   fetchPageTopPosts,
@@ -17,6 +18,7 @@ import {
   isFacebookStillScheduled,
   isFacebookVideoPublished,
   parseImages,
+  publishPagePost,
   redactTokens,
   rescheduleFacebookScheduledPost,
   selectPage,
@@ -236,6 +238,56 @@ describe("graphRequest", () => {
     await expect(graphRequest("me", {}, "tok")).rejects.toThrow(
       "Facebook returned an empty response."
     );
+  });
+});
+
+describe("graphPostForm", () => {
+  it("marks only publish requests as ambiguous on network failures", async () => {
+    fetchMock().mockRejectedValue(new Error("ECONNRESET"));
+
+    await expect(graphPostForm("pg/feed", {}, "tok")).rejects.toMatchObject({
+      ambiguous: false,
+    });
+    await expect(
+      graphPostForm("pg/feed", {}, "tok", [], undefined, true)
+    ).rejects.toMatchObject({ ambiguous: true });
+  });
+
+  it("keeps explicit Graph refusals definite", async () => {
+    fetchMock().mockResolvedValue(graphError(190, "Session expired"));
+
+    await expect(
+      graphPostForm("pg/feed", {}, "tok", [], undefined, true)
+    ).rejects.toMatchObject({ code: 190, ambiguous: false });
+  });
+});
+
+describe("publishPagePost", () => {
+  it("persists the publish marker before the final Graph request", async () => {
+    const mock = fetchMock().mockResolvedValue(jsonResponse({ id: "post_1" }));
+    const beforePublish = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      publishPagePost({
+        pageId: "pg1",
+        accessToken: "tok",
+        message: "hello",
+        beforePublish,
+      })
+    ).resolves.toMatchObject({ id: "post_1" });
+
+    expect(beforePublish).toHaveBeenCalledTimes(1);
+    expect(beforePublish.mock.invocationCallOrder[0]).toBeLessThan(
+      mock.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("treats a successful response without a post id as ambiguous", async () => {
+    fetchMock().mockResolvedValue(jsonResponse({}));
+
+    await expect(
+      publishPagePost({ pageId: "pg1", accessToken: "tok", message: "hello" })
+    ).rejects.toMatchObject({ ambiguous: true });
   });
 });
 

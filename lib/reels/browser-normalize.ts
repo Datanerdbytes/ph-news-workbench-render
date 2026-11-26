@@ -2,6 +2,11 @@ import { loadFfmpegLibs } from "./ffmpeg-loader";
 
 const CORE_BASE = "https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm";
 
+export type BrowserTranscodeOptions = {
+  preserveAspect?: boolean;
+  aspectRatio?: "16:9" | "9:16";
+};
+
 /**
  * Mirror of the server transcode (H.264/AAC 1080×1920 faststart) with the same
  * Facebook-safe audio/video spec: constant frame rate, stereo AAC at 48 kHz,
@@ -10,13 +15,18 @@ const CORE_BASE = "https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm";
  */
 export function buildBrowserTranscodeArgs(
   inputName: string,
-  outputName: string
+  outputName: string,
+  options: BrowserTranscodeOptions = {}
 ): string[] {
   return [
     "-i",
     inputName,
     "-vf",
-    "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+    options.preserveAspect
+      ? "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+      : options.aspectRatio === "16:9"
+        ? "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080"
+        : "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
     "-c:v",
     "libx264",
     "-crf",
@@ -169,13 +179,18 @@ export async function transcodeInBrowser(
  */
 export async function finalizeBakedVideo(
   blob: Blob,
-  onProgress?: (ratio: number) => void
+  onProgress?: (ratio: number) => void,
+  options: BrowserTranscodeOptions & { name?: string } = {}
 ): Promise<File> {
   const isMp4 = blob.type.includes("mp4");
+  const name = options.name ?? (isMp4 ? "baked-reel.mp4" : "baked-reel.webm");
   return runFfmpegInBrowser(
     blob,
-    isMp4 ? "baked-reel.mp4" : "baked-reel.webm",
-    isMp4 ? buildBakeRemuxArgs : buildBrowserTranscodeArgs,
+    name,
+    isMp4
+      ? buildBakeRemuxArgs
+      : (inputName, outputName) =>
+          buildBrowserTranscodeArgs(inputName, outputName, options),
     onProgress
   );
 }
