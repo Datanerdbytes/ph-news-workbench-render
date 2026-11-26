@@ -30,6 +30,7 @@ import {
   assertAvatarCompositeUrl,
   isAvatarCompositeUrl,
 } from '@/lib/avatar/media';
+import { MEDIA_REJECTED_BEFORE_GRAPH } from '@/lib/avatar/publish-cleanup';
 
 export const dynamic = 'force-dynamic';
 
@@ -220,7 +221,10 @@ export async function POST(request: Request) {
         if (!type.includes('video/mp4') && !type.includes('video/quicktime')) {
           await releasePreGraphAvatar();
           return NextResponse.json(
-            { error: 'Attach an MP4 or MOV video.' },
+            {
+              error: 'Attach an MP4 or MOV video.',
+              code: MEDIA_REJECTED_BEFORE_GRAPH,
+            },
             { status: 400 }
           );
         }
@@ -232,6 +236,7 @@ export async function POST(request: Request) {
           return NextResponse.json(
             {
               error: `Facebook videos must be 45 minutes or shorter. This video is ${Math.round(duration / 60)} minutes.`,
+              code: MEDIA_REJECTED_BEFORE_GRAPH,
             },
             { status: 400 }
           );
@@ -239,7 +244,10 @@ export async function POST(request: Request) {
         if (claimedAvatarId && downloaded.upload.size > MAX_VIDEO_BYTES) {
           await releasePreGraphAvatar();
           return NextResponse.json(
-            { error: 'Videos must be 1 GB or smaller for the chunked uploader.' },
+            {
+              error: 'Videos must be 1 GB or smaller for the chunked uploader.',
+              code: MEDIA_REJECTED_BEFORE_GRAPH,
+            },
             { status: 400 }
           );
         }

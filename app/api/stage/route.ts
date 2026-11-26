@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireUser, unauthorized } from '@/lib/session';
 import {
+  getManagedStoragePublicOrigin,
   getStorageDriver,
   presignStagedUpload,
   stageFileToRepo,
@@ -8,6 +9,7 @@ import {
 } from '@/lib/storage';
 
 export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 // WebM joins the video list because browser-baked reels record to it — the
@@ -17,6 +19,23 @@ const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 // Aligned with the chunked Video API's 45-minute / 1.75 GB envelope the
 // publish route enforces (1 GB own cap).
 const VIDEO_MAX_BYTES = 1024 * 1024 * 1024;
+
+export async function GET(request: Request): Promise<NextResponse> {
+  const user = await requireUser(request);
+  if (!user) return unauthorized();
+
+  try {
+    return NextResponse.json(
+      { publicOrigin: getManagedStoragePublicOrigin() },
+      { headers: { 'Cache-Control': 'no-store' } }
+    );
+  } catch {
+    return NextResponse.json(
+      { error: 'Storage is misconfigured.' },
+      { status: 500, headers: { 'Cache-Control': 'no-store' } }
+    );
+  }
+}
 
 /**
  * Staging ingest for the s3 and hf drivers (the blob driver stages straight

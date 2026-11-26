@@ -363,8 +363,12 @@ describe("POST /api/publish", () => {
     );
 
     expect(response.status).toBe(400);
+    expect(await response.json()).toEqual(
+      expect.objectContaining({ code: "media_rejected_before_graph" }),
+    );
     expect(releaseMock).toHaveBeenCalledWith("avatar-1", "ws_1");
     expect(videoMock).not.toHaveBeenCalled();
+    expect(deleteMock).not.toHaveBeenCalled();
   });
 
   it("releases the avatar claim on an early duration validation return", async () => {
@@ -380,8 +384,12 @@ describe("POST /api/publish", () => {
     );
 
     expect(response.status).toBe(400);
+    expect(await response.json()).toEqual(
+      expect.objectContaining({ code: "media_rejected_before_graph" }),
+    );
     expect(releaseMock).toHaveBeenCalledWith("avatar-1", "ws_1");
     expect(videoMock).not.toHaveBeenCalled();
+    expect(deleteMock).not.toHaveBeenCalled();
   });
 
   it("releases the avatar claim on an early upload-size validation return", async () => {
@@ -400,8 +408,12 @@ describe("POST /api/publish", () => {
     );
 
     expect(response.status).toBe(400);
+    expect(await response.json()).toEqual(
+      expect.objectContaining({ code: "media_rejected_before_graph" }),
+    );
     expect(releaseMock).toHaveBeenCalledWith("avatar-1", "ws_1");
     expect(videoMock).not.toHaveBeenCalled();
+    expect(deleteMock).not.toHaveBeenCalled();
   });
 
   it("retains the avatar claim when Graph may already have accepted the publish", async () => {

@@ -14,12 +14,77 @@ export type LoadedAvatarVideo = {
   release: () => void;
 };
 
-function allowedAvatarUrl(url: URL): boolean {
+export type PreparedAvatarVideoSource = {
+  url: string;
+  owned: boolean;
+};
+
+let managedS3Origin: string | null | undefined;
+let managedS3OriginRequest: Promise<string | null> | null = null;
+const avatarBlobRequests = new Map<string, Promise<Blob>>();
+
+function normalizePublicOrigin(value: unknown): string | null {
+  if (typeof value !== "string" || !value) return null;
+  try {
+    const url = new URL(value);
+    if (
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      (url.protocol !== "https:" && url.protocol !== "http:")
+    ) {
+      return null;
+    }
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+async function getManagedS3Origin(): Promise<string | null> {
+  if (process.env.NEXT_PUBLIC_STORAGE_DRIVER?.trim() !== "s3") return null;
+  if (managedS3Origin !== undefined) return managedS3Origin;
+  if (!managedS3OriginRequest) {
+    managedS3OriginRequest = (async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(
+        () => controller.abort(),
+        AVATAR_LOAD_TIMEOUT_MS,
+      );
+      try {
+        const response = await fetch("/api/stage", {
+          credentials: "same-origin",
+          cache: "no-store",
+          redirect: "error",
+          signal: controller.signal,
+        });
+        if (!response.ok) return null;
+        const data = (await response.json().catch(() => null)) as {
+          publicOrigin?: unknown;
+        } | null;
+        return normalizePublicOrigin(data?.publicOrigin);
+      } catch {
+        return null;
+      } finally {
+        clearTimeout(timeout);
+      }
+    })().finally(() => {
+      managedS3OriginRequest = null;
+    });
+  }
+  const origin = await managedS3OriginRequest;
+  if (origin) managedS3Origin = origin;
+  return origin;
+}
+
+function allowedAvatarUrl(url: URL, s3Origin: string | null): boolean {
   if (url.username || url.password) return false;
   if (url.protocol === "blob:") return Boolean(url.pathname);
   if (url.origin === window.location.origin) {
     return url.protocol === "https:" || url.protocol === "http:";
   }
+  if (s3Origin && url.origin === s3Origin) return true;
   if (url.protocol !== "https:") return false;
   const host = url.hostname.toLowerCase();
   return (
@@ -68,74 +133,112 @@ async function readAvatarBlob(response: Response): Promise<Blob> {
   });
 }
 
-async function localAvatarSource(
+async function fetchAvatarBlob(
+  source: URL,
+  s3Origin: string | null,
+): Promise<Blob> {
+  const key = source.href;
+  const existing = avatarBlobRequests.get(key);
+  if (existing) return existing;
+
+  const request = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      AVATAR_LOAD_TIMEOUT_MS,
+    );
+    try {
+      let current = new URL(source.href);
+      let response!: Response;
+      for (
+        let redirects = 0;
+        redirects <= MAX_AVATAR_REDIRECTS;
+        redirects += 1
+      ) {
+        response = await fetch(current, {
+          credentials: "omit",
+          redirect: "manual",
+          signal: controller.signal,
+        });
+        if (response.type === "opaqueredirect") {
+          throw new Error("The avatar video redirect could not be verified.");
+        }
+        if (response.status < 300 || response.status >= 400) break;
+        const location = response.headers.get("location");
+        if (!location) {
+          throw new Error("The avatar video redirect is invalid.");
+        }
+        current = new URL(location, current);
+        if (!allowedAvatarUrl(current, s3Origin)) {
+          throw new Error("The avatar video redirect is not allowed.");
+        }
+        if (redirects === MAX_AVATAR_REDIRECTS) {
+          throw new Error("The avatar video redirected too many times.");
+        }
+      }
+      if (!response.ok) {
+        throw new Error("The avatar video could not be loaded for compositing.");
+      }
+      const finalUrl = new URL(response.url || current.href);
+      if (!allowedAvatarUrl(finalUrl, s3Origin)) {
+        throw new Error(
+          "The avatar video response came from an unapproved source.",
+        );
+      }
+
+      const blob = await readAvatarBlob(response);
+      if (!blob.size) {
+        throw new Error("The avatar video is empty.");
+      }
+      const header = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
+      if (
+        header.length < 8 ||
+        String.fromCharCode(...header.subarray(4, 8)) !== "ftyp"
+      ) {
+        throw new Error("The avatar source is not a valid MP4 video.");
+      }
+      return blob;
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new Error("The avatar video took too long to load.");
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
+
+  avatarBlobRequests.set(key, request);
+  try {
+    return await request;
+  } finally {
+    if (avatarBlobRequests.get(key) === request) avatarBlobRequests.delete(key);
+  }
+}
+
+export async function prepareAvatarVideoSource(
   source: string,
-  signal: AbortSignal,
-): Promise<{ url: string; owned: boolean }> {
-  let current = new URL(source, window.location.href);
-  if (!allowedAvatarUrl(current)) {
+): Promise<PreparedAvatarVideoSource> {
+  const current = new URL(source, window.location.href);
+  const s3Origin = await getManagedS3Origin();
+  if (!allowedAvatarUrl(current, s3Origin)) {
     throw new Error("The avatar video source is not supported.");
   }
-  if (current.protocol === "blob:") return { url: current.href, owned: false };
-
-  let response!: Response;
-  for (let redirects = 0; redirects <= MAX_AVATAR_REDIRECTS; redirects += 1) {
-    response = await fetch(current, {
-      credentials: "omit",
-      redirect: "manual",
-      signal,
-    });
-    if (response.type === "opaqueredirect") {
-      throw new Error("The avatar video redirect could not be verified.");
-    }
-    if (response.status < 300 || response.status >= 400) break;
-    const location = response.headers.get("location");
-    if (!location) {
-      throw new Error("The avatar video redirect is invalid.");
-    }
-    current = new URL(location, current);
-    if (!allowedAvatarUrl(current)) {
-      throw new Error("The avatar video redirect is not allowed.");
-    }
-    if (redirects === MAX_AVATAR_REDIRECTS) {
-      throw new Error("The avatar video redirected too many times.");
-    }
+  if (current.protocol === "blob:") {
+    return { url: current.href, owned: false };
   }
-  if (!response.ok) {
-    throw new Error("The avatar video could not be loaded for compositing.");
-  }
-  const finalUrl = new URL(response.url || current.href);
-  if (!allowedAvatarUrl(finalUrl)) {
-    throw new Error("The avatar video response came from an unapproved source.");
-  }
-
-  const blob = await readAvatarBlob(response);
-  if (!blob.size) {
-    throw new Error("The avatar video is empty.");
-  }
-  const header = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
-  if (
-    header.length < 8 ||
-    String.fromCharCode(...header.subarray(4, 8)) !== "ftyp"
-  ) {
-    throw new Error("The avatar source is not a valid MP4 video.");
-  }
+  const blob = await fetchAvatarBlob(current, s3Origin);
   return { url: URL.createObjectURL(blob), owned: true };
 }
 
 export async function loadAvatarVideo(source: string): Promise<LoadedAvatarVideo> {
-  const controller = new AbortController();
-  const timeout = setTimeout(
-    () => controller.abort(),
-    AVATAR_LOAD_TIMEOUT_MS,
-  );
-  let local: { url: string; owned: boolean } | undefined;
+  let local: PreparedAvatarVideoSource | undefined;
   const video = document.createElement("video");
   video.playsInline = true;
   video.preload = "auto";
 
   try {
-    local = await localAvatarSource(source, controller.signal);
+    local = await prepareAvatarVideoSource(source);
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         video.onloadeddata = null;
@@ -186,8 +289,6 @@ export async function loadAvatarVideo(source: string): Promise<LoadedAvatarVideo
       throw new Error("The avatar video took too long to load.");
     }
     throw error;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 

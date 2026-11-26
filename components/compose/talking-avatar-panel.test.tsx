@@ -1,8 +1,20 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PublicAvatarJob } from "@/lib/avatar/jobs";
 import { TalkingAvatarPanel } from "./talking-avatar-panel";
+
+const { previewState } = vi.hoisted(() => ({
+  previewState: {
+    url: "blob:validated-avatar" as string | null,
+    error: null as string | null,
+    loading: false,
+  },
+}));
+
+vi.mock("@/lib/videos/use-avatar-preview", () => ({
+  useAvatarPreview: () => previewState,
+}));
 
 function props(overrides: Record<string, unknown> = {}) {
   return {
@@ -42,6 +54,12 @@ const readyJob: PublicAvatarJob = {
   createdAt: "2026-11-26T10:00:00.000Z",
   updatedAt: "2026-11-26T10:01:00.000Z",
 };
+
+beforeEach(() => {
+  previewState.url = "blob:validated-avatar";
+  previewState.error = null;
+  previewState.loading = false;
+});
 
 afterEach(cleanup);
 
@@ -101,7 +119,7 @@ describe("TalkingAvatarPanel", () => {
     render(<TalkingAvatarPanel {...panelProps} />);
 
     expect(screen.getByLabelText("Talking avatar preview").getAttribute("src")).toBe(
-      readyJob.videoUrl,
+      "blob:validated-avatar",
     );
     expect(screen.getByText("12.4 sec")).toBeTruthy();
     expect(screen.getByRole("status").textContent).toContain("Avatar video ready.");
@@ -109,6 +127,17 @@ describe("TalkingAvatarPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remove avatar video" }));
     expect(panelProps.onGenerate).toHaveBeenCalledTimes(1);
     expect(panelProps.onRemove).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces preview validation failures without rendering the remote URL", () => {
+    previewState.url = null;
+    previewState.error = "The avatar video source is not supported.";
+    render(<TalkingAvatarPanel {...props({ job: readyJob })} />);
+
+    expect(screen.getByRole("alert").textContent).toContain(
+      "The avatar video source is not supported.",
+    );
+    expect(screen.queryByLabelText("Talking avatar preview")).toBeNull();
   });
 
   it("blocks stale output and explains scheduled ownership", () => {

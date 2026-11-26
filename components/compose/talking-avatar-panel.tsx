@@ -24,6 +24,7 @@ import {
   TTS_VOICES,
   type TtsVoiceId,
 } from "@/lib/tts/voices";
+import { useAvatarPreview } from "@/lib/videos/use-avatar-preview";
 import { cn } from "@/lib/utils";
 
 type TalkingAvatarPanelProps = {
@@ -63,6 +64,7 @@ export function TalkingAvatarPanel({
   onCancel,
   onRemove,
 }: TalkingAvatarPanelProps) {
+  const preview = useAvatarPreview(job?.videoUrl ?? null);
   const active = Boolean(job && ACTIVE_AVATAR_STATUSES.includes(job.status));
   const terminal = Boolean(job && !active);
   const reusable = !job || job.publishState === "ready";
@@ -246,13 +248,27 @@ export function TalkingAvatarPanel({
         )}
 
         {job?.status === "completed" && job.videoUrl ? (
-          <video
-            controls
-            preload="metadata"
-            src={job.videoUrl}
-            className="aspect-video w-full rounded-lg border border-border bg-black"
-            aria-label={hasMedia ? "Source talking avatar preview" : "Talking avatar preview"}
-          />
+          preview.url ? (
+            <video
+              controls
+              preload="metadata"
+              src={preview.url}
+              className="aspect-video w-full rounded-lg border border-border bg-black"
+              aria-label={hasMedia ? "Source talking avatar preview" : "Talking avatar preview"}
+            />
+          ) : preview.error ? (
+            <p
+              role="alert"
+              className="rounded-md bg-destructive/10 px-3 py-2 text-xs leading-5 text-destructive"
+            >
+              {preview.error}
+            </p>
+          ) : (
+            <div className="flex aspect-video w-full items-center justify-center gap-2 rounded-lg border border-border bg-black text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+              Loading avatar preview…
+            </div>
+          )
         ) : null}
         {job?.durationSeconds ? (
           <p className="text-xs tabular-nums text-muted-foreground">

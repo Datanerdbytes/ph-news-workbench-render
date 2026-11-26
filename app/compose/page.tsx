@@ -75,6 +75,7 @@ import {
   ACTIVE_AVATAR_STATUSES,
   type PublicAvatarJob,
 } from '@/lib/avatar/jobs';
+import { shouldDeleteAvatarCompositeAfterPublishFailure } from '@/lib/avatar/publish-cleanup';
 import { normalizeSpeechText } from '@/lib/tts/text';
 import {
   defaultVoiceForLanguage,
@@ -1405,10 +1406,14 @@ function ComposeWorkspace() {
       const data = await res.json().catch(() => null);
       if (!res.ok) {
         if (
-          res.status === 409 &&
-          data?.code === 'avatar_unavailable' &&
           finalVideoUrl &&
-          finalVideoUrl !== avatarJob?.videoUrl
+          shouldDeleteAvatarCompositeAfterPublishFailure({
+            status: res.status,
+            code: data?.code,
+            avatarJobId: avatarReady && avatarJob ? avatarJob.id : null,
+            mediaUrl: finalVideoUrl,
+            sourceAvatarUrl: avatarJob?.videoUrl ?? null,
+          })
         ) {
           deleteStagedBlob(finalVideoUrl);
         }

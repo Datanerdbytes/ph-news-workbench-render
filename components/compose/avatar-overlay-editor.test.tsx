@@ -1,11 +1,23 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_AVATAR_PLACEMENT,
   avatarPlacementPreset,
 } from "@/lib/videos/composition";
 import { AvatarOverlayEditor } from "./avatar-overlay-editor";
+
+const { previewState } = vi.hoisted(() => ({
+  previewState: {
+    url: "blob:validated-avatar" as string | null,
+    error: null as string | null,
+    loading: false,
+  },
+}));
+
+vi.mock("@/lib/videos/use-avatar-preview", () => ({
+  useAvatarPreview: () => previewState,
+}));
 
 function props(overrides: Record<string, unknown> = {}) {
   return {
@@ -29,19 +41,43 @@ beforeAll(() => {
   HTMLMediaElement.prototype.play = vi.fn(() => Promise.resolve());
 });
 
+beforeEach(() => {
+  previewState.url = "blob:validated-avatar";
+  previewState.error = null;
+  previewState.loading = false;
+});
+
 afterEach(cleanup);
 
 describe("AvatarOverlayEditor", () => {
-  it("shows the attached photo beneath the avatar in a 16:9 editor", () => {
-    render(<AvatarOverlayEditor {...props()} />);
+  it("shows the attached photo beneath the validated avatar in a 16:9 editor", () => {
+    const { container } = render(<AvatarOverlayEditor {...props()} />);
 
     expect(
       screen.getByAltText("Attached photo beneath the avatar").getAttribute("src"),
     ).toBe("data:image/jpeg;base64,photo");
     expect(
+      container.querySelector('video[aria-hidden="true"]')?.getAttribute("src"),
+    ).toBe("blob:validated-avatar");
+    expect(
       screen.getByRole("button", { name: /Avatar overlay\. Use arrow keys/ }),
     ).toBeTruthy();
     expect(screen.getByText(/Overlay edits do not regenerate/)).toBeTruthy();
+  });
+
+  it("disables playback and surfaces an error when avatar validation fails", () => {
+    previewState.url = null;
+    previewState.error = "The avatar video source is not supported.";
+    const { container } = render(<AvatarOverlayEditor {...props()} />);
+
+    expect(screen.getByRole("alert").textContent).toContain(
+      "The avatar video source is not supported.",
+    );
+    expect(container.querySelector('video[aria-hidden="true"]')).toBeNull();
+    expect(
+      (screen.getByRole("button", { name: "Play overlay preview" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
   });
 
   it("applies presets and fine movement without requiring a drag", () => {

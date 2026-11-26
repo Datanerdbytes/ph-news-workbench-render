@@ -19,6 +19,7 @@ vi.mock("@vercel/blob", () => ({
 
 import {
   deleteStagedBlobsInFolder,
+  getManagedStoragePublicOrigin,
   stageServerFile,
   stagedFileExtension,
 } from "./storage";
@@ -41,6 +42,37 @@ afterEach(async () => {
   await Promise.all(
     tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
   );
+});
+
+describe("getManagedStoragePublicOrigin", () => {
+  it("returns only the normalized origin for the active s3 driver", () => {
+    vi.stubEnv("STORAGE_DRIVER", "s3");
+    vi.stubEnv("S3_PUBLIC_BASE", "https://media.example.com/bucket/path/");
+
+    expect(getManagedStoragePublicOrigin()).toBe("https://media.example.com");
+  });
+
+  it("returns null for the blob and hf drivers", () => {
+    vi.stubEnv("S3_PUBLIC_BASE", "https://media.example.com/bucket/");
+    expect(getManagedStoragePublicOrigin()).toBeNull();
+
+    vi.stubEnv("STORAGE_DRIVER", "hf");
+    expect(getManagedStoragePublicOrigin()).toBeNull();
+  });
+
+  it.each([
+    "",
+    "not a url",
+    "ftp://media.example.com/bucket/",
+    "https://user:pass@media.example.com/bucket/",
+    "https://media.example.com/bucket/?token=secret",
+    "https://media.example.com/bucket/#fragment",
+  ])("rejects an invalid public base: %s", (value) => {
+    vi.stubEnv("STORAGE_DRIVER", "s3");
+    vi.stubEnv("S3_PUBLIC_BASE", value);
+
+    expect(getManagedStoragePublicOrigin()).toBeNull();
+  });
 });
 
 describe("stagedFileExtension", () => {

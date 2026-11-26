@@ -35,6 +35,7 @@ import {
   type AvatarPlacementPreset,
 } from "@/lib/videos/composition";
 import { imageSrc } from "@/lib/format";
+import { useAvatarPreview } from "@/lib/videos/use-avatar-preview";
 import { cn } from "@/lib/utils";
 
 type AvatarOverlayEditorProps = {
@@ -90,9 +91,12 @@ export function AvatarOverlayEditor({
   const baseVideoRef = useRef<HTMLVideoElement>(null);
   const avatarVideoRef = useRef<HTMLVideoElement>(null);
   const dragRef = useRef<DragState | null>(null);
+  const preview = useAvatarPreview(avatarUrl);
+  const avatarPreviewUrl = preview.url;
   const [avatarAspect, setAvatarAspect] = useState(16 / 9);
-  const [playing, setPlaying] = useState(false);
-  const isPlaying = playing && !disabled;
+  const [playingSource, setPlayingSource] = useState<string | null>(null);
+  const isPlaying =
+    playingSource === avatarUrl && !disabled && Boolean(avatarPreviewUrl);
   const safePlacement = clampAvatarPlacement(placement, avatarAspect);
   const safeVolume = clampOriginalAudioVolume(originalAudioVolume);
   const baseImage = images[0];
@@ -113,7 +117,7 @@ export function AvatarOverlayEditor({
       return;
     }
     void Promise.all(videos.map((video) => video.play())).catch(() => {
-      setPlaying(false);
+      setPlayingSource(null);
     });
   }, [isPlaying, avatarUrl, baseVideoUrl]);
 
@@ -205,19 +209,19 @@ export function AvatarOverlayEditor({
   }
 
   function togglePlayback() {
-    if (disabled) return;
-    if (!playing) {
+    if (disabled || !avatarPreviewUrl) return;
+    if (!isPlaying) {
       for (const video of [baseVideoRef.current, avatarVideoRef.current]) {
         if (video?.ended) video.currentTime = 0;
       }
     }
-    setPlaying((current) => !current);
+    setPlayingSource(isPlaying ? null : avatarUrl);
   }
 
   function stopWhenFinished() {
     const base = baseVideoRef.current;
     const avatar = avatarVideoRef.current;
-    if (avatar?.ended && (!base || base.ended)) setPlaying(false);
+    if (avatar?.ended && (!base || base.ended)) setPlayingSource(null);
   }
 
   return (
@@ -243,7 +247,7 @@ export function AvatarOverlayEditor({
           variant="outline"
           size="sm"
           onClick={togglePlayback}
-          disabled={disabled}
+          disabled={disabled || !avatarPreviewUrl}
           className="min-h-11 shrink-0"
           aria-label={isPlaying ? "Pause overlay preview" : "Play overlay preview"}
         >
@@ -273,7 +277,7 @@ export function AvatarOverlayEditor({
               preload="metadata"
               onEnded={stopWhenFinished}
               onLoadedMetadata={() => {
-                setPlaying(false);
+                setPlayingSource(null);
                 for (const video of [baseVideoRef.current, avatarVideoRef.current]) {
                   if (video?.readyState) video.currentTime = 0;
                 }
@@ -315,27 +319,29 @@ export function AvatarOverlayEditor({
                 : "cursor-move focus-visible:ring-4 focus-visible:ring-primary/70",
             )}
           >
-            <video
-              ref={avatarVideoRef}
-              src={avatarUrl}
-              muted
-              playsInline
-              preload="metadata"
-              onLoadedMetadata={(event) => {
-                setPlaying(false);
-                for (const source of [baseVideoRef.current, avatarVideoRef.current]) {
-                  if (source?.readyState) source.currentTime = 0;
-                }
-                const video = event.currentTarget;
-                const aspect = video.videoWidth / video.videoHeight;
-                if (!Number.isFinite(aspect) || aspect <= 0) return;
-                setAvatarAspect(aspect);
-                onPlacementChange(clampAvatarPlacement(safePlacement, aspect));
-              }}
-              onEnded={stopWhenFinished}
-              className="pointer-events-none h-full w-full object-fill"
-              aria-hidden="true"
-            />
+            {avatarPreviewUrl ? (
+              <video
+                ref={avatarVideoRef}
+                src={avatarPreviewUrl}
+                muted
+                playsInline
+                preload="metadata"
+                onLoadedMetadata={(event) => {
+                  setPlayingSource(null);
+                  for (const source of [baseVideoRef.current, avatarVideoRef.current]) {
+                    if (source?.readyState) source.currentTime = 0;
+                  }
+                  const video = event.currentTarget;
+                  const aspect = video.videoWidth / video.videoHeight;
+                  if (!Number.isFinite(aspect) || aspect <= 0) return;
+                  setAvatarAspect(aspect);
+                  onPlacementChange(clampAvatarPlacement(safePlacement, aspect));
+                }}
+                onEnded={stopWhenFinished}
+                className="pointer-events-none h-full w-full object-fill"
+                aria-hidden="true"
+              />
+            ) : null}
             <span className="pointer-events-none absolute left-1 top-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-medium text-white">
               Avatar
             </span>
@@ -357,6 +363,15 @@ export function AvatarOverlayEditor({
           </span>
         ) : null}
       </div>
+
+      {preview.error ? (
+        <p
+          role="alert"
+          className="mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs leading-5 text-destructive"
+        >
+          {preview.error}
+        </p>
+      ) : null}
 
       <p
         id="avatar-overlay-help"

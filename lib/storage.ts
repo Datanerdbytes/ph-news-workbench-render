@@ -67,6 +67,27 @@ function s3PublicBase(): string {
   return (process.env.S3_PUBLIC_BASE ?? '').trim().replace(/\/+$/, '');
 }
 
+export function getManagedStoragePublicOrigin(): string | null {
+  if (getStorageDriver() !== 's3') return null;
+  const base = s3PublicBase();
+  if (!base) return null;
+  try {
+    const url = new URL(base);
+    if (
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      (url.protocol !== 'https:' && url.protocol !== 'http:')
+    ) {
+      return null;
+    }
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
 function s3Bucket(): string {
   return process.env.S3_BUCKET?.trim() ?? '';
 }
