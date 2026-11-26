@@ -23,6 +23,10 @@ name: Trusted E2E supersede
 # not the one that runs.
 on:
   pull_request_target:
+    # Every push updates the PR head, so `synchronize` is the push-by-push
+    # trigger; opened/reopened cover a PR that arrives with a run already
+    # waiting on the approval gate.
+    types: [opened, synchronize, reopened]
     branches: [main]
 
 permissions:
