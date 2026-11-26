@@ -28,10 +28,13 @@ schedules posts and reviews performance.
 - **Publishing**: `facebook_connections` is keyed by `workspace_id`; tokens are
   encrypted at rest. Publishing and scheduling both go through
   `publishPagePost`.
-- **AI drafting**: `/api/draft` uses the workspace's NIM model
+- **AI drafting**: `/api/draft` uses the workspace's OpenRouter model
   (`workspaces.ai_model`, picked in Settings → AI model) and falls back to
-  `NIM_MODEL`. `lib/models.ts` only lists ids that answered on the live account;
-  calls time out after 120s and upstream failures return 502, not 429.
+  `OPENROUTER_MODEL`. `lib/models.ts` lists OpenRouter free-tier ids chosen
+  for news rewriting; when one is retired the draft retried on the next
+  catalog model automatically. Drafts rewrite from the full article when the
+  feed or the story's page carries it (see `lib/article-text.ts`); calls time
+  out after 120s and upstream failures return 502, not 429.
 - **Scheduling**: `scheduled_posts` with `FOR UPDATE SKIP LOCKED` claiming in
   `/api/schedule/run` (Vercel cron, every 5 minutes). Composer has a Schedule
   panel; `/calendar` shows the month grid, upcoming list and cancel. Every

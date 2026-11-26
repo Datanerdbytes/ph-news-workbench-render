@@ -57,7 +57,8 @@ for that pipeline, the required secrets and the rollback path.
 3. **Environment** — every secret below goes in Service → Environment:
    `DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` (the
    `*.onrender.com` URL), `BETTER_AUTH_TRUSTED_ORIGINS` (same), `CRON_SECRET`,
-   `SIGNUP_INVITE_CODE`, `NIM_API_KEY` (+ optional `NIM_*` caps),
+   `SIGNUP_INVITE_CODE`, `OPENROUTER_API_KEY` (+ optional `OPENROUTER_*` caps),
+   `NIM_API_KEY` (image generation only),
    `OPENAI_API_KEY`, `FACEBOOK_APP_ID/SECRET`, `FACEBOOK_GRAPH_VERSION`,
    `FACEBOOK_PAGE_ID`, `FACEBOOK_REDIRECT_URI`
    (`https://<service>.onrender.com/api/facebook/callback`),

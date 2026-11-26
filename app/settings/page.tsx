@@ -482,7 +482,7 @@ export default function SettingsPage() {
           <h2 className="text-[13px] font-semibold">AI model</h2>
           <p className="text-[10.5px] text-muted-foreground">
             {isOwner
-              ? "NVIDIA NIM model that writes drafts for this workspace."
+              ? "Free OpenRouter model that writes drafts for this workspace."
               : "Only workspace owners can change the model."}
           </p>
           <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -510,7 +510,7 @@ export default function SettingsPage() {
           </div>
           <p className="mt-2 text-[10.5px] text-muted-foreground">
             {TEXT_MODELS.find((option) => option.id === model)?.detail ??
-              "Served through the NVIDIA integrate API."}
+              "Served through OpenRouter's free tier."}
           </p>
         </section>
 

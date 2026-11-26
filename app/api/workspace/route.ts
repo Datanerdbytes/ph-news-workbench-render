@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { isTextModel } from "@/lib/models";
-import { defaultTextModel } from "@/lib/nim";
+import { defaultTextModel } from "@/lib/openrouter";
 import { requireWorkspace, unauthorized } from "@/lib/session";
 
 export const dynamic = "force-dynamic";

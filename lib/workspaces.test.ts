@@ -30,7 +30,7 @@ describe("getWorkspaceForUser", () => {
         name: "Newsroom",
         owner_id: "u1",
         role: "editor",
-        ai_model: "nvidia/nemotron-3.5-bolt-e4b",
+        ai_model: "google/gemma-4-31b-it:free",
       },
     ]);
 
@@ -39,7 +39,7 @@ describe("getWorkspaceForUser", () => {
       name: "Newsroom",
       role: "editor",
       ownerId: "u1",
-      aiModel: "nvidia/nemotron-3.5-bolt-e4b",
+      aiModel: "google/gemma-4-31b-it:free",
     });
 
     expect(sqlMock).toHaveBeenCalledTimes(1);
