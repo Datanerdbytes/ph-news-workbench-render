@@ -15,7 +15,7 @@ import {
 import { cn } from "cn";
 import { authClient } from "@/lib/auth-client";
 import { validateNewPassword } from "@/lib/password";
-import { textModelLabel, TEXT_MODELS } from "@/lib/models";
+import { isTextModel, textModelLabel, TEXT_MODELS } from "@/lib/models";
 import { isThemeId, THEMES, type ThemeId } from "@/lib/themes";
 
 type WorkspaceInfo = {
@@ -126,7 +126,12 @@ export default function SettingsPage() {
         }
         setWorkspace(data);
         setName(data.name ?? "");
-        setModel(data.aiModel ?? data.defaultModel ?? "");
+        // A workspace saved under the old NIM catalog can still carry a model
+        // id this build does not know. Show the model drafts actually use.
+        const stored = typeof data.aiModel === "string" ? data.aiModel.trim() : "";
+        setModel(
+          stored && isTextModel(stored) ? stored : data.defaultModel ?? ""
+        );
         setWorkspaceError(false);
       })
       .catch(() => {
@@ -482,7 +487,7 @@ export default function SettingsPage() {
           <h2 className="text-[13px] font-semibold">AI model</h2>
           <p className="text-[10.5px] text-muted-foreground">
             {isOwner
-              ? "NVIDIA NIM model that writes drafts for this workspace."
+              ? "Free OpenRouter model that writes drafts for this workspace."
               : "Only workspace owners can change the model."}
           </p>
           <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -510,7 +515,7 @@ export default function SettingsPage() {
           </div>
           <p className="mt-2 text-[10.5px] text-muted-foreground">
             {TEXT_MODELS.find((option) => option.id === model)?.detail ??
-              "Served through the NVIDIA integrate API."}
+              "Served through OpenRouter's free tier."}
           </p>
         </section>
 

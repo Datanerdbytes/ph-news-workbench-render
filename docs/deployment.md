@@ -151,7 +151,9 @@ go through GitHub Actions, and it does not wait for CI.
 | `E2E against the production container` | the Neon API calls failed or the freshly created branch never became connectable — the job says so in its log |
 
 The e2e job needs an approval on the protected `e2e` environment before it
-runs; that approval is a separate step from the merge approval.
+runs; that approval is a separate step from the merge approval. A job that
+sits in `waiting` for that approval is holding the Trusted E2E concurrency
+lock — see [A superseded E2E run](#a-superseded-e2e-run).
 
 ### The deploy job failed
 
@@ -182,6 +184,32 @@ queued deploy is normal and not a failure.
 **Actions → Deploy → Run workflow** re-runs the pipeline from the selected
 branch. The optional *commit* input deploys a specific commit sha instead of
 the branch head — useful for redeploying the commit that is already live.
+
+### A superseded E2E run
+
+A push to a pull request makes every Trusted E2E run for that pull request
+obsolete: it tests a merge commit that no longer exists. `trusted-e2e.yml`
+queues its runs behind the `trusted-e2e-database` concurrency lock, and a run
+waiting for an approval on the protected `e2e` environment holds that lock
+until it times out — so a stale run parked at that approval gate keeps the run
+for the current head from starting at all. The `e2e` job in `ci.yml` then
+polls for a trusted run that structurally cannot begin, and the pull request
+stays red until the poll runs out.
+
+`trusted-e2e-supersede.yml` cancels those obsolete runs on every push. It runs
+on `pull_request_target`, so it executes the version of the file on `main`, and
+it sits outside the concurrency group so it can start while the run it cancels
+is still holding the lock. Cancelling is not abandoning: the cancelled run's
+cleanup job still runs on `always()` and deletes the Neon branch it
+provisioned, so the lock is only released after that branch is gone.
+
+If a run is still stuck — an approval nobody gave, or a run that predates this
+workflow — cancel it by hand:
+
+**Actions → Trusted E2E → the run → Cancel workflow**. Its cleanup job deletes
+the branch it created, and the run for the current head starts as soon as the
+lock is free. The `e2e` job in `ci.yml` then finds it and goes green; if that
+job already timed out, re-run just that job.
 
 <!-- coderabbit-ai-generated:v1 -->
 

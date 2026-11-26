@@ -4,7 +4,7 @@ const ARTICLE_TIMEOUT_MS = 8_000;
 const ARTICLE_MAX_BYTES = 128 * 1024;
 const MAX_ARTICLE_REDIRECTS = 5;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
-const ARTICLE_HEADERS = {
+export const ARTICLE_HEADERS = {
   'User-Agent':
     'Mozilla/5.0 (compatible; PhNewsWorkbench/1.0; +https://ph-news-workbench.onrender.com)',
   Accept: 'text/html, */*;q=0.8',

@@ -2,34 +2,44 @@ export type TextModel = {
   id: string;
   label: string;
   detail: string;
+  /**
+   * Some free endpoints force reasoning on and reject any attempt to disable
+   * it ("Reasoning is mandatory for this endpoint"). Such models get no
+   * reasoning param and a doubled output budget, since hidden reasoning
+   * tokens are billed against max_tokens.
+   */
+  reasoning?: "mandatory";
 };
 
-// Only models that answered on the current NVIDIA NIM account; the catalog
-// lists many more that return 404 "function not found" when called.
+// OpenRouter free tier, kept to models suited to summarizing news into short
+// Facebook posts. The free list rotates often — if an id starts returning
+// 404/429-only errors, swap it for another ":free" entry from
+// openrouter.ai/models (input+output price 0).
 export const TEXT_MODELS: TextModel[] = [
   {
-    id: "nvidia/nemotron-3.5-bolt-e4b",
-    label: "Nemotron 3.5 Bolt",
-    detail: "Fastest — small model, best for short posts",
+    id: "google/gemma-4-26b-a4b-it:free",
+    label: "Gemma 4 26B Flash",
+    detail: "Light — MoE with 3.8B active parameters; quick replies",
   },
   {
-    id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
-    label: "Nemotron 3 Nano Omni",
-    detail: "Balanced — 30B mixture-of-experts with reasoning",
+    id: "google/gemma-4-31b-it:free",
+    label: "Gemma 4 31B",
+    detail: "Dense 31B model; a solid all-round default",
   },
   {
-    id: "nvidia/nemotron-3.5-lightning-30b-a3b",
-    label: "Nemotron 3.5 Lightning",
-    detail: "Strongest reasoning, but slower to respond",
+    id: "inclusionai/ling-3.2-flash:free",
+    label: "Ling 3.2 Flash",
+    detail: "Hybrid reasoning model with a 1M-token context window",
   },
   {
-    id: "nvidia/nemotron-3.5-super-vl-120b-a12b",
-    label: "Nemotron 3.5 Super VL 120B",
-    detail: "Large vision-language model; supports text-based Reel composition",
+    id: "baidu/ernie-5.5-flash-preview:free",
+    label: "ERNIE 5.5 Flash",
+    detail: "280B MoE in preview; 1M-token context window",
+    reasoning: "mandatory",
   },
 ];
 
-export const DEFAULT_TEXT_MODEL = "nvidia/nemotron-3.5-bolt-e4b";
+export const DEFAULT_TEXT_MODEL = "google/gemma-4-31b-it:free";
 
 export function isTextModel(value: string): boolean {
   return TEXT_MODELS.some((model) => model.id === value);

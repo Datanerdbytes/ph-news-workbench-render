@@ -1,0 +1,130 @@
+name: Trusted E2E supersede
+
+# A push to a pull request makes every in-flight Trusted E2E run for that pull
+# request obsolete: it tests a merge commit that no longer exists, and it holds
+# the `trusted-e2e-database` concurrency lock while it waits for a human
+# approval on the protected `e2e` environment. The run for the current head
+# cannot start until that lock is free, so a stale run parked at the approval
+# gate stalls the whole pipeline — `ci.yml`'s e2e job polls for a trusted run
+# that structurally cannot begin, and the pull request stays red until the poll
+# times out.
+#
+# This workflow cancels those obsolete runs. It runs on `pull_request_target`,
+# so it executes this file from the default branch — trusted code — and it
+# deliberately lives outside the `trusted-e2e-database` concurrency group so it
+# can start while the run it cancels is still holding that lock.
+#
+# Cancelling is not abandoning: `trusted-e2e.yml`'s cleanup job runs on
+# `always()`, so the Neon branch the cancelled run provisioned is deleted
+# before the lock is released and the run for the current head can start.
+#
+# This file has to be on `main` for any of this to happen — `pull_request_target`
+# reads the workflow from the default branch, so the copy in a pull request is
+# not the one that runs.
+on:
+  pull_request_target:
+    # Every push updates the PR head, so `synchronize` is the push-by-push
+    # trigger; opened/reopened cover a PR that arrives with a run already
+    # waiting on the approval gate.
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  # Cancelling a workflow run needs write access to Actions; rechecking the
+  # live PR head needs read access to pull requests. Nothing else: the job
+  # makes API calls only and never checks the repository out, so no pull
+  # request code is fetched or executed here.
+  actions: write
+  pull-requests: read
+
+# One supersede per pull request — a newer push makes an older one moot.
+concurrency:
+  group: trusted-e2e-supersede-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  supersede:
+    # A fork pull request has no trusted run: `trusted-e2e.yml` skips it, so
+    # there is nothing to cancel.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Cancel the Trusted E2E runs this push superseded
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # `pull_request_target` runs carry an empty `pull_requests` array, so
+          # the run title is the only thing that says which pull request a run
+          # belongs to. `trusted-e2e.yml` names its runs
+          # "E2E PR <number> <head> <base>"; the number is in that title.
+          #
+          # A run is obsolete when it belongs to this pull request, tested a
+          # head that is no longer the head, and has not finished. A run that
+          # already finished is left alone: cancelling it would rewrite its
+          # conclusion and lose the record of what actually happened.
+          #
+          # A newer push may land while this helper is running. That push has
+          # its own supersede run, which knows the new head; stand down rather
+          # than cancel the run it needs.
+          current_head=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha 2>/dev/null || true)
+          if [[ -z "$current_head" ]]; then
+            echo "::warning::could not read the current PR head — leaving runs alone"
+            exit 0
+          fi
+          if [[ "$current_head" != "$HEAD_SHA" ]]; then
+            echo "PR head moved to $current_head; the newer supersede run owns this push"
+            exit 0
+          fi
+
+          runs=""
+          for attempt in 1 2 3; do
+            # Put the filters in the URL: `-f`/`-F` make `gh api --paginate`
+            # send later pages as POSTs, which the runs endpoint rejects.
+            if runs=$(gh api --paginate --slurp \
+              "repos/$REPO/actions/workflows/trusted-e2e.yml/runs?event=pull_request_target&per_page=100" 2>&1); then
+              break
+            fi
+            echo "::warning::could not list the Trusted E2E runs (attempt ${attempt}/3): ${runs}"
+            runs=""
+            sleep 10
+          done
+          if [[ -z "$runs" ]]; then
+            echo "::error::could not list the Trusted E2E runs — nothing was cancelled"
+            exit 1
+          fi
+
+          # `pull_request_target` runs report the default branch in `head_sha`,
+          # not the PR head. The run title carries the tested head, so compare
+          # that instead.
+          prefix="E2E PR $PR "
+          current="E2E PR $PR $HEAD_SHA "
+          stale=$(jq -r --arg prefix "$prefix" --arg current "$current" '
+            [ .[].workflow_runs[]
+              | select(.display_title | startswith($prefix))
+              | select(.display_title | startswith($current) | not)
+              | select(.status != "completed")
+              | .id
+            ] | join(" ")
+          ' <<< "$runs")
+
+          if [[ -z "$stale" ]]; then
+            echo "no superseded Trusted E2E run for PR $PR — nothing to cancel"
+            exit 0
+          fi
+
+          for id in $stale; do
+            echo "::notice::Cancelling superseded Trusted E2E run $id"
+            if gh api --method POST "repos/$REPO/actions/runs/$id/cancel" > /dev/null 2>&1; then
+              echo "cancelled run $id"
+            else
+              # A warning, not a failure: the run may have finished on its own
+              # between the listing and the call, and a red helper workflow
+              # would add noise without unblocking anything. The same
+              # convention the database teardown uses.
+              echo "::warning::could not cancel Trusted E2E run $id — it may have finished on its own"
+            fi
+          done

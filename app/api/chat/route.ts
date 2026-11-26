@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { draftPost } from '@/lib/nim';
+import { draftPost } from '@/lib/openrouter';
 import { requireUser, unauthorized } from '@/lib/session';
 
 export async function POST(req: Request) {
@@ -26,6 +26,15 @@ export async function POST(req: Request) {
     : hasContext
       ? `You are writing a ${context} from scratch for a Philippine news team publishing on Facebook. User request: ${message}\n\nReturn the finished text only — no preamble, no surrounding quotes. Respect the character limit if the context states one. Do not invent facts or quotes.`
       : `You are a newsroom assistant for a Philippine news team publishing on Facebook. User question or request: ${message}\n\nReply concisely and practically. Do not invent facts or quotes.`;
-  const result = await draftPost(prompt);
-  return NextResponse.json({ text: result.text });
+  try {
+    const result = await draftPost(prompt);
+    return NextResponse.json({ text: result.text });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : 'unknown error';
+    // Free OpenRouter models rate-limit (429) more readily than paid ones;
+    // the assistant panel shows this error verbatim, so pass it through.
+    const rateLimited =
+      message.includes('cap exceeded') || message.startsWith('OpenRouter 429');
+    return NextResponse.json({ error: message }, { status: rateLimited ? 429 : 502 });
+  }
 }
