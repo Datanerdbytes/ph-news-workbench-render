@@ -77,7 +77,11 @@ async function igRequest<T>(
     if (detail?.error?.message) {
       throw new InstagramApiError(detail.error.message, detail.error.code);
     }
-    throw new InstagramApiError(`Instagram returned ${response.status}.`);
+    throw new InstagramApiError(
+      `Instagram returned ${response.status}.`,
+      undefined,
+      ambiguous
+    );
   }
   if (!body) {
     throw new InstagramApiError('Instagram returned an empty response.', undefined, ambiguous);

@@ -156,7 +156,8 @@ async function fetchAvatarBlob(
         redirects += 1
       ) {
         response = await fetch(current, {
-          credentials: "omit",
+          credentials:
+            current.origin === window.location.origin ? "same-origin" : "omit",
           redirect: "manual",
           signal: controller.signal,
         });

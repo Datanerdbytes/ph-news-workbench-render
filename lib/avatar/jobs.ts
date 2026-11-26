@@ -85,3 +85,32 @@ export function publicAvatarJob(row: AvatarJobRow): PublicAvatarJob {
     updatedAt: new Date(row.updated_at).toISOString(),
   };
 }
+
+export function avatarMediaUrl(jobId: string): string {
+  return `/api/avatar/syntheses/${encodeURIComponent(jobId)}/video`;
+}
+
+export function preferredAvatarJob(
+  jobs: PublicAvatarJob[],
+): PublicAvatarJob | null {
+  return (
+    jobs.find((job) => ACTIVE_AVATAR_STATUSES.includes(job.status)) ??
+    jobs.find((job) => job.status === "completed" && job.publishState === "ready") ??
+    null
+  );
+}
+
+export async function readAvatarJobResponse(
+  response: Response,
+  fallback: string,
+): Promise<PublicAvatarJob> {
+  const data = await response.json().catch(() => null);
+  if (
+    !response.ok ||
+    typeof data?.id !== "string" ||
+    typeof data?.status !== "string"
+  ) {
+    throw new Error(data?.error ?? fallback);
+  }
+  return data as PublicAvatarJob;
+}

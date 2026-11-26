@@ -20,6 +20,7 @@ export default defineConfig({
       "e2e/**",
       "test-results/**",
       "playwright-report/**",
+      "**/*.db.test.ts",
     ],
   },
 });

@@ -3,11 +3,19 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { listMock, delMock, headMock, putMock } = vi.hoisted(() => ({
+const { listMock, delMock, headMock, putMock, s3SendMock } = vi.hoisted(() => ({
   listMock: vi.fn(),
   delMock: vi.fn(),
   headMock: vi.fn(),
   putMock: vi.fn(),
+  s3SendMock: vi.fn(),
+}));
+
+vi.mock("@aws-sdk/client-s3", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@aws-sdk/client-s3")>()),
+  S3Client: class {
+    send = s3SendMock;
+  },
 }));
 
 vi.mock("@vercel/blob", () => ({
@@ -18,8 +26,10 @@ vi.mock("@vercel/blob", () => ({
 }));
 
 import {
+  assertStagedBlob,
   deleteStagedBlobsInFolder,
   getManagedStoragePublicOrigin,
+  openStagedBlob,
   stageServerFile,
   stagedFileExtension,
 } from "./storage";
@@ -35,10 +45,12 @@ beforeEach(() => {
   vi.stubEnv("NEXT_PUBLIC_STORAGE_DRIVER", "blob");
   delMock.mockResolvedValue(undefined);
   listMock.mockResolvedValue({ blobs: [], hasMore: false });
+  s3SendMock.mockResolvedValue({});
 });
 
 afterEach(async () => {
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
   await Promise.all(
     tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
   );
@@ -72,6 +84,171 @@ describe("getManagedStoragePublicOrigin", () => {
     vi.stubEnv("S3_PUBLIC_BASE", value);
 
     expect(getManagedStoragePublicOrigin()).toBeNull();
+  });
+});
+
+describe("assertStagedBlob", () => {
+  it("removes a configured s3 base path from the object key", async () => {
+    vi.stubEnv("STORAGE_DRIVER", "s3");
+    vi.stubEnv("S3_PUBLIC_BASE", "https://media.example.com/bucket/path/");
+    vi.stubEnv("S3_BUCKET", "workbench");
+    vi.stubEnv("S3_ACCESS_KEY_ID", "test-key");
+    vi.stubEnv("S3_SECRET_ACCESS_KEY", "test-secret");
+
+    await assertStagedBlob(
+      "https://media.example.com/bucket/path/avatars/job-1/avatar%20video.mp4",
+    );
+
+    expect(s3SendMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: expect.objectContaining({
+          Bucket: "workbench",
+          Key: "avatars/job-1/avatar video.mp4",
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    "https://media.example.com/bucket/path-other/avatars/job-1/avatar.mp4",
+    "https://media.example.com.evil.test/bucket/path/avatars/job-1/avatar.mp4",
+    "https://user:pass@media.example.com/bucket/path/avatars/job-1/avatar.mp4",
+    "https://media.example.com/bucket/path/avatars/job-1/avatar.mp4?token=secret",
+    "https://media.example.com/bucket/path/avatars/job-1/avatar.mp4#fragment",
+  ])("rejects a url outside the exact s3 base: %s", async (url) => {
+    vi.stubEnv("STORAGE_DRIVER", "s3");
+    vi.stubEnv("S3_PUBLIC_BASE", "https://media.example.com/bucket/path/");
+    vi.stubEnv("S3_BUCKET", "workbench");
+    vi.stubEnv("S3_ACCESS_KEY_ID", "test-key");
+    vi.stubEnv("S3_SECRET_ACCESS_KEY", "test-secret");
+
+    await expect(assertStagedBlob(url)).rejects.toThrow(
+      "The staged URL does not belong to this app.",
+    );
+    expect(s3SendMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("openStagedBlob", () => {
+  const HF_URL =
+    "https://huggingface.co/datasets/owner/staging/resolve/main/avatars/job-1/avatar.mp4";
+
+  function configureHf() {
+    vi.stubEnv("STORAGE_DRIVER", "hf");
+    vi.stubEnv("NEXT_PUBLIC_STORAGE_DRIVER", "hf");
+    vi.stubEnv("HF_STAGING_REPO", "owner/staging");
+    vi.stubEnv("HF_TOKEN", "test-token");
+  }
+
+  it("follows a private Hugging Face CDN redirect without forwarding its token", async () => {
+    configureHf();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 302 }))
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://cdn-lfs.huggingface.co/avatar.mp4" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response("video"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await openStagedBlob(HF_URL);
+
+    expect(await response.text()).toBe("video");
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      HF_URL,
+      expect.objectContaining({ method: "HEAD", redirect: "manual" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      HF_URL,
+      expect.objectContaining({
+        headers: { Authorization: "Bearer test-token" },
+        redirect: "manual",
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "https://cdn-lfs.huggingface.co/avatar.mp4",
+      expect.objectContaining({ headers: {}, redirect: "manual" }),
+    );
+  });
+
+  it.each([
+    "https://evil.example/avatar.mp4",
+    "http://cdn-lfs.huggingface.co/avatar.mp4",
+    "https://user:pass@cdn-lfs.huggingface.co/avatar.mp4",
+  ])("rejects an untrusted Hugging Face redirect: %s", async (location) => {
+    configureHf();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 302 }))
+      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(openStagedBlob(HF_URL)).rejects.toThrow(
+      "The staged file redirect is not allowed.",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a cross-origin redirect from managed blob storage", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://evil.example/avatar.mp4" },
+        }),
+      ),
+    );
+
+    await expect(openStagedBlob(RECORDED)).rejects.toThrow(
+      "The staged file redirect is not allowed.",
+    );
+  });
+
+  it("allows only same-origin redirects from managed s3 storage", async () => {
+    vi.stubEnv("STORAGE_DRIVER", "s3");
+    vi.stubEnv("S3_PUBLIC_BASE", "https://media.example.com/bucket");
+    vi.stubEnv("S3_BUCKET", "workbench");
+    vi.stubEnv("S3_ACCESS_KEY_ID", "test-key");
+    vi.stubEnv("S3_SECRET_ACCESS_KEY", "test-secret");
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://media.example.com/bucket/avatar.mp4" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response("video"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await openStagedBlob(
+      "https://media.example.com/bucket/avatars/job-1/avatar.mp4",
+    );
+
+    expect(await response.text()).toBe("video");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops after too many redirects", async () => {
+    configureHf();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 302 }))
+      .mockImplementation(async () =>
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://huggingface.co/datasets/owner/staging/next" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(openStagedBlob(HF_URL)).rejects.toThrow(
+      "The staged file redirected too many times.",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(7);
   });
 });
 

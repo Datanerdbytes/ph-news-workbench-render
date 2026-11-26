@@ -73,8 +73,12 @@ import { deleteStagedBlob } from '@/lib/blob-cleanup';
 import { DEFAULT_AVATAR_ID, type AvatarId } from '@/lib/avatar/avatars';
 import {
   ACTIVE_AVATAR_STATUSES,
+  avatarMediaUrl,
+  preferredAvatarJob,
+  readAvatarJobResponse,
   type PublicAvatarJob,
 } from '@/lib/avatar/jobs';
+import { useAvatarJobPolling } from '@/lib/avatar/use-avatar-job-polling';
 import { shouldDeleteAvatarCompositeAfterPublishFailure } from '@/lib/avatar/publish-cleanup';
 import { normalizeSpeechText } from '@/lib/tts/text';
 import {
@@ -122,14 +126,6 @@ const ALLOWED_IMAGE_TYPES = new Set([
 
 function isAvatarJobActive(job: PublicAvatarJob | null): boolean {
   return Boolean(job && ACTIVE_AVATAR_STATUSES.includes(job.status));
-}
-
-async function readAvatarJobResponse(response: Response, fallback: string) {
-  const data = await response.json().catch(() => null);
-  if (!response.ok || typeof data?.id !== 'string' || typeof data?.status !== 'string') {
-    throw new Error(data?.error ?? fallback);
-  }
-  return data as PublicAvatarJob;
 }
 
 function publishButtonLabel(
@@ -252,7 +248,6 @@ function ComposeWorkspace() {
   const [avatarError, setAvatarError] = useState('');
   const avatarSequence = useRef(0);
   const avatarAbortRef = useRef<AbortController | null>(null);
-  const avatarPollRef = useRef<AbortController | null>(null);
   const avatarJobRef = useRef<PublicAvatarJob | null>(null);
   useEffect(() => {
     avatarJobRef.current = avatarJob;
@@ -346,7 +341,6 @@ function ComposeWorkspace() {
       ttsAbortRef.current?.abort();
       avatarSequence.current += 1;
       avatarAbortRef.current?.abort();
-      avatarPollRef.current?.abort();
       if (narrationUrlRef.current) {
         URL.revokeObjectURL(narrationUrlRef.current);
         narrationUrlRef.current = null;
@@ -456,8 +450,6 @@ function ComposeWorkspace() {
     avatarSequence.current += 1;
     avatarAbortRef.current?.abort();
     avatarAbortRef.current = null;
-    avatarPollRef.current?.abort();
-    avatarPollRef.current = null;
     updateAvatarJob(null);
     setAvatarPlacement(DEFAULT_AVATAR_PLACEMENT);
     setAvatarAction(null);
@@ -490,13 +482,7 @@ function ComposeWorkspace() {
         throw new Error(data?.error ?? 'Avatar jobs could not be loaded.');
       }
       if (requestId !== avatarSequence.current) return;
-      const jobs = data as PublicAvatarJob[];
-      updateAvatarJob(
-        jobs.find(isAvatarJobActive) ??
-          jobs.find((job) => job.status === 'completed' && job.publishState === 'ready') ??
-          jobs[0] ??
-          null,
-      );
+      updateAvatarJob(preferredAvatarJob(data as PublicAvatarJob[]));
       setAvatarError('');
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') return;
@@ -652,48 +638,21 @@ function ComposeWorkspace() {
     }
   }
 
-  const polledAvatarId = avatarJob?.id;
-  const polledAvatarStatus = avatarJob?.status;
-  const polledAvatarProgress = avatarJob?.progress;
-  const polledAvatarActive = Boolean(
-    polledAvatarStatus && ACTIVE_AVATAR_STATUSES.includes(polledAvatarStatus),
+  const handleAvatarPoll = useCallback(
+    (next: PublicAvatarJob) => {
+      if (avatarJobRef.current?.id !== next.id) return;
+      updateAvatarJob(next);
+    },
+    [updateAvatarJob]
   );
-  useEffect(() => {
-    if (!polledAvatarId || !polledAvatarActive) return;
-    const controller = new AbortController();
-    avatarPollRef.current = controller;
-    const timeout = window.setTimeout(async () => {
-      try {
-        const response = await fetch(
-          `/api/avatar/syntheses/${encodeURIComponent(polledAvatarId)}`,
-          { cache: 'no-store', signal: controller.signal },
-        );
-        const next = await readAvatarJobResponse(
-          response,
-          'The avatar status could not be refreshed.',
-        );
-        if (controller.signal.aborted) return;
-        setAvatarJob((current) =>
-          current?.id === polledAvatarId ? next : current,
-        );
-        setAvatarError('');
-      } catch (error) {
-        if (error instanceof Error && error.name === 'AbortError') return;
-        if (!controller.signal.aborted) {
-          setAvatarError(
-            error instanceof Error
-              ? error.message
-              : 'The avatar status could not be refreshed. Retrying…',
-          );
-        }
-      }
-    }, 2500);
-    return () => {
-      window.clearTimeout(timeout);
-      controller.abort();
-      if (avatarPollRef.current === controller) avatarPollRef.current = null;
-    };
-  }, [polledAvatarId, polledAvatarActive, polledAvatarProgress, avatarError]);
+  const handleAvatarPollError = useCallback((message: string) => {
+    setAvatarError(message);
+  }, []);
+  useAvatarJobPolling({
+    job: avatarJob,
+    onJob: handleAvatarPoll,
+    onError: handleAvatarPollError,
+  });
 
   const scheduleRetry = useScheduleRetry();
   const scheduleNow = useScheduleClock();
@@ -976,7 +935,7 @@ function ComposeWorkspace() {
             attachments: animations,
             values: animValues,
             aspectRatio: '16:9',
-            avatarUrl: avatarJob.videoUrl,
+            avatarUrl: avatarMediaUrl(avatarJob.id),
             avatarPlacement,
             originalAudioVolume: originalVolume,
             onProgress: (pct) => {
@@ -986,7 +945,7 @@ function ComposeWorkspace() {
         } else if (images.length) {
           finalized = await bakeAndFinalizeNarratedSlideshow({
             images,
-            avatarUrl: avatarJob.videoUrl,
+            avatarUrl: avatarMediaUrl(avatarJob.id),
             avatarPlacement,
             onProgress: (pct) => {
               if (ownsBake()) setBakePct(pct);
@@ -1776,7 +1735,7 @@ function ComposeWorkspace() {
                       ) : null}
                       {avatarReady && hasMedia && avatarJob?.videoUrl ? (
                         <AvatarOverlayEditor
-                          avatarUrl={avatarJob.videoUrl}
+                          avatarUrl={avatarMediaUrl(avatarJob.id)}
                           baseVideoUrl={videoPreviewUrl}
                           images={images}
                           placement={avatarPlacement}

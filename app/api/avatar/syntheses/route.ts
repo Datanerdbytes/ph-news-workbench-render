@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { isAvatarId } from "@/lib/avatar/avatars";
 import { avatarLimits, estimateAvatarSeconds } from "@/lib/avatar/config";
-import { publicAvatarJob, type AvatarJobRow } from "@/lib/avatar/jobs";
+import {
+  ACTIVE_AVATAR_STATUSES,
+  publicAvatarJob,
+  type AvatarJobRow,
+} from "@/lib/avatar/jobs";
 import {
   AvatarQueueError,
   enqueueAvatarJob,
@@ -33,7 +37,7 @@ export async function GET(request: Request) {
   const rows = await sql`
     SELECT * FROM avatar_jobs
     WHERE workspace_id = ${access.workspace.id}
-    ORDER BY created_at DESC
+    ORDER BY (status = ANY(${ACTIVE_AVATAR_STATUSES}::text[])) DESC, created_at DESC
     LIMIT 10`;
   return NextResponse.json((rows as unknown as AvatarJobRow[]).map(publicAvatarJob), {
     headers: { "Cache-Control": "no-store" },

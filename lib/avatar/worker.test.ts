@@ -242,6 +242,16 @@ describe("cancellation boundaries", () => {
     expect(mocks.rm).toHaveBeenCalledTimes(1);
   });
 
+  it("does not delete provider output when cancellation loses its fence", async () => {
+    const current = job({ provider_synthesis_id: "job-1" });
+    mocks.getAvatarJob.mockResolvedValue({ ...current, cancel_requested: true });
+    mocks.failAvatarJob.mockResolvedValue(null);
+
+    await processAvatarJob(current);
+
+    expect(mocks.deleteAvatarSynthesis).not.toHaveBeenCalled();
+  });
+
   it("cancels at the first polling boundary", async () => {
     const current = job({ provider_synthesis_id: "job-1" });
     mocks.getAvatarJob
@@ -349,16 +359,55 @@ describe("fenced ownership", () => {
     expect(mocks.rm).toHaveBeenCalledTimes(1);
   });
 
-  it("deletes a staged output when completion loses the fence", async () => {
+  it("retains a staged output when completion loses the fence without a terminal state", async () => {
     const current = job({ provider_synthesis_id: "job-1" });
     mocks.getAvatarJob.mockResolvedValue(current);
     mocks.completeAvatarJob.mockResolvedValue(false);
 
     await processAvatarJob(current);
 
-    expect(mocks.deleteStagedBlobs).toHaveBeenCalledWith([STAGED_URL]);
+    expect(mocks.deleteStagedBlobs).not.toHaveBeenCalled();
     expect(mocks.deleteAvatarSynthesis).not.toHaveBeenCalled();
     expect(mocks.rm).toHaveBeenCalledTimes(1);
+  });
+
+  it("deletes a staged output only after a terminal state confirms it is unused", async () => {
+    const current = job({ provider_synthesis_id: "job-1" });
+    mocks.getAvatarJob
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce(
+        job({ status: "failed", provider_synthesis_id: "job-1", worker_id: null }),
+      );
+    mocks.completeAvatarJob.mockResolvedValue(false);
+
+    await processAvatarJob(current);
+
+    expect(mocks.deleteStagedBlobs).toHaveBeenCalledWith([STAGED_URL]);
+    expect(mocks.deleteAvatarSynthesis).toHaveBeenCalledWith("job-1");
+  });
+
+  it("retains a staged output when another attempt completed with the same URL", async () => {
+    const current = job({ provider_synthesis_id: "job-1" });
+    mocks.getAvatarJob
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce(
+        job({
+          status: "completed",
+          provider_synthesis_id: "job-1",
+          blob_url: STAGED_URL,
+          worker_id: null,
+        }),
+      );
+    mocks.completeAvatarJob.mockResolvedValue(false);
+
+    await processAvatarJob(current);
+
+    expect(mocks.deleteStagedBlobs).not.toHaveBeenCalled();
+    expect(mocks.deleteAvatarSynthesis).toHaveBeenCalledWith("job-1");
   });
 });
 
@@ -369,6 +418,7 @@ describe("failure handling", () => {
     mocks.submitAvatarSynthesis.mockRejectedValue(
       new AvatarError(502, "provider_error", "The provider is busy."),
     );
+    mocks.failAvatarJob.mockResolvedValue("queued");
 
     await processAvatarJob(current);
 
@@ -396,10 +446,25 @@ describe("failure handling", () => {
     expect(mocks.downloadAvatarResult).not.toHaveBeenCalled();
   });
 
+  it.each([null, "queued"] as const)(
+    "does not delete provider output when terminal failure recording returns %s",
+    async (status) => {
+      const current = job({ provider_synthesis_id: "job-1" });
+      mocks.getAvatarJob.mockResolvedValue(current);
+      mocks.getAvatarSynthesis.mockResolvedValue(synthesis({ status: "Failed" }));
+      mocks.failAvatarJob.mockResolvedValue(status);
+
+      await processAvatarJob(current);
+
+      expect(mocks.deleteAvatarSynthesis).not.toHaveBeenCalled();
+    },
+  );
+
   it("sanitizes unexpected errors and treats them as retryable", async () => {
     const current = job({ provider_synthesis_id: "job-1" });
     mocks.getAvatarJob.mockResolvedValue(current);
     mocks.downloadAvatarResult.mockRejectedValue(new Error("secret local detail"));
+    mocks.failAvatarJob.mockResolvedValue("queued");
 
     await processAvatarJob(current);
 
@@ -421,6 +486,41 @@ describe("failure handling", () => {
     expect(mocks.deleteStagedBlobs).toHaveBeenCalledWith([STAGED_URL]);
     expect(mocks.failAvatarJob).toHaveBeenCalledTimes(1);
     expect(mocks.rm).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains a committed staged output when completion accounting throws", async () => {
+    const current = job({ provider_synthesis_id: "job-1" });
+    mocks.getAvatarJob
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce(
+        job({
+          status: "completed",
+          provider_synthesis_id: "job-1",
+          blob_url: STAGED_URL,
+          worker_id: null,
+        }),
+      );
+    mocks.completeAvatarJob.mockRejectedValue(new Error("response lost"));
+
+    await expect(processAvatarJob(current)).resolves.toBeUndefined();
+
+    expect(mocks.failAvatarJob).not.toHaveBeenCalled();
+    expect(mocks.deleteStagedBlobs).not.toHaveBeenCalled();
+    expect(mocks.deleteAvatarSynthesis).toHaveBeenCalledWith("job-1");
+  });
+
+  it("retains a staged output when completion and failure recording are uncertain", async () => {
+    const current = job({ provider_synthesis_id: "job-1" });
+    mocks.getAvatarJob.mockResolvedValue(current);
+    mocks.completeAvatarJob.mockRejectedValue(new Error("response lost"));
+    mocks.failAvatarJob.mockRejectedValue(new Error("database unavailable"));
+
+    await expect(processAvatarJob(current)).resolves.toBeUndefined();
+
+    expect(mocks.deleteStagedBlobs).not.toHaveBeenCalled();
+    expect(mocks.deleteAvatarSynthesis).not.toHaveBeenCalled();
   });
 
   it("still removes the temp directory when failure recording fails", async () => {

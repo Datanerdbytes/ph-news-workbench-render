@@ -198,6 +198,12 @@ export async function bakeNarratedSlideshow(
           if (error) reject(error);
           else resolve();
         };
+        const finishIfReady = () => {
+          const elapsed = (performance.now() - startedAt) / 1000;
+          if (elapsed >= audioMix.duration - 0.02 && (!avatar || avatarEnded)) {
+            finish();
+          }
+        };
         const onVisibility = () => {
           if (document.hidden) {
             finish(
@@ -237,13 +243,8 @@ export async function bakeNarratedSlideshow(
             }
             options.onProgress?.(Math.min(1, elapsed / audioMix.duration));
           }
-          if (!avatarEnded && avatarPlayhead >= audioMix.duration - 0.05) {
-            avatarEnded = true;
-          }
-          if (elapsed >= audioMix.duration - 0.02) {
-            finish();
-            return;
-          }
+          finishIfReady();
+          if (settled) return;
           if (avatar && !avatarEnded && avatarPlayhead > lastAvatarPlayhead + 0.01) {
             lastAvatarPlayhead = avatarPlayhead;
             lastAvatarProgressAt = now;
@@ -265,7 +266,7 @@ export async function bakeNarratedSlideshow(
         if (avatar) {
           avatar.onended = () => {
             avatarEnded = true;
-            finish();
+            finishIfReady();
           };
           avatar.onerror = () =>
             finish(new Error('The avatar stopped playing during the bake.'));

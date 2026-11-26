@@ -1,8 +1,11 @@
 // @vitest-environment node
 import { existsSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { downloadVideoFromUrl } from "./videos";
+import { downloadVideoFromUrl, publishPageVideo } from "./videos";
 
 function responseFor(body: Uint8Array, init?: { status?: number; type?: string }) {
   // Uint8Array<ArrayBufferLike> vs BodyInit: a narrow cast keeps the stub simple.
@@ -12,8 +15,52 @@ function responseFor(body: Uint8Array, init?: { status?: number; type?: string }
   });
 }
 
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("publishPageVideo", () => {
+  it("persists the publish marker after transfer and immediately before finish", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ph-video-test-"));
+    const filePath = path.join(dir, "video.mp4");
+    await writeFile(filePath, new Uint8Array([1, 2, 3, 4, 5]));
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ upload_session_id: "session-1", video_id: "video-1" }))
+      .mockResolvedValueOnce(jsonResponse({ success: true }))
+      .mockResolvedValueOnce(jsonResponse({ id: "video-1" }))
+      .mockResolvedValueOnce(jsonResponse({ permalink_url: "https://facebook.example/video-1" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const beforePublish = vi.fn().mockResolvedValue(undefined);
+
+    try {
+      await expect(
+        publishPageVideo({
+          pageId: "pg1",
+          accessToken: "tok",
+          video: { path: filePath, size: 5, type: "video/mp4", filename: "video.mp4" },
+          beforePublish,
+        }),
+      ).resolves.toEqual({ id: "video-1", permalink: "https://facebook.example/video-1" });
+
+      expect(beforePublish).toHaveBeenCalledTimes(1);
+      expect(beforePublish).toHaveBeenCalledWith("video-1");
+      expect(beforePublish.mock.invocationCallOrder[0]).toBeGreaterThan(
+        fetchMock.mock.invocationCallOrder[1]
+      );
+      expect(beforePublish.mock.invocationCallOrder[0]).toBeLessThan(
+        fetchMock.mock.invocationCallOrder[2]
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("downloadVideoFromUrl", () => {

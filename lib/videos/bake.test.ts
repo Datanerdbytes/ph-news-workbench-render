@@ -490,6 +490,7 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     avatar.currentTime = 2;
     now = 2_100;
     frames.shift()?.(2_100);
+    avatar.onended?.();
     await expect(bake).resolves.toBeInstanceOf(Blob);
     expect(avatar.pause).toHaveBeenCalled();
     expect(avatar.src).toBe("");
@@ -513,6 +514,7 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     frames.shift()?.(40);
     expect(drawImageCalls.map((call) => call[0])).toEqual([video, avatar]);
 
+    avatar.onended?.();
     video.currentTime = 0.2;
     now = 80;
     frames.shift()?.(80);
@@ -537,6 +539,50 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     frames.shift()?.(16_000);
     await expect(bake).rejects.toThrow("The avatar stopped playing during the bake.");
     expect(avatar.pause).toHaveBeenCalled();
+  });
+
+  it("waits for the avatar ended event when the audio timeline expires", async () => {
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const bake = bakeVideoAnimation({
+      videoUrl: "blob:test",
+      attachments: [],
+      values: {},
+      avatarUrl: "blob:avatar",
+    });
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+
+    video.currentTime = 1;
+    avatar.currentTime = 0.5;
+    now = 2_100;
+    frames.shift()?.(2_100);
+
+    expect(recorders[0].state).toBe("recording");
+    expect(frames).toHaveLength(1);
+    avatar.onended?.();
+    await expect(bake).resolves.toBeInstanceOf(Blob);
+  });
+
+  it("waits for a shorter avatar to end after the footage finishes", async () => {
+    avatar.duration = 0.5;
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const bake = bakeVideoAnimation({
+      videoUrl: "blob:test",
+      attachments: [],
+      values: {},
+      avatarUrl: "blob:avatar",
+    });
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+
+    video.currentTime = 1;
+    avatar.currentTime = 0.5;
+    now = 1_100;
+    frames.shift()?.(1_100);
+
+    expect(recorders[0].state).toBe("recording");
+    avatar.onended?.();
+    await expect(bake).resolves.toBeInstanceOf(Blob);
   });
 
   it("rejects avatar composites beyond the ten-minute cap before recording", async () => {

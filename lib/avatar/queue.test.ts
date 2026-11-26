@@ -129,10 +129,11 @@ describe("enqueueAvatarJob", () => {
     const quotaQuery = queries[1].strings.join("?");
     expect(quotaQuery).toContain("status = ANY(?::text[])");
     expect(quotaQuery).toContain("INSERT INTO avatar_usage_daily");
+    expect(quotaQuery).toContain("SELECT ?, ?, ?, ?");
     expect(quotaQuery).toContain("ON CONFLICT (day, workspace_id) DO UPDATE");
     expect(quotaQuery).toContain("avatar_usage_daily.jobs < ?");
     expect(quotaQuery).toContain(
-      "avatar_usage_daily.seconds_reserved + ? <= ?",
+      "avatar_usage_daily.seconds_reserved + avatar_usage_daily.seconds_actual + ? <= ?",
     );
     expect(quotaQuery).toContain("(SELECT count FROM active) < ?");
     expect(quotaQuery).toContain("INSERT INTO avatar_jobs");
@@ -140,11 +141,15 @@ describe("enqueueAvatarJob", () => {
 
     const values = queries[1].values;
     expect(values.slice(0, 2)).toEqual(["ws-1", ACTIVE_AVATAR_STATUSES]);
-    expect(values.slice(2, 12)).toEqual([
+    expect(values.slice(2, 16)).toEqual([
       "2026-11-17",
       "ws-1",
       5,
       3,
+      3,
+      7,
+      3,
+      900,
       5,
       3,
       7,
@@ -152,7 +157,7 @@ describe("enqueueAvatarJob", () => {
       900,
       3,
     ]);
-    expect(values.slice(12)).toEqual([
+    expect(values.slice(16)).toEqual([
       expect.any(String),
       "ws-1",
       "user-1",
@@ -383,8 +388,12 @@ describe("cancellation and stale recovery", () => {
     expect(text).toContain("WHEN cancel_requested THEN 'cancelled'");
     expect(text).toContain("WHEN attempts >= ? THEN 'failed'");
     expect(text).toContain("ELSE 'queued'");
-    expect(text).toContain("recovered.status IN ('failed', 'cancelled')");
-    expect(text).toContain("recovered.provider_synthesis_id IS NULL");
+    expect(text).toContain("releasable AS");
+    expect(text).toContain("SUM(estimated_seconds)::int AS seconds");
+    expect(text).toContain("status IN ('failed', 'cancelled')");
+    expect(text).toContain("provider_synthesis_id IS NULL");
+    expect(text).toContain("GROUP BY workspace_id, day");
+    expect(text).toContain("usage.seconds_reserved - releasable.seconds");
     expect(sqlMock.mock.calls[0].slice(1)).toEqual([3, 3, 3, 20]);
   });
 });

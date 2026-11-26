@@ -8,8 +8,6 @@ const {
   rescheduleMock,
   heldMock,
   cancelMock,
-  compositeMock,
-  deleteBlobsMock,
 } = vi.hoisted(() => ({
   sqlMock: vi.fn(),
   requireWorkspaceMock: vi.fn(),
@@ -18,8 +16,6 @@ const {
   rescheduleMock: vi.fn(),
   heldMock: vi.fn(),
   cancelMock: vi.fn(),
-  compositeMock: vi.fn(),
-  deleteBlobsMock: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({ sql: sqlMock }));
@@ -42,8 +38,6 @@ vi.mock("@/lib/facebook", () => ({
 vi.mock("@/lib/facebook-page-token", () => ({
   resolvePageToken: resolvePageTokenMock,
 }));
-vi.mock("@/lib/avatar/media", () => ({ isAvatarCompositeUrl: compositeMock }));
-vi.mock("@/lib/blob", () => ({ deleteStagedBlobs: deleteBlobsMock }));
 
 import { DELETE, PATCH } from "./route";
 
@@ -94,8 +88,6 @@ beforeEach(() => {
   vi.setSystemTime(new Date("2026-11-16T08:00:00Z"));
   requireWorkspaceMock.mockResolvedValue(access);
   recordEventMock.mockResolvedValue(undefined);
-  compositeMock.mockReturnValue(false);
-  deleteBlobsMock.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -469,7 +461,7 @@ describe("DELETE /api/schedule/[id]", () => {
     expect(deleteText).toContain("status = 'rescheduling'");
   });
 
-  it("releases an avatar only after its scheduled row is durably deleted", async () => {
+  it("atomically deletes the schedule and releases its avatar", async () => {
     const avatarUrl = "https://store.example/avatar-owned.mp4";
     sqlMock
       .mockResolvedValueOnce([
@@ -482,10 +474,8 @@ describe("DELETE /api/schedule/[id]", () => {
           news_item_id: null,
           scheduled_for: localRow.scheduled_for,
           avatar_job_id: "avatar-1",
-          image_url: avatarUrl,
         },
-      ])
-      .mockResolvedValueOnce([{ id: "avatar-1" }]);
+      ]);
 
     const res = await DELETE(
       new Request("http://localhost/api/schedule/51", { method: "DELETE" }),
@@ -493,27 +483,20 @@ describe("DELETE /api/schedule/[id]", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(sqlMock).toHaveBeenCalledTimes(4);
+    expect(sqlMock).toHaveBeenCalledTimes(3);
     const deleteText = (sqlMock.mock.calls[2][0] as string[]).join("?");
-    expect(deleteText).toContain(
-      "RETURNING id, news_item_id, scheduled_for, avatar_job_id, image_url"
-    );
-    const releaseText = (sqlMock.mock.calls[3][0] as string[]).join("?");
-    expect(releaseText).toContain("UPDATE avatar_jobs SET publish_state = 'ready'");
-    expect(releaseText).toContain("publish_state = 'scheduled'");
-    expect(releaseText).toContain("NOT EXISTS");
-    expect(sqlMock.mock.calls[3]).toContain("avatar-1");
-    expect(sqlMock.mock.calls[3]).toContain("ws1");
-    expect(sqlMock.mock.invocationCallOrder[2]).toBeLessThan(
-      sqlMock.mock.invocationCallOrder[3]
-    );
-    expect(deleteBlobsMock).not.toHaveBeenCalled();
+    expect(deleteText).toContain("WITH deleted AS");
+    expect(deleteText).toContain("DELETE FROM scheduled_posts");
+    expect(deleteText).toContain("UPDATE avatar_jobs");
+    expect(deleteText).toContain("publish_state = 'scheduled'");
+    expect(deleteText).toContain("NOT EXISTS");
+    expect(deleteText).toContain("RETURNING id, workspace_id, news_item_id, scheduled_for, avatar_job_id");
+    expect(sqlMock.mock.calls[2]).toContain("ws1");
   });
 
-  it("deletes only the composite after durably deleting and releasing its avatar", async () => {
+  it("retains a reusable avatar composite when its schedule is deleted", async () => {
     const compositeUrl =
       "https://store.example/compose/avatars/avatar-1/123-avatar-composite.mp4";
-    compositeMock.mockReturnValue(true);
     sqlMock
       .mockResolvedValueOnce([
         { ...localRow, avatar_job_id: "avatar-1", image_url: compositeUrl },
@@ -525,10 +508,8 @@ describe("DELETE /api/schedule/[id]", () => {
           news_item_id: null,
           scheduled_for: localRow.scheduled_for,
           avatar_job_id: "avatar-1",
-          image_url: compositeUrl,
         },
-      ])
-      .mockResolvedValueOnce([{ id: "avatar-1" }]);
+      ]);
 
     const res = await DELETE(
       new Request("http://localhost/api/schedule/51", { method: "DELETE" }),
@@ -536,16 +517,8 @@ describe("DELETE /api/schedule/[id]", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(compositeMock).toHaveBeenCalledWith("avatar-1", compositeUrl);
-    expect(deleteBlobsMock).toHaveBeenCalledTimes(1);
-    expect(deleteBlobsMock).toHaveBeenCalledWith([compositeUrl]);
-    expect(sqlMock).toHaveBeenCalledTimes(4);
-    expect(sqlMock.mock.invocationCallOrder[2]).toBeLessThan(
-      sqlMock.mock.invocationCallOrder[3]
-    );
-    expect(sqlMock.mock.invocationCallOrder[3]).toBeLessThan(
-      deleteBlobsMock.mock.invocationCallOrder[0]
-    );
+    expect(sqlMock).toHaveBeenCalledTimes(3);
+    expect(sqlMock.mock.calls[2]).toContain("ws1");
   });
 
   it("interleaving 1: refuses when reschedule claims row between DELETE read and claim", async () => {

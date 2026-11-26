@@ -116,6 +116,18 @@ describe("publishMediaContainer", () => {
     ).rejects.toMatchObject({ code: 190, ambiguous: false });
   });
 
+  it("preserves ambiguity for non-Graph HTTP failures", async () => {
+    respond(null, false, 503);
+
+    await expect(
+      publishMediaContainer({
+        igUserId: "ig-77",
+        accessToken: "tok",
+        containerId: "c-1",
+      })
+    ).rejects.toMatchObject({ ambiguous: true });
+  });
+
   it("treats a successful response without a media id as ambiguous", async () => {
     respond({});
 

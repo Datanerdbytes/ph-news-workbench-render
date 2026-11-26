@@ -169,6 +169,11 @@ jobs:
           OWNER_PASSWORD: ${{ secrets.E2E_OWNER_PASSWORD }}
           BETTER_AUTH_SECRET: ${{ secrets.E2E_BETTER_AUTH_SECRET }}
 
+      - name: Run database regression tests
+        run: npm run test:db
+        env:
+          DATABASE_URL: ${{ env.E2E_DATABASE_URL }}
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io

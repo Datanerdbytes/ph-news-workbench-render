@@ -313,6 +313,13 @@ export async function bakeVideoAnimation(
           if (error) reject(error);
           else resolve();
         }
+        function finishIfReady() {
+          const elapsed = (performance.now() - renderStartedAt) / 1000;
+          const timelineDone = holdForAudio
+            ? elapsed >= audioMix.duration - 0.02
+            : videoEnded;
+          if (timelineDone && (!avatar || avatarEnded)) finish();
+        }
         function onVisibility() {
           if (document.hidden) {
             finish(
@@ -359,18 +366,8 @@ export async function bakeVideoAnimation(
           if (!videoEnded && videoDuration && playhead >= videoDuration - 0.05) {
             videoEnded = true;
           }
-          if (!avatarEnded && avatarDuration && avatarPlayhead >= avatarDuration - 0.05) {
-            avatarEnded = true;
-          }
-          if (holdForAudio) {
-            if (elapsed >= audioMix.duration - 0.02) {
-              finish();
-              return;
-            }
-          } else if (videoDuration && playhead >= videoDuration - 0.05) {
-            finish();
-            return;
-          }
+          finishIfReady();
+          if (settled) return;
           if (!videoEnded && playhead > lastPlayhead + 0.01) {
             lastPlayhead = playhead;
             lastProgressAt = now;
@@ -403,14 +400,14 @@ export async function bakeVideoAnimation(
         });
         video.onended = () => {
           videoEnded = true;
-          if (!holdForAudio) finish();
+          finishIfReady();
         };
         video.onerror = () =>
           finish(new Error('The attached video stopped playing during the bake.'));
         if (avatar) {
           avatar.onended = () => {
             avatarEnded = true;
-            if (holdForAudio) finish();
+            finishIfReady();
           };
           avatar.onerror = () =>
             finish(new Error('The avatar stopped playing during the bake.'));

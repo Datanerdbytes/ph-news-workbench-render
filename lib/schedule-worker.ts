@@ -24,8 +24,7 @@ import {
 } from "@/lib/notifications";
 import { getPrimaryPage, resolvePageToken } from "@/lib/facebook-page-token";
 import { deleteStagedBlobs } from "@/lib/blob";
-import { releaseScheduledAvatar } from "@/lib/avatar/queue";
-import { isAvatarCompositeUrl } from "@/lib/avatar/media";
+import { deleteScheduledPostWithAvatarRelease } from "@/lib/schedule-cancellation";
 import {
   downloadVideoFromUrl,
   publishPageVideo,
@@ -103,6 +102,7 @@ async function completeSchedulePublication(input: {
   facebookPostId: string;
   avatarJobId: string | null;
   status: "publishing" | "scheduled";
+  attempts?: number;
   scheduledFor?: string | Date;
 }): Promise<PublicationCompletion | null> {
   const rows = (await sql`
@@ -112,6 +112,9 @@ async function completeSchedulePublication(input: {
           error_message = NULL, updated_at = now()
       WHERE id = ${input.id} AND workspace_id = ${input.workspaceId}
         AND status = ${input.status}
+        ${input.attempts === undefined
+          ? sql``
+          : sql`AND attempts = ${input.attempts}`}
         ${input.scheduledFor === undefined
           ? sql``
           : sql`AND scheduled_for = ${input.scheduledFor}`}
@@ -133,31 +136,72 @@ async function completeSchedulePublication(input: {
   return rows[0] ?? null;
 }
 
-async function markPublishStarted(
+export async function markPublishStarted(
   id: number,
   workspaceId: string,
+  attempts: number,
+  mediaId?: string,
 ): Promise<void> {
   const rows = (await sql`
     UPDATE scheduled_posts
-    SET publish_started_at = now(), updated_at = now()
+    SET facebook_post_id = COALESCE(facebook_post_id, ${mediaId ?? null}),
+        publish_started_at = now(), updated_at = now()
     WHERE id = ${id} AND workspace_id = ${workspaceId}
       AND status = 'publishing'
+      AND attempts = ${attempts}
     RETURNING id`) as unknown as { id: number }[];
   if (!rows.length) {
     throw new Error("This scheduled post is no longer owned by the publisher.");
   }
 }
 
+export async function claimScheduledPost(
+  post: ClaimedRow,
+): Promise<{ id: number; attempts: number } | null> {
+  const rows = (await sql`
+    UPDATE scheduled_posts AS post
+    SET status = 'publishing', attempts = attempts + 1, updated_at = now()
+    WHERE post.id = ${post.id} AND post.status = 'scheduled'
+      AND post.scheduled_for <= now()
+      AND post.attempts < ${MAX_ATTEMPTS}
+      AND (
+        post.avatar_job_id IS NULL
+        OR EXISTS (
+          SELECT 1 FROM avatar_jobs
+          WHERE avatar_jobs.id = post.avatar_job_id
+            AND avatar_jobs.workspace_id = post.workspace_id
+            AND avatar_jobs.status = 'completed'
+            AND avatar_jobs.publish_state = 'scheduled'
+            AND avatar_jobs.blob_url IS NOT NULL
+            AND (
+              avatar_jobs.blob_url = post.image_url
+              OR (
+                post.image_url IS NOT NULL
+                AND strpos(post.image_url, '/compose/avatars/' || avatar_jobs.id || '/') > 0
+              )
+            )
+        )
+      )
+      AND (post.attempts = 0
+           OR post.updated_at < now() - (${RETRY_BACKOFF_MINUTES} * interval '1 minute'))
+    RETURNING post.id, post.attempts`) as unknown as { id: number; attempts: number }[];
+  return rows[0] ?? null;
+}
+
 async function persistPublishedMediaId(
   id: number,
   workspaceId: string,
+  attempts: number,
   mediaId: string,
-): Promise<void> {
-  await sql`
+): Promise<boolean> {
+  const rows = await sql`
     UPDATE scheduled_posts
     SET facebook_post_id = ${mediaId}, updated_at = now()
     WHERE id = ${id} AND workspace_id = ${workspaceId}
-      AND status = 'publishing'`;
+      AND status = 'publishing'
+      AND attempts = ${attempts}
+    RETURNING id`;
+  return rows.length > 0;
 }
 
 async function deleteCompletedAvatar(
@@ -224,35 +268,9 @@ export async function publishDuePosts(
     // against the CURRENT row — a concurrent sweep's stale candidate cannot
     // claim a row that just failed a retry. The claim returns the updated
     // attempt count, which drives the failure decisions below.
-    const claimed = (await sql`
-      UPDATE scheduled_posts
-      SET status = 'publishing', attempts = attempts + 1, updated_at = now()
-      WHERE id = ${post.id} AND status = 'scheduled'
-        AND scheduled_for <= now()
-        AND attempts < ${MAX_ATTEMPTS}
-        AND (
-          post.avatar_job_id IS NULL
-          OR EXISTS (
-            SELECT 1 FROM avatar_jobs
-            WHERE avatar_jobs.id = post.avatar_job_id
-              AND avatar_jobs.workspace_id = post.workspace_id
-              AND avatar_jobs.status = 'completed'
-              AND avatar_jobs.publish_state = 'scheduled'
-              AND avatar_jobs.blob_url IS NOT NULL
-              AND (
-                avatar_jobs.blob_url = post.image_url
-                OR (
-                  post.image_url IS NOT NULL
-                  AND strpos(post.image_url, '/compose/avatars/' || avatar_jobs.id || '/') > 0
-                )
-              )
-          )
-        )
-        AND (attempts = 0
-             OR updated_at < now() - (${RETRY_BACKOFF_MINUTES} * interval '1 minute'))
-      RETURNING id, attempts`) as unknown as { id: number; attempts: number }[];
-    if (!claimed.length) continue;
-    const attemptCount = claimed[0].attempts;
+    const claimed = await claimScheduledPost(post);
+    if (!claimed) continue;
+    const attemptCount = claimed.attempts;
 
     await recordScheduleEvent({
       workspaceId: post.workspace_id,
@@ -267,7 +285,7 @@ export async function publishDuePosts(
     try {
       if (post.kind === "instagram-post") {
         mediaId = await publishScheduledInstagramPost(post, () =>
-          markPublishStarted(post.id, post.workspace_id),
+          markPublishStarted(post.id, post.workspace_id, attemptCount),
         );
       } else if (post.kind === "video") {
         // A scheduled video carries its staged file URL in image_url —
@@ -291,7 +309,6 @@ export async function publishDuePosts(
         if (!post.image_url) {
           throw new Error("The scheduled video is missing its file.");
         }
-        await markPublishStarted(post.id, post.workspace_id);
         const downloaded = await downloadVideoFromUrl(post.image_url);
         try {
           const video = await publishPageVideo({
@@ -299,6 +316,8 @@ export async function publishDuePosts(
             accessToken: token,
             description: stripMarkdown(post.text),
             video: downloaded.upload,
+            beforePublish: (videoId) =>
+              markPublishStarted(post.id, post.workspace_id, attemptCount, videoId),
           });
           mediaId = video.id;
         } finally {
@@ -325,7 +344,8 @@ export async function publishDuePosts(
           accessToken: primary.token,
           message: stripMarkdown(post.text),
           images: parseImages(storedImages),
-          beforePublish: () => markPublishStarted(post.id, post.workspace_id),
+          beforePublish: () =>
+            markPublishStarted(post.id, post.workspace_id, attemptCount),
         });
         mediaId = result.id;
       }
@@ -350,18 +370,24 @@ export async function publishDuePosts(
           SET error_message = ${`${message} Automatic retry is paused because the platform may have accepted it.`},
               updated_at = now()
           WHERE id = ${post.id} AND workspace_id = ${post.workspace_id}
-            AND status = 'publishing'`;
+            AND status = 'publishing'
+            AND attempts = ${attemptCount}`;
         continue;
       }
 
       // A definite failure is safe to retry until the attempt budget runs out.
       const exhausted = attemptCount >= MAX_ATTEMPTS;
 
-      await sql`
+      const failureRows = (await sql`
         UPDATE scheduled_posts
         SET status = ${exhausted ? "failed" : "scheduled"},
-            error_message = ${message}, publish_started_at = NULL, updated_at = now()
-        WHERE id = ${post.id} AND status = 'publishing'`;
+            error_message = ${message}, facebook_post_id = NULL,
+            publish_started_at = NULL, updated_at = now()
+        WHERE id = ${post.id} AND workspace_id = ${post.workspace_id}
+          AND status = 'publishing'
+          AND attempts = ${attemptCount}
+        RETURNING id`) as unknown as { id: number }[];
+      if (!failureRows.length) continue;
 
       await recordScheduleEvent({
         workspaceId: post.workspace_id,
@@ -393,7 +419,13 @@ export async function publishDuePosts(
     }
 
     try {
-      await persistPublishedMediaId(post.id, post.workspace_id, mediaId);
+      const persisted = await persistPublishedMediaId(
+        post.id,
+        post.workspace_id,
+        attemptCount,
+        mediaId,
+      );
+      if (!persisted) continue;
     } catch (error) {
       console.error(
         JSON.stringify({
@@ -415,6 +447,7 @@ export async function publishDuePosts(
         facebookPostId: mediaId,
         avatarJobId: post.avatar_job_id,
         status: "publishing",
+        attempts: attemptCount,
       });
       if (!completion) continue;
 
@@ -523,6 +556,28 @@ async function publishScheduledInstagramPost(
   return result.id;
 }
 
+export async function requeueInterruptedPost(row: {
+  id: number;
+  workspace_id: string;
+  attempts: number;
+}): Promise<"scheduled" | "failed" | null> {
+  const newStatus = row.attempts >= MAX_ATTEMPTS ? "failed" : "scheduled";
+  const rows = (await sql`
+    UPDATE scheduled_posts
+    SET status = ${newStatus},
+        error_message = 'The scheduler was interrupted before this post went out.',
+        publish_started_at = NULL,
+        updated_at = now()
+    WHERE id = ${row.id}
+      AND workspace_id = ${row.workspace_id}
+      AND status = 'publishing'
+      AND attempts = ${row.attempts}
+      AND facebook_post_id IS NULL
+      AND publish_started_at IS NULL
+    RETURNING id`) as unknown as { id: number }[];
+  return rows.length > 0 ? newStatus : null;
+}
+
 /**
  * Recover posts the executor claimed but never finished — a crash or a
  * restart between the claim and the publish leaves them stuck in
@@ -535,6 +590,7 @@ async function requeueStuckPosts(): Promise<void> {
     FROM scheduled_posts
     WHERE status = 'publishing'
       AND updated_at < now() - (${STUCK_PUBLISHING_MINUTES} * interval '1 minute')
+      AND (facebook_post_id IS NOT NULL OR publish_started_at IS NULL)
     LIMIT 10
     FOR UPDATE SKIP LOCKED`) as unknown as {
     id: number;
@@ -565,6 +621,7 @@ async function requeueStuckPosts(): Promise<void> {
               facebookPostId: row.facebook_post_id,
               avatarJobId: row.avatar_job_id,
               status: "publishing",
+              attempts: row.attempts,
             });
           } catch (error) {
             console.error(
@@ -609,15 +666,9 @@ async function requeueStuckPosts(): Promise<void> {
     if (row.publish_started_at) continue;
 
     // No id and no publish marker: the executor stopped before Graph.
-    const exhausted = row.attempts >= MAX_ATTEMPTS;
-    const newStatus = exhausted ? "failed" : "scheduled";
-
-    await sql`
-      UPDATE scheduled_posts
-      SET status = ${newStatus},
-          error_message = 'The scheduler was interrupted before this post went out.',
-          updated_at = now()
-      WHERE id = ${row.id} AND status = 'publishing'`;
+    const newStatus = await requeueInterruptedPost(row);
+    if (!newStatus) continue;
+    const exhausted = newStatus === "failed";
 
     await recordScheduleEvent({
       workspaceId: row.workspace_id,
@@ -783,40 +834,21 @@ export async function recoverStaleReschedules(): Promise<number> {
         }
       }
 
-      const deleted = (await sql`
-        DELETE FROM scheduled_posts
-        WHERE id = ${row.id}
-          AND status = 'rescheduling'
-          AND error_message = ${recoveryClaim}
-        RETURNING id, news_item_id, scheduled_for, avatar_job_id, image_url`) as unknown as {
-        id: number;
-        news_item_id: number | null;
-        scheduled_for: string;
-        avatar_job_id: string | null;
-        image_url: string | null;
-      }[];
+      const deleted = await deleteScheduledPostWithAvatarRelease({
+        id: row.id,
+        workspaceId: row.workspace_id,
+        status: "rescheduling",
+        claim: recoveryClaim,
+      });
 
-      if (deleted.length) {
-        if (deleted[0].avatar_job_id) {
-          await releaseScheduledAvatar(deleted[0].avatar_job_id, row.workspace_id);
-          if (
-            deleted[0].image_url &&
-            isAvatarCompositeUrl(deleted[0].avatar_job_id, deleted[0].image_url)
-          ) {
-            try {
-              await deleteStagedBlobs([deleted[0].image_url]);
-            } catch {
-              // The schedule is already deleted; cleanup is best-effort.
-            }
-          }
-        }
+      if (deleted) {
         await recordScheduleEvent({
           workspaceId: row.workspace_id,
-          scheduledPostId: deleted[0].id,
-          newsItemId: deleted[0].news_item_id,
+          scheduledPostId: deleted.id,
+          newsItemId: deleted.news_item_id,
           event: "canceled",
           source: "scheduler",
-          metadata: { scheduledFor: deleted[0].scheduled_for, recovered: true },
+          metadata: { scheduledFor: deleted.scheduled_for, recovered: true },
         });
         recovered++;
       }

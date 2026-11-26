@@ -828,10 +828,17 @@ export async function graphPostForm<T>(
     | (T & GraphErrorBody)
     | null;
 
-  if (!response.ok || body?.error) {
+  if (body?.error) {
     throw new FacebookApiError(
-      body?.error?.message ?? `Facebook request failed (${response.status}).`,
-      body?.error?.code
+      body.error.message ?? `Facebook request failed (${response.status}).`,
+      body.error.code
+    );
+  }
+  if (!response.ok) {
+    throw new FacebookApiError(
+      `Facebook request failed (${response.status}).`,
+      undefined,
+      ambiguous
     );
   }
 

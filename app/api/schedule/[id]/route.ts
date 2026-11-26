@@ -13,9 +13,7 @@ import {
 } from "@/lib/facebook";
 import { facebookTargets } from "@/lib/facebook-schedule";
 import { resolvePageToken } from "@/lib/facebook-page-token";
-import { releaseScheduledAvatar } from "@/lib/avatar/queue";
-import { isAvatarCompositeUrl } from "@/lib/avatar/media";
-import { deleteStagedBlobs } from "@/lib/blob";
+import { deleteScheduledPostWithAvatarRelease } from "@/lib/schedule-cancellation";
 
 export const dynamic = "force-dynamic";
 
@@ -127,42 +125,18 @@ export async function DELETE(
     }
   }
 
-  const rows = (await sql`
-    DELETE FROM scheduled_posts
-    WHERE id = ${id}
-      AND workspace_id = ${access.workspace.id}
-      AND (
-        (status = 'rescheduling' AND error_message = ${deleteClaim})
-        OR status = ${row.status}
-      )
-    RETURNING id, news_item_id, scheduled_for, avatar_job_id, image_url`) as unknown as {
-    id: number;
-    news_item_id: number | null;
-    scheduled_for: string;
-    avatar_job_id: string | null;
-    image_url: string | null;
-  }[];
+  const canceled = await deleteScheduledPostWithAvatarRelease({
+    id,
+    workspaceId: access.workspace.id,
+    status: row.status,
+    claim: row.status === "scheduled" ? deleteClaim : undefined,
+  });
 
-  if (!rows.length) {
+  if (!canceled) {
     return NextResponse.json(
       { error: "This post changed or was deleted. Reload the calendar." },
       { status: 409 }
     );
-  }
-
-  const canceled = rows[0];
-  if (canceled.avatar_job_id) {
-    await releaseScheduledAvatar(canceled.avatar_job_id, access.workspace.id);
-    if (
-      canceled.image_url &&
-      isAvatarCompositeUrl(canceled.avatar_job_id, canceled.image_url)
-    ) {
-      try {
-        await deleteStagedBlobs([canceled.image_url]);
-      } catch {
-        // The schedule is already deleted; cleanup is best-effort.
-      }
-    }
   }
   await recordScheduleEvent({
     workspaceId: access.workspace.id,

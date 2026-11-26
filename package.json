@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:db": "NEON_LOCAL_NEXT_MODE=development NODE_OPTIONS=\"--import ./scripts/neon-local.mjs\" vitest run --config vitest.db.config.ts",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "pretest:e2e:local": "NEON_LOCAL_NEXT_MODE=development NODE_OPTIONS=\"--import ./scripts/neon-local.mjs\" node scripts/require-local-db.mjs",

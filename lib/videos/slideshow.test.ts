@@ -247,10 +247,28 @@ describe("bakeNarratedSlideshow", () => {
     avatar.currentTime = 2;
     now = 2_100;
     frames.shift()?.(2_100);
+    avatar.onended?.();
     await expect(bake).resolves.toBeInstanceOf(Blob);
     expect(onProgress).toHaveBeenLastCalledWith(1);
     expect(avatar.pause).toHaveBeenCalled();
     expect(avatar.src).toBe("");
+  });
+
+  it("waits for the avatar ended event after the slideshow timeline expires", async () => {
+    const bake = bakeNarratedSlideshow({
+      images: ["photo"],
+      avatarUrl: "blob:avatar",
+    });
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+
+    avatar.currentTime = 0.5;
+    now = 2_100;
+    frames.shift()?.(2_100);
+
+    expect(recorders[0].state).toBe("recording");
+    expect(frames).toHaveLength(1);
+    avatar.onended?.();
+    await expect(bake).resolves.toBeInstanceOf(Blob);
   });
 
   it("rejects a slideshow with both narration and an avatar", async () => {

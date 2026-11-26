@@ -4,16 +4,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PublicAvatarJob } from "@/lib/avatar/jobs";
 import { TalkingAvatarPanel } from "./talking-avatar-panel";
 
-const { previewState } = vi.hoisted(() => ({
+const { previewState, previewMock } = vi.hoisted(() => ({
   previewState: {
     url: "blob:validated-avatar" as string | null,
     error: null as string | null,
     loading: false,
   },
+  previewMock: vi.fn(),
 }));
 
 vi.mock("@/lib/videos/use-avatar-preview", () => ({
-  useAvatarPreview: () => previewState,
+  useAvatarPreview: previewMock,
 }));
 
 function props(overrides: Record<string, unknown> = {}) {
@@ -56,6 +57,7 @@ const readyJob: PublicAvatarJob = {
 };
 
 beforeEach(() => {
+  previewMock.mockReset().mockReturnValue(previewState);
   previewState.url = "blob:validated-avatar";
   previewState.error = null;
   previewState.loading = false;
@@ -114,10 +116,13 @@ describe("TalkingAvatarPanel", () => {
     expect(panelProps.onCancel).toHaveBeenCalledTimes(1);
   });
 
-  it("previews a ready video and lets the user regenerate or remove it", () => {
+  it("previews a ready video through its authenticated media route", () => {
     const panelProps = props({ job: readyJob });
     render(<TalkingAvatarPanel {...panelProps} />);
 
+    expect(previewMock).toHaveBeenCalledWith(
+      "/api/avatar/syntheses/avatar-1/video",
+    );
     expect(screen.getByLabelText("Talking avatar preview").getAttribute("src")).toBe(
       "blob:validated-avatar",
     );

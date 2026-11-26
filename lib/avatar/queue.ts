@@ -53,13 +53,17 @@ export async function enqueueAvatarJob(input: EnqueueInput): Promise<AvatarJobRo
         ), reserved AS (
           INSERT INTO avatar_usage_daily
             (day, workspace_id, jobs, characters, seconds_reserved)
-          VALUES (${utcDay()}, ${input.workspaceId}, 1, ${input.text.length}, ${estimatedSeconds})
+          SELECT ${utcDay()}, ${input.workspaceId}, 1, ${input.text.length}, ${estimatedSeconds}
+          FROM active
+          WHERE (SELECT count FROM active) < ${limits.maxActive}
+            AND ${limits.dailyJobs} > 0
+            AND ${estimatedSeconds} <= ${limits.dailySeconds}
           ON CONFLICT (day, workspace_id) DO UPDATE
           SET jobs = avatar_usage_daily.jobs + 1,
               characters = avatar_usage_daily.characters + ${input.text.length},
               seconds_reserved = avatar_usage_daily.seconds_reserved + ${estimatedSeconds}
           WHERE avatar_usage_daily.jobs < ${limits.dailyJobs}
-            AND avatar_usage_daily.seconds_reserved + ${estimatedSeconds} <= ${limits.dailySeconds}
+            AND avatar_usage_daily.seconds_reserved + avatar_usage_daily.seconds_actual + ${estimatedSeconds} <= ${limits.dailySeconds}
             AND (SELECT count FROM active) < ${limits.maxActive}
           RETURNING workspace_id
         ), inserted AS (
@@ -292,13 +296,17 @@ export async function recoverStaleAvatarJobs(): Promise<
       WHERE status IN ('submitting', 'running', 'downloading', 'finalizing')
         AND updated_at < now() - ${STALE_MINUTES} * interval '1 minute'
       RETURNING *, created_at::date AS day
+    ), releasable AS (
+      SELECT workspace_id, day, SUM(estimated_seconds)::int AS seconds
+      FROM recovered
+      WHERE status IN ('failed', 'cancelled')
+        AND provider_synthesis_id IS NULL
+      GROUP BY workspace_id, day
     ), released AS (
       UPDATE avatar_usage_daily usage
-      SET seconds_reserved = GREATEST(0, usage.seconds_reserved - recovered.estimated_seconds)
-      FROM recovered
-      WHERE usage.workspace_id = recovered.workspace_id AND usage.day = recovered.day
-        AND recovered.status IN ('failed', 'cancelled')
-        AND recovered.provider_synthesis_id IS NULL
+      SET seconds_reserved = GREATEST(0, usage.seconds_reserved - releasable.seconds)
+      FROM releasable
+      WHERE usage.workspace_id = releasable.workspace_id AND usage.day = releasable.day
     )
     SELECT id, provider_synthesis_id FROM recovered`) as unknown as Array<{
     id: string;

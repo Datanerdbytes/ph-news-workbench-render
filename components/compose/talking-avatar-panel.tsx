@@ -16,6 +16,7 @@ import {
 } from "@/lib/avatar/avatars";
 import {
   ACTIVE_AVATAR_STATUSES,
+  avatarMediaUrl,
   type PublicAvatarJob,
 } from "@/lib/avatar/jobs";
 import {
@@ -64,7 +65,11 @@ export function TalkingAvatarPanel({
   onCancel,
   onRemove,
 }: TalkingAvatarPanelProps) {
-  const preview = useAvatarPreview(job?.videoUrl ?? null);
+  const preview = useAvatarPreview(
+    job?.status === "completed" && job.videoUrl
+      ? avatarMediaUrl(job.id)
+      : null,
+  );
   const active = Boolean(job && ACTIVE_AVATAR_STATUSES.includes(job.status));
   const terminal = Boolean(job && !active);
   const reusable = !job || job.publishState === "ready";

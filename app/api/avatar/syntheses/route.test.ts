@@ -24,7 +24,7 @@ vi.mock("@/lib/avatar/azure", async (importOriginal) => ({
 }));
 
 import { AvatarError } from "@/lib/avatar/azure";
-import type { AvatarJobRow } from "@/lib/avatar/jobs";
+import { ACTIVE_AVATAR_STATUSES, type AvatarJobRow } from "@/lib/avatar/jobs";
 import { AvatarQueueError } from "@/lib/avatar/queue";
 import { GET, POST } from "./route";
 
@@ -143,8 +143,11 @@ describe("GET /api/avatar/syntheses", () => {
     expect((call[0] as TemplateStringsArray).join("?")).toContain(
       "WHERE workspace_id = ?",
     );
+    expect((call[0] as TemplateStringsArray).join("?")).toContain(
+      "ORDER BY (status = ANY(?::text[])) DESC, created_at DESC",
+    );
     expect((call[0] as TemplateStringsArray).join("?")).toContain("LIMIT 10");
-    expect(call.slice(1)).toEqual(["ws-1"]);
+    expect(call.slice(1)).toEqual(["ws-1", ACTIVE_AVATAR_STATUSES]);
   });
 });
 

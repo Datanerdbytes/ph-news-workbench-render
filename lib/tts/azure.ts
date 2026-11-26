@@ -80,7 +80,7 @@ export function buildTtsSsml(
   const voice = getTtsVoice(voiceId);
   const rate = Math.round((speed - 1) * 100);
   const rateValue = `${rate >= 0 ? "+" : ""}${rate}%`;
-  return `<speak version="1.0" xml:lang="${voice.locale}"><voice name="${voice.id}"><prosody rate="${rateValue}">${escapeXml(text)}</prosody></voice></speak>`;
+  return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="${voice.locale}"><voice name="${voice.id}"><prosody rate="${rateValue}">${escapeXml(text)}</prosody></voice></speak>`;
 }
 
 async function reserveQuota(

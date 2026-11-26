@@ -260,6 +260,14 @@ describe("graphPostForm", () => {
       graphPostForm("pg/feed", {}, "tok", [], undefined, true)
     ).rejects.toMatchObject({ code: 190, ambiguous: false });
   });
+
+  it("preserves ambiguity for non-Graph HTTP failures", async () => {
+    fetchMock().mockResolvedValue(new Response("upstream unavailable", { status: 503 }));
+
+    await expect(
+      graphPostForm("pg/feed", {}, "tok", [], undefined, true)
+    ).rejects.toMatchObject({ ambiguous: true });
+  });
 });
 
 describe("publishPagePost", () => {

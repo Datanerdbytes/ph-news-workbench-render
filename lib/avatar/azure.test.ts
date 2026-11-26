@@ -192,7 +192,7 @@ describe("submitAvatarSynthesis", () => {
         inputs: [
           {
             content:
-              '<speak version="1.0" xml:lang="en-PH"><voice name="en-PH-RosaNeural"><prosody rate="+0%">Hello</prosody></voice></speak>',
+              '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-PH"><voice name="en-PH-RosaNeural"><prosody rate="+0%">Hello</prosody></voice></speak>',
           },
         ],
         avatarConfig,
@@ -239,7 +239,7 @@ describe("submitAvatarSynthesis", () => {
       inputs: Array<{ content: string }>;
     };
     expect(body.inputs[0].content).toBe(
-      `<speak version="1.0" xml:lang="fil-PH"><voice name="fil-PH-BlessicaNeural"><prosody rate="${rate}">A &amp; &lt;B&gt; &quot;C&quot; &apos;D&apos;</prosody></voice></speak>`,
+      `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="fil-PH"><voice name="fil-PH-BlessicaNeural"><prosody rate="${rate}">A &amp; &lt;B&gt; &quot;C&quot; &apos;D&apos;</prosody></voice></speak>`,
     );
   });
 

@@ -45,6 +45,7 @@ export async function publishPageVideo({
   thumbnail = null,
   feedTargeting = '',
   scheduledPublishTime = null,
+  beforePublish,
 }: {
   pageId: string;
   accessToken: string;
@@ -56,6 +57,7 @@ export async function publishPageVideo({
   thumbnail?: { bytes: Buffer; type: string; filename: string } | null;
   feedTargeting?: string;
   scheduledPublishTime?: number | null;
+  beforePublish?: (videoId: string) => Promise<void>;
 }): Promise<PageVideo> {
   if (video.size > MAX_VIDEO_BYTES) {
     throw new Error(
@@ -124,6 +126,7 @@ export async function publishPageVideo({
   if (description) finishFields.description = description;
   if (feedTargeting) finishFields.feed_targeting = feedTargeting;
 
+  await beforePublish?.(session.video_id);
   await graphPostForm(
     `${pageId}/videos`,
     finishFields,

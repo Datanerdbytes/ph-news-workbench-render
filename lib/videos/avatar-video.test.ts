@@ -123,6 +123,24 @@ describe("loadAvatarVideo", () => {
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:loaded-avatar-1");
   });
 
+  it("uses same-origin credentials for authenticated avatar media", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mp4Response());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const loaded = await loadAvatarVideo(
+      "/api/avatar/syntheses/job-1/video",
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      new URL("/api/avatar/syntheses/job-1/video", window.location.href),
+      expect.objectContaining({
+        credentials: "same-origin",
+        redirect: "manual",
+      }),
+    );
+    loaded.release();
+  });
+
   it("rejects an unapproved host before making a request", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);

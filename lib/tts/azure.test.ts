@@ -27,6 +27,9 @@ describe("buildTtsSsml", () => {
       "fil-PH-BlessicaNeural",
       1.1,
     );
+    expect(ssml).toContain(
+      'xmlns="http://www.w3.org/2001/10/synthesis"',
+    );
     expect(ssml).toContain('xml:lang="fil-PH"');
     expect(ssml).toContain('name="fil-PH-BlessicaNeural"');
     expect(ssml).toContain('rate="+10%"');
