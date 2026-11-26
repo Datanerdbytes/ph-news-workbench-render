@@ -40,6 +40,16 @@ describe("htmlToPlainText", () => {
       "&bogus; &#9999999999; a &lt b"
     );
   });
+
+  it("handles hostile runs of less-than signs without backtracking", () => {
+    const hostile = "<".repeat(200_000);
+    expect(htmlToPlainText(hostile)).toHaveLength(hostile.length);
+  });
+
+  it("drops the rest of an unclosed script or style block", () => {
+    expect(htmlToPlainText("<p>Before</p><script>evil()")).toBe("Before");
+    expect(htmlToPlainText("Before<style>body{")).toBe("Before");
+  });
 });
 
 describe("articleBodyText", () => {
@@ -195,6 +205,10 @@ describe("extractArticleText", () => {
   it("returns '' when the page has no readable paragraphs", () => {
     expect(extractArticleText("<html><body><div>Just text.</div></body></html>")).toBe("");
     expect(extractArticleText("")).toBe("");
+  });
+
+  it("ignores unclosed article and paragraph openers", () => {
+    expect(extractArticleText("<article><p>No closing tags")).toBe("");
   });
 });
 

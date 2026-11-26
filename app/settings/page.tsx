@@ -15,7 +15,7 @@ import {
 import { cn } from "cn";
 import { authClient } from "@/lib/auth-client";
 import { validateNewPassword } from "@/lib/password";
-import { textModelLabel, TEXT_MODELS } from "@/lib/models";
+import { isTextModel, textModelLabel, TEXT_MODELS } from "@/lib/models";
 import { isThemeId, THEMES, type ThemeId } from "@/lib/themes";
 
 type WorkspaceInfo = {
@@ -126,7 +126,12 @@ export default function SettingsPage() {
         }
         setWorkspace(data);
         setName(data.name ?? "");
-        setModel(data.aiModel ?? data.defaultModel ?? "");
+        // A workspace saved under the old NIM catalog can still carry a model
+        // id this build does not know. Show the model drafts actually use.
+        const stored = typeof data.aiModel === "string" ? data.aiModel.trim() : "";
+        setModel(
+          stored && isTextModel(stored) ? stored : data.defaultModel ?? ""
+        );
         setWorkspaceError(false);
       })
       .catch(() => {

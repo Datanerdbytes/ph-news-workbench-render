@@ -60,11 +60,26 @@ jobs:
           # head that is no longer the head, and has not finished. A run that
           # already finished is left alone: cancelling it would rewrite its
           # conclusion and lose the record of what actually happened.
+          #
+          # A newer push may land while this helper is running. That push has
+          # its own supersede run, which knows the new head; stand down rather
+          # than cancel the run it needs.
+          current_head=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha 2>/dev/null || true)
+          if [[ -z "$current_head" ]]; then
+            echo "::warning::could not read the current PR head — leaving runs alone"
+            exit 0
+          fi
+          if [[ "$current_head" != "$HEAD_SHA" ]]; then
+            echo "PR head moved to $current_head; the newer supersede run owns this push"
+            exit 0
+          fi
+
           runs=""
           for attempt in 1 2 3; do
-            if runs=$(gh api --method GET \
-              "repos/$REPO/actions/workflows/trusted-e2e.yml/runs" \
-              -f event=pull_request_target -F per_page=100 2>&1); then
+            # Put the filters in the URL: `-f`/`-F` make `gh api --paginate`
+            # send later pages as POSTs, which the runs endpoint rejects.
+            if runs=$(gh api --paginate --slurp \
+              "repos/$REPO/actions/workflows/trusted-e2e.yml/runs?event=pull_request_target&per_page=100" 2>&1); then
               break
             fi
             echo "::warning::could not list the Trusted E2E runs (attempt ${attempt}/3): ${runs}"
@@ -76,10 +91,15 @@ jobs:
             exit 1
           fi
 
-          stale=$(jq -r --arg title "E2E PR $PR " --arg head "$HEAD_SHA" '
-            [ .workflow_runs[]
-              | select(.display_title | startswith($title))
-              | select(.head_sha != $head)
+          # `pull_request_target` runs report the default branch in `head_sha`,
+          # not the PR head. The run title carries the tested head, so compare
+          # that instead.
+          prefix="E2E PR $PR "
+          current="E2E PR $PR $HEAD_SHA "
+          stale=$(jq -r --arg prefix "$prefix" --arg current "$current" '
+            [ .[].workflow_runs[]
+              | select(.display_title | startswith($prefix))
+              | select(.display_title | startswith($current) | not)
               | select(.status != "completed")
               | .id
             ] | join(" ")

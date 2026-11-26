@@ -122,20 +122,23 @@ async function draftWithModel(
 
   const row = await sql`SELECT total_tokens FROM usage_daily WHERE day = ${today}`;
 
-  if (!text.trim()) {
+  // Spend guards come before retry eligibility: a reply that already blew the
+  // budget must stop the chain, not be retried on every catalog model.
+  if (total > PER_DRAFT_CAP) throw new Error('per-draft cap exceeded');
+
+  if ((row[0]?.total_tokens ?? 0) > DAILY_CAP) {
+    throw new Error('daily cap exceeded');
+  }
+
+  if (!text.trim() || choice?.finish_reason === 'length') {
     // Truncation and empty replies are model-specific — a different catalog
-    // model may answer within the same budget.
+    // model may answer within the same budget. A cut-off reply is not a draft:
+    // storing it as one leaves a post that stops mid-sentence.
     throw new ModelUnavailableError(
       choice?.finish_reason === 'length'
         ? 'The AI ran out of tokens before writing the draft.'
         : 'The model returned an empty draft.'
     );
-  }
-
-  if (total > PER_DRAFT_CAP) throw new Error('per-draft cap exceeded');
-
-  if ((row[0]?.total_tokens ?? 0) > DAILY_CAP) {
-    throw new Error('daily cap exceeded');
   }
 
   // Every catalog model is an OpenRouter ":free" entry, so the spend is $0;

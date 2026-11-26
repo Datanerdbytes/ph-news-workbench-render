@@ -221,11 +221,14 @@ describe("draftPost", () => {
     expect(result.model).toBe("baidu/ernie-5.5-flash-preview:free");
   });
 
-  it("falls back to the next model on an empty or truncated reply", async () => {
+  it("falls back to the next model on an empty or cut-off reply", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(completion("   "))
-      .mockResolvedValueOnce(completion("", 10, 4000, "length"))
+      // Non-empty but truncated: it must not be stored as a finished draft.
+      .mockResolvedValueOnce(
+        completion("A post that stops mid-sent", 10, 900, "length")
+      )
       .mockResolvedValueOnce(completion("Recovered"));
     vi.stubGlobal("fetch", fetchMock);
     vi.stubEnv("OPENROUTER_API_KEY", "key-123");
@@ -233,6 +236,19 @@ describe("draftPost", () => {
     const result = await draftPost("write something");
     expect(result.text).toBe("Recovered");
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not retry a cut-off reply that already overran the draft cap", async () => {
+    // The spend guard wins over retry eligibility: fallback would multiply an
+    // already overspent request across the whole catalog.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(completion("cut off", 4000, 900, "length"));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("OPENROUTER_API_KEY", "key-123");
+
+    await expect(draftPost("hi")).rejects.toThrow("per-draft cap exceeded");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("reports exhaustion after every catalog model fails", async () => {

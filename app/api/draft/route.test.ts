@@ -212,4 +212,16 @@ describe("POST /api/draft", () => {
     expect(draftPostMock).not.toHaveBeenCalled();
     expect(fetchArticleTextMock).not.toHaveBeenCalled();
   });
+
+  it("scopes the story lookup to the caller's workspace", async () => {
+    // A foreign story id must read as missing, not as a draft source.
+    sqlMock.mockResolvedValueOnce([]);
+
+    const res = await draft();
+    expect(res.status).toBe(404);
+    const select = sqlMock.mock.calls[0];
+    expect(callText(select)).toContain("workspace_id");
+    expect(select.slice(1)).toContain("ws1");
+    expect(draftPostMock).not.toHaveBeenCalled();
+  });
 });

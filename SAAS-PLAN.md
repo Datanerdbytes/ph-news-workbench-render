@@ -31,10 +31,11 @@ schedules posts and reviews performance.
 - **AI drafting**: `/api/draft` uses the workspace's OpenRouter model
   (`workspaces.ai_model`, picked in Settings → AI model) and falls back to
   `OPENROUTER_MODEL`. `lib/models.ts` lists OpenRouter free-tier ids chosen
-  for news rewriting; when one is retired the draft retried on the next
+  for news rewriting; when one is retired the draft retries on the next
   catalog model automatically. Drafts rewrite from the full article when the
   feed or the story's page carries it (see `lib/article-text.ts`); calls time
-  out after 120s and upstream failures return 502, not 429.
+  out after 120s. Rate-limit errors (`OpenRouter 429`) and cap errors return
+  429; other upstream failures return 502.
 - **Scheduling**: `scheduled_posts` with `FOR UPDATE SKIP LOCKED` claiming in
   `/api/schedule/run` (Vercel cron, every 5 minutes). Composer has a Schedule
   panel; `/calendar` shows the month grid, upcoming list and cancel. Every

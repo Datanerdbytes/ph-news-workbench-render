@@ -35,12 +35,197 @@ function decodeCodePoint(value: number, original: string): string {
     : original;
 }
 
+type Tag = {
+  name: string;
+  closing: boolean;
+  selfClosing: boolean;
+  start: number;
+  end: number;
+};
+
+function isNameStart(char: string): boolean {
+  return (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z');
+}
+
+function isNameChar(char: string): boolean {
+  return isNameStart(char) || (char >= '0' && char <= '9') || char === ':' || char === '-';
+}
+
+/**
+ * Linear tag tokenizer. Regex block scans backtrack badly on hostile markup —
+ * a run of "<" with no ">" turns `/<[^>]+>/g` quadratic, and an unclosed
+ * `<script>` or `<p>` makes every opener scan to the end of the page. Walking
+ * the string once keeps extraction bounded by the page size.
+ */
+function scanTags(html: string): Tag[] {
+  const tags: Tag[] = [];
+  let index = 0;
+
+  while (index < html.length) {
+    const start = html.indexOf('<', index);
+    if (start === -1) break;
+
+    const next = html[start + 1];
+    if (next === '!') {
+      // Comment, doctype, or CDATA: not a story tag.
+      if (html.startsWith('<!--', start)) {
+        const close = html.indexOf('-->', start + 4);
+        index = close === -1 ? html.length : close + 3;
+      } else {
+        const close = html.indexOf('>', start + 2);
+        index = close === -1 ? html.length : close + 1;
+      }
+      continue;
+    }
+    if (next === '?') {
+      const close = html.indexOf('>', start + 2);
+      index = close === -1 ? html.length : close + 1;
+      continue;
+    }
+
+    let cursor = start + 1;
+    const closing = html[cursor] === '/';
+    if (closing) cursor++;
+    if (!isNameStart(html[cursor] ?? '')) {
+      index = start + 1;
+      continue;
+    }
+    const nameStart = cursor;
+    while (cursor < html.length && isNameChar(html[cursor])) cursor++;
+    const name = html.slice(nameStart, cursor).toLowerCase();
+
+    // A ">" inside a quoted attribute does not end the tag.
+    let quote: string | null = null;
+    let end = cursor;
+    for (; end < html.length; end++) {
+      const char = html[end];
+      if (quote) {
+        if (char === quote) quote = null;
+      } else if (char === '"' || char === "'") {
+        quote = char;
+      } else if (char === '>') {
+        break;
+      }
+    }
+    if (end >= html.length) break; // unclosed tag: nothing after it is markup
+
+    tags.push({
+      name,
+      closing,
+      selfClosing: html[end - 1] === '/',
+      start,
+      end: end + 1,
+    });
+    index = end + 1;
+  }
+
+  return tags;
+}
+
+/** Index of the tag that closes the opener at `openIndex`, or -1. */
+function findClosingTag(tags: Tag[], openIndex: number): number {
+  const { name } = tags[openIndex];
+  let depth = 1;
+
+  for (let i = openIndex + 1; i < tags.length; i++) {
+    const tag = tags[i];
+    if (tag.name !== name) continue;
+    if (tag.closing) {
+      depth--;
+      if (depth === 0) return i;
+    } else if (!tag.selfClosing) {
+      depth++;
+    }
+  }
+
+  return -1;
+}
+
+/** Inner HTML of every closed `name` block, in document order. */
+function blocksOf(html: string, tags: Tag[], name: string): string[] {
+  const blocks: string[] = [];
+
+  for (let i = 0; i < tags.length; i++) {
+    const tag = tags[i];
+    if (tag.closing || tag.selfClosing || tag.name !== name) continue;
+    const close = findClosingTag(tags, i);
+    if (close === -1) continue; // an unclosed opener is not a block
+    blocks.push(html.slice(tag.end, tags[close].start));
+    i = close;
+  }
+
+  return blocks;
+}
+
+type Range = [number, number];
+
+function removeRanges(html: string, ranges: Range[]): string {
+  if (!ranges.length) return html;
+  ranges.sort((a, b) => a[0] - b[0]);
+
+  let out = '';
+  let cursor = 0;
+  for (const [start, end] of ranges) {
+    if (end <= cursor) continue;
+    if (start > cursor) out += html.slice(cursor, start);
+    // Keep the words on either side of a removed block apart.
+    out += ' ';
+    cursor = end;
+  }
+
+  return out + html.slice(cursor);
+}
+
+function removeBlocks(
+  html: string,
+  tags: Tag[],
+  matches: (tag: Tag, html: string) => boolean,
+  unclosedToEnd: boolean
+): string {
+  const ranges: Range[] = [];
+
+  for (let i = 0; i < tags.length; i++) {
+    const tag = tags[i];
+    if (tag.closing || tag.selfClosing || !matches(tag, html)) continue;
+    const close = findClosingTag(tags, i);
+    if (close === -1) {
+      if (unclosedToEnd) ranges.push([tag.start, html.length]);
+      continue;
+    }
+    ranges.push([tag.start, tags[close].end]);
+    i = close;
+  }
+
+  return removeRanges(html, ranges);
+}
+
+const NON_CONTENT_TAGS = new Set([
+  'script',
+  'style',
+  'noscript',
+  'template',
+  'svg',
+  'iframe',
+]);
+
+const isNonContent = (tag: Tag) => NON_CONTENT_TAGS.has(tag.name);
+
+// Embedded posts quote readers, not the story.
+const SOCIAL_CLASS =
+  /class\s*=\s*["'][^"']*(?:twitter-tweet|instagram-media|fb-(?:post|video|xfbml-parse-ignore))[^"']*["']/i;
+
+function isSocialEmbed(tag: Tag, html: string): boolean {
+  return (
+    tag.name === 'blockquote' &&
+    SOCIAL_CLASS.test(html.slice(tag.start, tag.end))
+  );
+}
+
 /** Strip tags, decode entities, and collapse whitespace. */
 export function htmlToPlainText(html: string): string {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
+  const withoutNonContent = removeBlocks(html, scanTags(html), isNonContent, true);
+  return withoutNonContent
+    .replace(/<[^<>]*>/g, ' ')
     .replace(/&#x([\da-f]+);/gi, (_, hex: string) =>
       decodeCodePoint(parseInt(hex, 16), `&#x${hex};`)
     )
@@ -99,12 +284,6 @@ export function feedText(
   return fromSummary.length >= fromPayload.length ? fromSummary : fromPayload;
 }
 
-const NON_CONTENT = /<(script|style|noscript|template|svg|iframe)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
-// Embedded posts quote readers, not the story.
-const SOCIAL_EMBEDS =
-  /<blockquote\b[^>]*\bclass\s*=\s*["'][^"']*(?:twitter-tweet|instagram-media|fb-(?:post|video|xfbml-parse-ignore))[^"']*["'][^>]*>[\s\S]*?<\/blockquote>/gi;
-const ARTICLE = /<article\b[^>]*>([\s\S]*?)<\/article\s*>/gi;
-const PARAGRAPH = /<p\b[^>]*>([\s\S]*?)<\/p\s*>/gi;
 // Disclaimers of a site's machine-written summary widget, and other furniture.
 const BOILERPLATE =
   /^(?:(?:this|the selection above) is AI-generated|related (?:stories|articles)|read more|advertisement|subscribe|sign up|follow us|share this|discover more|comments?|tags:)\b/i;
@@ -158,25 +337,40 @@ function longestParagraphRun(paragraphs: string[]): string {
  * callers can fall back to the feed text.
  */
 function paragraphsOf(html: string): string[] {
-  return [...html.matchAll(PARAGRAPH)]
-    .map((match) => htmlToPlainText(match[1]))
+  return blocksOf(html, scanTags(html), 'p')
+    .map((block) => htmlToPlainText(block))
     .filter((text) => text && !BOILERPLATE.test(text));
 }
 
 export function extractArticleText(html: string, maxChars = SOURCE_MAX_CHARS): string {
-  const page = html.replace(NON_CONTENT, ' ').replace(SOCIAL_EMBEDS, ' ');
+  const withoutNonContent = removeBlocks(
+    html,
+    scanTags(html),
+    isNonContent,
+    true
+  );
+  const page = removeBlocks(
+    withoutNonContent,
+    scanTags(withoutNonContent),
+    isSocialEmbed,
+    false
+  );
+  const pageTags = scanTags(page);
+  const articles = blocksOf(page, pageTags, 'article');
 
   // One <article> holding a story is the page. Teaser-sized ones are kept
   // apart from the rest instead of dropped: a short story also lives in one,
   // and losing it costs more than a stray teaser line.
-  const articles = [...page.matchAll(ARTICLE)];
   let scopes = [page];
   if (articles.length) {
-    const main = articles.reduce((a, b) => (b[1].length > a[1].length ? b : a));
+    const main = articles.reduce((a, b) => (b.length > a.length ? b : a));
     scopes =
-      htmlToPlainText(main[1]).length >= MIN_ARTICLE_CHARS
-        ? [main[1]]
-        : [page.replace(ARTICLE, ' '), ...articles.map((match) => match[1])];
+      htmlToPlainText(main).length >= MIN_ARTICLE_CHARS
+        ? [main]
+        : [
+            removeBlocks(page, pageTags, (tag) => tag.name === 'article', false),
+            ...articles,
+          ];
   }
 
   const text = scopes

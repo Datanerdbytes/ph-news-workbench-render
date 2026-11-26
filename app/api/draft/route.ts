@@ -14,7 +14,7 @@ export async function POST(req: Request) {
   const model = resolveTextModel(access.workspace.aiModel);
   const correlationId = randomUUID();
   console.log(JSON.stringify({ route: 'draft', correlationId, event: 'start', newsItemId, model }));
-  const items = await sql`SELECT title, summary, link, raw_payload FROM news_items WHERE id = ${newsItemId}`;
+  const items = await sql`SELECT title, summary, link, raw_payload FROM news_items WHERE id = ${newsItemId} AND workspace_id = ${access.workspace.id}`;
   if (!items.length) { console.log(JSON.stringify({ route: 'draft', correlationId, event: 'not_found', newsItemId })); return NextResponse.json({ error: 'not found', correlationId }, { status: 404 }); }
   const item = items[0];
   // The feed is the source when it carries the story. A feed that publishes
