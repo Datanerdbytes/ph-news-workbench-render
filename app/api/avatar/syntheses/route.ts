@@ -86,6 +86,18 @@ export async function POST(request: Request) {
       correlationId,
     );
   }
+  if (payload.transparent !== undefined && typeof payload.transparent !== "boolean") {
+    return failure(400, "invalid_transparency", "Choose a valid background setting.", correlationId);
+  }
+  const transparent = payload.transparent === true;
+  if (transparent && avatar.kind !== "video") {
+    return failure(
+      400,
+      "transparency_unavailable",
+      "Transparent backgrounds are available for Meg and Max only.",
+      correlationId,
+    );
+  }
   if (!isTtsVoiceId(payload.voiceId)) {
     return failure(400, "invalid_voice", "Choose a supported voice.", correlationId);
   }
@@ -116,6 +128,7 @@ export async function POST(request: Request) {
       voiceId: payload.voiceId,
       speed,
       text,
+      transparent,
     });
     return NextResponse.json(publicAvatarJob(job), {
       status: 202,

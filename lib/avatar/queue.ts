@@ -30,6 +30,7 @@ type EnqueueInput = {
   voiceId: TtsVoiceId;
   speed: number;
   text: string;
+  transparent?: boolean;
 };
 
 type JobOwner = Pick<AvatarJobRow, "id" | "workspace_id" | "attempts"> & {
@@ -41,6 +42,8 @@ export async function enqueueAvatarJob(input: EnqueueInput): Promise<AvatarJobRo
   const avatar = getAvatar(input.avatarId);
   const estimatedSeconds = estimateAvatarSeconds(input.text, input.speed);
   const limits = avatarLimits();
+  const hasAlpha = input.transparent === true && avatar.kind === "video";
+  const outputFormat = hasAlpha ? "webm" : "mp4";
   const results = await sql.transaction(
     [
       sql`SELECT id FROM workspaces WHERE id = ${input.workspaceId} FOR UPDATE`,
@@ -73,10 +76,12 @@ export async function enqueueAvatarJob(input: EnqueueInput): Promise<AvatarJobRo
         ), inserted AS (
           INSERT INTO avatar_jobs
             (id, workspace_id, user_id, avatar_id, avatar_kind, avatar_style,
-             voice_id, speed, text, characters, estimated_seconds)
+             voice_id, speed, text, characters, estimated_seconds,
+             output_format, has_alpha)
           SELECT ${id}, ${input.workspaceId}, ${input.userId}, ${avatar.id},
                  ${avatar.kind}, ${avatar.style}, ${input.voiceId}, ${input.speed},
-                 ${input.text}, ${input.text.length}, ${estimatedSeconds}
+                 ${input.text}, ${input.text.length}, ${estimatedSeconds},
+                 ${outputFormat}, ${hasAlpha}
           FROM reserved
           RETURNING *
         )

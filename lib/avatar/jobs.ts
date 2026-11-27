@@ -13,6 +13,8 @@ export type AvatarJobStatus =
 
 export type AvatarPublishState = "ready" | "publishing" | "scheduled" | "published";
 
+export type AvatarOutputFormat = "mp4" | "webm";
+
 export const ACTIVE_AVATAR_STATUSES: AvatarJobStatus[] = [
   "queued",
   "submitting",
@@ -38,6 +40,8 @@ export type AvatarJobRow = {
   progress: number | null;
   status_message: string;
   blob_url: string | null;
+  output_format: AvatarOutputFormat;
+  has_alpha: boolean;
   file_size: string | number | null;
   duration_seconds: number | null;
   error: string | null;
@@ -59,6 +63,8 @@ export type PublicAvatarJob = {
   statusMessage: string;
   progress: number | null;
   videoUrl: string | null;
+  outputFormat: AvatarOutputFormat;
+  hasAlpha: boolean;
   durationSeconds: number | null;
   error: string | null;
   publishState: AvatarPublishState;
@@ -77,6 +83,8 @@ export function publicAvatarJob(row: AvatarJobRow): PublicAvatarJob {
     statusMessage: row.status_message,
     progress: row.progress === null ? null : Number(row.progress),
     videoUrl: row.blob_url,
+    outputFormat: row.output_format === "webm" ? "webm" : "mp4",
+    hasAlpha: row.output_format === "webm" && row.has_alpha === true,
     durationSeconds:
       row.duration_seconds === null ? null : Number(row.duration_seconds),
     error: row.error,

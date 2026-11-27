@@ -213,6 +213,30 @@ describe("submitAvatarSynthesis", () => {
     expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it("requests native WebM VP9 alpha for a transparent standard avatar", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(providerResponse("NotStarted"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await submitAvatarSynthesis({ ...INPUT, transparent: true });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.avatarConfig).toMatchObject({
+      videoFormat: "webm",
+      videoCodec: "vp9",
+      backgroundColor: "#00000000",
+    });
+  });
+
+  it("rejects transparency for a photo avatar before contacting Azure", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      submitAvatarSynthesis({ ...INPUT, avatarId: "anika", transparent: true }),
+    ).rejects.toMatchObject({ code: "transparency_unavailable" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("rejects real-time-only preview avatars before contacting Azure", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -401,6 +425,20 @@ describe("downloadAvatarResult", () => {
     for (const [, init] of fetchMock.mock.calls) {
       expect(init).toMatchObject({ redirect: "manual", cache: "no-store" });
     }
+  });
+
+  it("validates and downloads a transparent WebM result", async () => {
+    const bytes = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0]);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(bytes)));
+
+    await expect(
+      downloadAvatarResult({
+        url: RESULT_URL,
+        destination,
+        maxBytes: bytes.length,
+        outputFormat: "webm",
+      }),
+    ).resolves.toBe(bytes.length);
   });
 
   it("rejects a redirect to an untrusted host", async () => {

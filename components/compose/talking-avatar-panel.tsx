@@ -35,6 +35,9 @@ type TalkingAvatarPanelProps = {
   onVoiceChange: (voiceId: TtsVoiceId) => void;
   speed: number;
   onSpeedChange: (speed: number) => void;
+  transparent: boolean;
+  onTransparentChange: (transparent: boolean) => void;
+  transparencySupported: boolean;
   job: PublicAvatarJob | null;
   busy: boolean;
   error: string;
@@ -54,6 +57,9 @@ export function TalkingAvatarPanel({
   onVoiceChange,
   speed,
   onSpeedChange,
+  transparent,
+  onTransparentChange,
+  transparencySupported,
   job,
   busy,
   error,
@@ -74,6 +80,9 @@ export function TalkingAvatarPanel({
   const terminal = Boolean(job && !active);
   const reusable = !job || job.publishState === "ready";
   const controlsDisabled = disabled || busy || active;
+  const selectedAvatar = AVATARS.find((avatar) => avatar.id === avatarId);
+  const canRemoveBackground = selectedAvatar?.kind === "video";
+  const transparentPreview = Boolean(job?.hasAlpha);
   const status = busy
     ? "Starting the avatar job…"
     : error
@@ -184,6 +193,29 @@ export function TalkingAvatarPanel({
           real-time synthesis and can&apos;t be used for generated videos.
         </p>
 
+        {canRemoveBackground ? (
+          <div className="space-y-1.5">
+            <label className="flex min-h-11 items-center gap-2 text-xs font-medium">
+              <input
+                type="checkbox"
+                checked={transparent}
+                onChange={(event) => onTransparentChange(event.target.checked)}
+                disabled={
+                  controlsDisabled ||
+                  (!transparencySupported && !transparent)
+                }
+                className="h-4 w-4 accent-primary"
+              />
+              Transparent background
+            </label>
+            <p className="text-xs leading-5 text-muted-foreground">
+              {transparencySupported
+                ? "Meg and Max can be generated with a native alpha channel for seamless overlays. Publishing without an attachment flattens the video onto black."
+                : "This browser cannot preserve WebM alpha in video previews. Use a current Chrome, Edge, or Firefox to generate a transparent avatar."}
+            </p>
+          </div>
+        ) : null}
+
         <label className="block space-y-1.5 text-xs font-medium">
           <span className="flex items-center justify-between gap-2">
             Speaking speed
@@ -259,13 +291,25 @@ export function TalkingAvatarPanel({
 
         {job?.status === "completed" && job.videoUrl ? (
           preview.url ? (
-            <video
-              controls
-              preload="metadata"
-              src={preview.url}
-              className="aspect-video w-full rounded-lg border border-border bg-black"
-              aria-label={hasMedia ? "Source talking avatar preview" : "Talking avatar preview"}
-            />
+            <div
+              className="overflow-hidden rounded-lg border border-border"
+              style={{
+                backgroundColor: transparentPreview ? "transparent" : "#000",
+                backgroundImage: transparentPreview
+                  ? "linear-gradient(45deg, #d4d4d4 25%, transparent 25%), linear-gradient(-45deg, #d4d4d4 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d4d4d4 75%), linear-gradient(-45deg, transparent 75%, #d4d4d4 75%)"
+                  : undefined,
+                backgroundSize: transparentPreview ? "16px 16px" : undefined,
+                backgroundPosition: transparentPreview ? "0 0, 0 8px, 8px -8px, -8px 0" : undefined,
+              }}
+            >
+              <video
+                controls
+                preload="metadata"
+                src={preview.url}
+                className="aspect-video w-full"
+                aria-label={hasMedia ? "Source talking avatar preview" : "Talking avatar preview"}
+              />
+            </div>
           ) : preview.error ? (
             <p
               role="alert"

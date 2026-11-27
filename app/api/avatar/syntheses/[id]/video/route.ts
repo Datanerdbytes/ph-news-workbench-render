@@ -1,6 +1,12 @@
 import { getAvatarJob } from "@/lib/avatar/queue";
 import { requireWorkspace, unauthorized } from "@/lib/session";
 import { openStagedBlob } from "@/lib/storage";
+import {
+  avatarMediaExtension,
+  avatarMediaType,
+  hasAvatarHeader,
+} from "@/lib/avatar/output";
+import type { AvatarOutputFormat } from "@/lib/avatar/jobs";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -11,6 +17,7 @@ type Context = { params: Promise<{ id: string }> };
 
 function validatedAvatarBody(
   body: ReadableStream<Uint8Array>,
+  outputFormat: AvatarOutputFormat,
 ): ReadableStream<Uint8Array> {
   let size = 0;
   let header = new Uint8Array(0);
@@ -34,12 +41,11 @@ function validatedAvatarBody(
         controller.enqueue(chunk);
       },
       flush(controller) {
-        if (
-          header.length < 8 ||
-          String.fromCharCode(...header.subarray(4, 8)) !== "ftyp"
-        ) {
+        if (!hasAvatarHeader(header, outputFormat)) {
           controller.error(
-            new Error("The avatar source is not a valid MP4 video."),
+            new Error(
+              `The avatar source is not a valid ${outputFormat === "webm" ? "WebM" : "MP4"} video.`,
+            ),
           );
           return;
         }
@@ -76,16 +82,17 @@ export async function GET(request: Request, context: Context) {
         { status: 413, headers: { "Cache-Control": "private, no-store" } },
       );
     }
+    const outputFormat = job.output_format === "webm" ? "webm" : "mp4";
     const headers = new Headers({
-      "Content-Type": "video/mp4",
+      "Content-Type": avatarMediaType(outputFormat),
       "Cache-Control": "private, no-store",
-      "Content-Disposition": 'inline; filename="avatar.mp4"',
+      "Content-Disposition": `inline; filename="avatar.${avatarMediaExtension(outputFormat)}"`,
       "X-Content-Type-Options": "nosniff",
     });
     if (Number.isFinite(contentLength) && contentLength >= 0) {
       headers.set("Content-Length", String(contentLength));
     }
-    return new Response(validatedAvatarBody(upstream.body), {
+    return new Response(validatedAvatarBody(upstream.body, outputFormat), {
       status: 200,
       headers,
     });

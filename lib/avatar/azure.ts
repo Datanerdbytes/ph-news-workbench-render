@@ -5,6 +5,8 @@ import { pipeline } from "node:stream/promises";
 import { buildTtsSsml } from "@/lib/tts/azure";
 import type { TtsVoiceId } from "@/lib/tts/voices";
 import { getAvatar, type AvatarId } from "./avatars";
+import { hasAvatarHeader } from "./output";
+import type { AvatarOutputFormat } from "./jobs";
 import {
   deferAvatarRequests,
   waitForAvatarRequest,
@@ -188,6 +190,7 @@ export async function submitAvatarSynthesis(input: {
   avatarId: AvatarId;
   voiceId: TtsVoiceId;
   speed: number;
+  transparent?: boolean;
 }): Promise<AvatarSynthesis> {
   const avatar = getAvatar(input.avatarId);
   if (avatar.kind === "photo" && avatar.baseModel !== "vasa-1") {
@@ -198,6 +201,14 @@ export async function submitAvatarSynthesis(input: {
       false,
     );
   }
+  if (input.transparent && avatar.kind !== "video") {
+    throw new AvatarError(
+      400,
+      "transparency_unavailable",
+      "Transparent backgrounds are available for Meg and Max only.",
+      false,
+    );
+  }
   const endpoint = avatarEndpoint();
   const key = avatarSpeechKey();
   const avatarConfig = {
@@ -205,8 +216,9 @@ export async function submitAvatarSynthesis(input: {
     ...(avatar.kind === "video"
       ? { talkingAvatarStyle: avatar.style, customized: false }
       : { photoAvatarBaseModel: avatar.baseModel }),
-    videoFormat: "mp4",
-    videoCodec: "h264",
+    videoFormat: input.transparent ? "webm" : "mp4",
+    videoCodec: input.transparent ? "vp9" : "h264",
+    ...(input.transparent ? { backgroundColor: "#00000000" } : {}),
     subtitleType: "none",
     bitrateKbps: 2000,
   };
@@ -308,6 +320,7 @@ export async function downloadAvatarResult(input: {
   url: string;
   destination: string;
   maxBytes: number;
+  outputFormat?: AvatarOutputFormat;
 }): Promise<number> {
   let current = resultUrl(input.url);
   let response: Response | undefined;
@@ -365,8 +378,13 @@ export async function downloadAvatarResult(input: {
   } finally {
     await file.close();
   }
-  if (info.size === 0 || header.toString("ascii", 4, 8) !== "ftyp") {
-    throw new AvatarError(502, "invalid_video", "The avatar service did not return a valid MP4.");
+  const outputFormat = input.outputFormat ?? "mp4";
+  if (info.size === 0 || !hasAvatarHeader(header, outputFormat)) {
+    throw new AvatarError(
+      502,
+      "invalid_video",
+      `The avatar service did not return a valid ${outputFormat === "webm" ? "WebM" : "MP4"}.`,
+    );
   }
   return info.size;
 }

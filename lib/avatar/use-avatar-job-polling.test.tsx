@@ -15,6 +15,8 @@ function job(overrides: Partial<PublicAvatarJob> = {}): PublicAvatarJob {
     statusMessage: "Generating",
     progress: 0.25,
     videoUrl: null,
+    outputFormat: "mp4",
+    hasAlpha: false,
     durationSeconds: null,
     error: null,
     publishState: "ready",

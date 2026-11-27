@@ -46,6 +46,7 @@ type AvatarOverlayEditorProps = {
   onPlacementChange: (placement: AvatarPlacement) => void;
   originalAudioVolume: number;
   onOriginalAudioVolumeChange: (volume: number) => void;
+  transparent?: boolean;
   disabled: boolean;
 };
 
@@ -85,6 +86,7 @@ export function AvatarOverlayEditor({
   onPlacementChange,
   originalAudioVolume,
   onOriginalAudioVolumeChange,
+  transparent = false,
   disabled,
 }: AvatarOverlayEditorProps) {
   const previewRef = useRef<HTMLDivElement>(null);
@@ -95,6 +97,7 @@ export function AvatarOverlayEditor({
   const avatarPreviewUrl = preview.url;
   const [avatarAspect, setAvatarAspect] = useState(16 / 9);
   const [playingSource, setPlayingSource] = useState<string | null>(null);
+  const [duckOriginal, setDuckOriginal] = useState(false);
   const isPlaying =
     playingSource === avatarUrl && !disabled && Boolean(avatarPreviewUrl);
   const safePlacement = clampAvatarPlacement(placement, avatarAspect);
@@ -116,10 +119,18 @@ export function AvatarOverlayEditor({
       for (const video of videos) video.pause();
       return;
     }
-    void Promise.all(videos.map((video) => video.play())).catch(() => {
+    const toPlay = videos.filter((video) => !video.ended);
+    void Promise.all(toPlay.map((video) => video.play())).catch(() => {
       setPlayingSource(null);
+      setDuckOriginal(false);
     });
   }, [isPlaying, avatarUrl, baseVideoUrl]);
+
+  useEffect(() => {
+    const base = baseVideoRef.current;
+    if (!base) return;
+    base.volume = isPlaying && duckOriginal ? safeVolume : 1;
+  }, [isPlaying, duckOriginal, safeVolume, baseVideoUrl]);
 
   function beginDrag(
     event: PointerEvent<HTMLElement>,
@@ -211,9 +222,18 @@ export function AvatarOverlayEditor({
   function togglePlayback() {
     if (disabled || !avatarPreviewUrl) return;
     if (!isPlaying) {
-      for (const video of [baseVideoRef.current, avatarVideoRef.current]) {
-        if (video?.ended) video.currentTime = 0;
+      const baseEnded = Boolean(baseVideoRef.current?.ended);
+      const avatarEnded = Boolean(avatarVideoRef.current?.ended);
+      if (baseEnded) {
+        for (const video of [baseVideoRef.current, avatarVideoRef.current]) {
+          if (video) video.currentTime = 0;
+        }
+      } else if (avatarEnded) {
+        // keep avatar at end; do not reset
       }
+      setDuckOriginal(Boolean(baseVideoRef.current));
+    } else {
+      setDuckOriginal(false);
     }
     setPlayingSource(isPlaying ? null : avatarUrl);
   }
@@ -221,6 +241,7 @@ export function AvatarOverlayEditor({
   function stopWhenFinished() {
     const base = baseVideoRef.current;
     const avatar = avatarVideoRef.current;
+    if (avatar?.ended) setDuckOriginal(false);
     if (avatar?.ended && (!base || base.ended)) setPlayingSource(null);
   }
 
@@ -272,7 +293,6 @@ export function AvatarOverlayEditor({
             <video
               ref={baseVideoRef}
               src={baseVideoUrl}
-              muted
               playsInline
               preload="metadata"
               onEnded={stopWhenFinished}
@@ -316,7 +336,8 @@ export function AvatarOverlayEditor({
               // The preview wrapper disables pointer events so the footage
               // beneath stays non-interactive; the movable overlay must
               // opt back in or drag and keyboard focus stop working.
-              "pointer-events-auto group relative h-full w-full touch-none select-none border-2 border-white bg-black shadow-lg outline-none transition-[box-shadow]",
+              "pointer-events-auto group relative h-full w-full touch-none select-none border-2 border-white shadow-lg outline-none transition-[box-shadow]",
+              transparent ? "bg-transparent" : "bg-black",
               disabled
                 ? "cursor-not-allowed"
                 : "cursor-move focus-visible:ring-4 focus-visible:ring-primary/70",
@@ -326,7 +347,6 @@ export function AvatarOverlayEditor({
               <video
                 ref={avatarVideoRef}
                 src={avatarPreviewUrl}
-                muted
                 playsInline
                 preload="metadata"
                 onLoadedMetadata={(event) => {
@@ -382,7 +402,8 @@ export function AvatarOverlayEditor({
       >
         Drag to move or use the corner handle to resize. Keyboard: arrow keys move,
         Shift + arrows move faster, + / − resize, and Home resets the position.
-        Preview is silent; the final video includes the avatar&apos;s audio.
+        Preview includes the avatar&apos;s audio and ducks the attached video while
+        the avatar speaks.
       </p>
 
       <div className="mt-4 space-y-4 border-t border-border/60 pt-3">

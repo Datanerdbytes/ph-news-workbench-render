@@ -1,4 +1,10 @@
 import {
+  avatarMediaType,
+  hasAvatarHeader,
+} from "@/lib/avatar/output";
+import type { AvatarOutputFormat } from "@/lib/avatar/jobs";
+import { transcodeInBrowser } from "@/lib/reels/browser-normalize";
+import {
   COMPOSITION_HEIGHT,
   COMPOSITION_WIDTH,
   avatarPlacementPixels,
@@ -101,10 +107,11 @@ async function readAvatarBlob(response: Response): Promise<Blob> {
   if (
     contentType &&
     contentType !== "video/mp4" &&
+    contentType !== "video/webm" &&
     contentType !== "application/octet-stream" &&
     contentType !== "binary/octet-stream"
   ) {
-    throw new Error("The avatar source is not an MP4 video.");
+    throw new Error("The avatar source is not an MP4 or WebM video.");
   }
   if (!response.body) {
     const blob = await response.blob();
@@ -132,11 +139,15 @@ async function readAvatarBlob(response: Response): Promise<Blob> {
   });
 }
 
-async function fetchAvatarBlob(
-  source: URL,
-  s3Origin: string | null,
+export async function fetchValidatedAvatarBlob(
+  source: string,
 ): Promise<Blob> {
-  const key = source.href;
+  const current = new URL(source, window.location.href);
+  const s3Origin = await getManagedS3Origin();
+  if (!allowedAvatarUrl(current, s3Origin)) {
+    throw new Error("The avatar video source is not supported.");
+  }
+  const key = current.href;
   const existing = avatarBlobRequests.get(key);
   if (existing) return existing;
 
@@ -153,7 +164,6 @@ async function fetchAvatarBlob(
       // inspected (`redirect: "manual"` yields opaque responses) nor safely
       // followed (`redirect: "follow"` would chase any host), so any 3xx
       // fails closed here.
-      const current = new URL(source.href);
       const response = await fetch(current, {
         credentials:
           current.origin === window.location.origin ? "same-origin" : "omit",
@@ -178,13 +188,17 @@ async function fetchAvatarBlob(
         throw new Error("The avatar video is empty.");
       }
       const header = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
-      if (
-        header.length < 8 ||
-        String.fromCharCode(...header.subarray(4, 8)) !== "ftyp"
-      ) {
-        throw new Error("The avatar source is not a valid MP4 video.");
+      const outputFormat: AvatarOutputFormat | null = hasAvatarHeader(header, "mp4")
+        ? "mp4"
+        : hasAvatarHeader(header, "webm")
+          ? "webm"
+          : null;
+      if (!outputFormat) {
+        throw new Error("The avatar source is not a valid MP4 or WebM video.");
       }
-      return blob;
+      return blob.type === avatarMediaType(outputFormat)
+        ? blob
+        : blob.slice(0, blob.size, avatarMediaType(outputFormat));
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         throw new Error("The avatar video took too long to load.");
@@ -207,14 +221,10 @@ export async function prepareAvatarVideoSource(
   source: string,
 ): Promise<PreparedAvatarVideoSource> {
   const current = new URL(source, window.location.href);
-  const s3Origin = await getManagedS3Origin();
-  if (!allowedAvatarUrl(current, s3Origin)) {
-    throw new Error("The avatar video source is not supported.");
-  }
   if (current.protocol === "blob:") {
     return { url: current.href, owned: false };
   }
-  const blob = await fetchAvatarBlob(current, s3Origin);
+  const blob = await fetchValidatedAvatarBlob(source);
   return { url: URL.createObjectURL(blob), owned: true };
 }
 
@@ -277,6 +287,19 @@ export async function loadAvatarVideo(source: string): Promise<LoadedAvatarVideo
     }
     throw error;
   }
+}
+
+export async function flattenTransparentAvatar(
+  source: string,
+  onProgress?: (ratio: number) => void,
+): Promise<File> {
+  const blob = await fetchValidatedAvatarBlob(source);
+  if (!hasAvatarHeader(new Uint8Array(await blob.slice(0, 4).arrayBuffer()), "webm")) {
+    throw new Error("The transparent avatar source is not a valid WebM video.");
+  }
+  return transcodeInBrowser(blob, "avatar.webm", onProgress, {
+    preserveAspect: true,
+  });
 }
 
 export function drawAvatarVideo(

@@ -155,6 +155,54 @@ describe.skipIf(!process.env.DATABASE_URL)("avatar quota accounting", () => {
     expect(rows).toHaveLength(1);
   });
 
+  it("persists transparency metadata only for standard video avatars", async () => {
+    const transparentVideo = await enqueueAvatarJob({
+      workspaceId,
+      userId,
+      avatarId: "max-business",
+      voiceId: "en-PH-RosaNeural",
+      speed: 1,
+      text: "Transparent preview",
+      transparent: true,
+    });
+    const transparentPhoto = await enqueueAvatarJob({
+      workspaceId,
+      userId,
+      avatarId: "leonie",
+      voiceId: "en-PH-RosaNeural",
+      speed: 1,
+      text: "Opaque preview",
+      transparent: true,
+    });
+
+    expect(transparentVideo).toMatchObject({
+      output_format: "webm",
+      has_alpha: true,
+    });
+    expect(transparentPhoto).toMatchObject({
+      output_format: "mp4",
+      has_alpha: false,
+    });
+    const rows = await sql`
+      SELECT id, output_format, has_alpha FROM avatar_jobs
+      WHERE id = ANY(${[transparentVideo.id, transparentPhoto.id]}::text[])
+      ORDER BY id`;
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: transparentVideo.id,
+          output_format: "webm",
+          has_alpha: true,
+        }),
+        expect.objectContaining({
+          id: transparentPhoto.id,
+          output_format: "mp4",
+          has_alpha: false,
+        }),
+      ]),
+    );
+  });
+
   it("replaces the reservation with rounded-up actual seconds on completion", async () => {
     const job = await enqueue();
     const claimed = await claimNextAvatarJob("db-avatar-worker");

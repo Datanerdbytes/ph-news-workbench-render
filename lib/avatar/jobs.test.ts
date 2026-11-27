@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   avatarMediaUrl,
   preferredAvatarJob,
+  publicAvatarJob,
   readAvatarJobResponse,
+  type AvatarJobRow,
   type PublicAvatarJob,
 } from "./jobs";
 
@@ -17,6 +19,8 @@ function job(overrides: Partial<PublicAvatarJob> = {}): PublicAvatarJob {
     statusMessage: "Ready",
     progress: 1,
     videoUrl: "https://store.test/avatar.mp4",
+    outputFormat: "mp4",
+    hasAlpha: false,
     durationSeconds: 3,
     error: null,
     publishState: "ready",
@@ -25,6 +29,46 @@ function job(overrides: Partial<PublicAvatarJob> = {}): PublicAvatarJob {
     ...overrides,
   };
 }
+
+describe("publicAvatarJob", () => {
+  it("exposes alpha metadata and defaults legacy rows to opaque MP4", () => {
+    const row = {
+      id: "job-1",
+      workspace_id: "ws-1",
+      user_id: "user-1",
+      avatar_id: "meg-formal",
+      avatar_kind: "video",
+      avatar_style: "formal",
+      voice_id: "en-PH-RosaNeural",
+      speed: 1,
+      text: "Hello",
+      characters: 5,
+      estimated_seconds: 3,
+      provider_synthesis_id: null,
+      status: "completed",
+      progress: 1,
+      status_message: "Ready",
+      blob_url: "https://store.test/avatar.webm",
+      file_size: 100,
+      duration_seconds: 3,
+      error: null,
+      worker_id: null,
+      attempts: 1,
+      cancel_requested: false,
+      publish_state: "ready",
+      created_at: "2026-11-17T10:00:00.000Z",
+      updated_at: "2026-11-17T10:00:00.000Z",
+    } as AvatarJobRow;
+
+    expect(publicAvatarJob(row)).toMatchObject({
+      outputFormat: "mp4",
+      hasAlpha: false,
+    });
+    expect(
+      publicAvatarJob({ ...row, output_format: "webm", has_alpha: true }),
+    ).toMatchObject({ outputFormat: "webm", hasAlpha: true });
+  });
+});
 
 describe("avatarMediaUrl", () => {
   it("builds an encoded authenticated playback path without the storage URL", () => {
