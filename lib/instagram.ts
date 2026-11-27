@@ -15,11 +15,13 @@ export const REQUIRED_INSTAGRAM_SCOPES = [
 
 export class InstagramApiError extends Error {
   readonly code?: number;
+  readonly ambiguous: boolean;
 
-  constructor(message: string, code?: number) {
+  constructor(message: string, code?: number, ambiguous = false) {
     super(message);
     this.name = 'InstagramApiError';
     this.code = code;
+    this.ambiguous = ambiguous;
   }
 }
 
@@ -42,7 +44,8 @@ async function igRequest<T>(
   path: string,
   params: Record<string, string>,
   accessToken: string,
-  method: 'GET' | 'POST' = 'GET'
+  method: 'GET' | 'POST' = 'GET',
+  ambiguous = false
 ): Promise<T> {
   const url = instagramGraphUrl(path);
   if (method === 'GET') {
@@ -64,7 +67,7 @@ async function igRequest<T>(
         : {}),
     });
   } catch {
-    throw new InstagramApiError('Instagram could not be reached.');
+    throw new InstagramApiError('Instagram could not be reached.', undefined, ambiguous);
   }
 
   const body: unknown = await response.json().catch(() => null);
@@ -74,10 +77,14 @@ async function igRequest<T>(
     if (detail?.error?.message) {
       throw new InstagramApiError(detail.error.message, detail.error.code);
     }
-    throw new InstagramApiError(`Instagram returned ${response.status}.`);
+    throw new InstagramApiError(
+      `Instagram returned ${response.status}.`,
+      undefined,
+      ambiguous
+    );
   }
   if (!body) {
-    throw new InstagramApiError('Instagram returned an empty response.');
+    throw new InstagramApiError('Instagram returned an empty response.', undefined, ambiguous);
   }
   return body as T;
 }
@@ -164,10 +171,11 @@ export async function publishMediaContainer({
     `${igUserId}/media_publish`,
     { creation_id: containerId },
     accessToken,
-    'POST'
+    'POST',
+    true
   );
   if (!body.id) {
-    throw new InstagramApiError('Instagram did not return a published media id.');
+    throw new InstagramApiError('Instagram did not return a published media id.', undefined, true);
   }
   return body.id;
 }

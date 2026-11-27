@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import {
@@ -12,7 +13,7 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { del, head, list } from '@vercel/blob';
+import { del, head, list, put } from '@vercel/blob';
 import { deleteFiles, uploadFile } from '@huggingface/hub';
 
 /**
@@ -40,6 +41,7 @@ export type StorageDriver = 'blob' | 's3' | 'hf';
 
 const BLOB_HOST = '.public.blob.vercel-storage.com';
 const HF_RESOLVE_PREFIX = 'https://huggingface.co/datasets/';
+const MAX_STAGED_REDIRECTS = 5;
 
 export function getStorageDriver(): StorageDriver {
   // STORAGE_DRIVER wins at runtime; NEXT_PUBLIC_STORAGE_DRIVER is the
@@ -64,6 +66,27 @@ function blobRoot(): string {
 
 function s3PublicBase(): string {
   return (process.env.S3_PUBLIC_BASE ?? '').trim().replace(/\/+$/, '');
+}
+
+export function getManagedStoragePublicOrigin(): string | null {
+  if (getStorageDriver() !== 's3') return null;
+  const base = s3PublicBase();
+  if (!base) return null;
+  try {
+    const url = new URL(base);
+    if (
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      (url.protocol !== 'https:' && url.protocol !== 'http:')
+    ) {
+      return null;
+    }
+    return url.origin;
+  } catch {
+    return null;
+  }
 }
 
 function s3Bucket(): string {
@@ -123,9 +146,28 @@ function s3(): S3Client {
 
 function s3KeyFromUrl(url: string): string | null {
   const base = s3PublicBase();
-  if (base === '' || !url.startsWith(`${base}/`)) return null;
+  if (!base) return null;
   try {
-    return decodeURIComponent(new URL(url).pathname.slice(1));
+    const source = new URL(url);
+    const root = new URL(base);
+    if (
+      source.username ||
+      source.password ||
+      source.search ||
+      source.hash ||
+      root.username ||
+      root.password ||
+      root.search ||
+      root.hash ||
+      source.origin !== root.origin ||
+      (source.protocol !== 'https:' && source.protocol !== 'http:')
+    ) {
+      return null;
+    }
+    const prefix = root.pathname.replace(/\/+$/, '');
+    if (!source.pathname.startsWith(`${prefix}/`)) return null;
+    const key = decodeURIComponent(source.pathname.slice(prefix.length + 1));
+    return key || null;
   } catch {
     return null;
   }
@@ -172,10 +214,8 @@ export function isManagedStagedUrl(url: string): boolean {
       const root = blobRoot();
       return (root === '' || url.startsWith(root)) && url.includes(BLOB_HOST);
     }
-    case 's3': {
-      const base = s3PublicBase();
-      return base !== '' && url.startsWith(`${base}/`);
-    }
+    case 's3':
+      return s3KeyFromUrl(url) !== null;
     case 'hf': {
       const repo = hfRepo();
       return (
@@ -222,21 +262,112 @@ export async function assertStagedBlob(url: string): Promise<void> {
   }
 }
 
+function allowedStagedRedirect(
+  target: URL,
+  initial: URL,
+  driver: StorageDriver,
+): boolean {
+  if (target.username || target.password) return false;
+  if (driver === 'hf') {
+    if (target.protocol !== 'https:' || (target.port && target.port !== '443')) {
+      return false;
+    }
+    const host = target.hostname.toLowerCase();
+    return (
+      host === 'huggingface.co' ||
+      host.endsWith('.huggingface.co') ||
+      host.endsWith('.xethub.hf.co')
+    );
+  }
+  return (
+    (target.protocol === 'https:' || target.protocol === 'http:') &&
+    target.origin === initial.origin
+  );
+}
+
+/**
+ * Open a verified staged object without allowing the storage provider to
+ * redirect the server to an arbitrary host. The caller owns the response body.
+ */
+export async function openStagedBlob(url: string): Promise<Response> {
+  const driver = getStorageDriver();
+  let initial: URL;
+  try {
+    initial = new URL(url);
+  } catch {
+    throw new Error('The staged URL does not belong to this app.');
+  }
+  const belongs =
+    isManagedStagedUrl(url) &&
+    (driver === 'hf'
+      ? hfPathFromUrl(url) !== null
+      : driver === 's3'
+        ? s3KeyFromUrl(url) !== null
+        : initial.hostname.endsWith(BLOB_HOST));
+  if (!belongs || initial.username || initial.password) {
+    throw new Error('The staged URL does not belong to this app.');
+  }
+
+  await assertStagedBlob(url);
+  const token = driver === 'hf' ? requireHfConfig() : null;
+  let current = initial;
+  for (let redirects = 0; redirects <= MAX_STAGED_REDIRECTS; redirects += 1) {
+    const response = await fetch(current.href, {
+      cache: 'no-store',
+      credentials: 'omit',
+      redirect: 'manual',
+      headers:
+        token && current.origin === initial.origin
+          ? { Authorization: `Bearer ${token}` }
+          : {},
+    });
+    if (response.type === 'opaqueredirect') {
+      throw new Error('The staged file redirect could not be verified.');
+    }
+    if (response.status < 300 || response.status >= 400) {
+      if (response.url) {
+        const finalUrl = new URL(response.url);
+        if (!allowedStagedRedirect(finalUrl, initial, driver)) {
+          await response.body?.cancel().catch(() => {});
+          throw new Error('The staged file response came from an unapproved source.');
+        }
+      }
+      if (!response.ok || !response.body) {
+        await response.body?.cancel().catch(() => {});
+        throw new Error('The staged file could not be read.');
+      }
+      return response;
+    }
+    const location = response.headers.get('location');
+    if (!location) {
+      await response.body?.cancel().catch(() => {});
+      throw new Error('The staged file redirect is invalid.');
+    }
+    await response.body?.cancel().catch(() => {});
+    let next: URL;
+    try {
+      next = new URL(location, current);
+    } catch {
+      throw new Error('The staged file redirect is invalid.');
+    }
+    if (!allowedStagedRedirect(next, initial, driver)) {
+      throw new Error('The staged file redirect is not allowed.');
+    }
+    if (redirects === MAX_STAGED_REDIRECTS) {
+      throw new Error('The staged file redirected too many times.');
+    }
+    current = next;
+  }
+  throw new Error('The staged file redirected too many times.');
+}
+
 /**
  * Download a staged file into memory. Used by publishing routes: the browser
  * stages the file to storage directly (client → storage, no function in
  * between) and the route reads it from there.
  */
 export async function stagedFileToBuffer(url: string): Promise<Buffer> {
-  await assertStagedBlob(url);
-  const headers: Record<string, string> = {};
-  if (getStorageDriver() === 'hf') {
-    headers.Authorization = `Bearer ${requireHfConfig()}`;
-  }
-  const response = await fetch(url, { cache: 'no-store', headers });
-  if (!response.ok) {
-    throw new Error('The staged upload could not be read.');
-  }
+  const response = await openStagedBlob(url);
   return Buffer.from(await response.arrayBuffer());
 }
 
@@ -248,16 +379,7 @@ export async function stagedFileToBuffer(url: string): Promise<Buffer> {
 export async function stagedFileToTempFile(
   url: string
 ): Promise<{ workDir: string; path: string; size: number }> {
-  await assertStagedBlob(url);
-  const headers: Record<string, string> = {};
-  if (getStorageDriver() === 'hf') {
-    headers.Authorization = `Bearer ${requireHfConfig()}`;
-  }
-  const response = await fetch(url, { cache: 'no-store', headers });
-  if (!response.ok || !response.body) {
-    throw new Error('The staged upload could not be read.');
-  }
-
+  const response = await openStagedBlob(url);
   const workDir = await mkdtemp(path.join(tmpdir(), 'ph-staged-'));
   const suffix = stagedFileExtension(url);
   const filePath = path.join(
@@ -422,6 +544,71 @@ export async function presignStagedUpload(
   });
   const uploadUrl = await getSignedUrl(s3(), command, { expiresIn: 3600 });
   return { uploadUrl, publicUrl: `${s3PublicBase()}/${key}` };
+}
+
+export async function stageServerFile(
+  pathname: string,
+  filePath: string,
+  contentType: string,
+  maxBytes = 1024 * 1024 * 1024,
+  abortSignal?: AbortSignal,
+): Promise<{ url: string; pathname: string; contentType: string }> {
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(pathname) ||
+    pathname.includes('..') ||
+    pathname.includes('//')
+  ) {
+    throw new Error('The staged upload path is invalid.');
+  }
+  const info = await stat(filePath);
+  if (!info.isFile() || info.size === 0 || info.size > maxBytes) {
+    throw new Error('The staged upload has an invalid file size.');
+  }
+
+  const extension = path.posix.extname(pathname);
+  const base = extension ? pathname.slice(0, -extension.length) : pathname;
+  const key = `${base}-${randomUUID().slice(0, 8)}${extension}`;
+  const driver = getStorageDriver();
+
+  if (driver === 'blob') {
+    const blob = await put(key, createReadStream(filePath), {
+      access: 'public',
+      contentType,
+      addRandomSuffix: false,
+      multipart: true,
+      abortSignal,
+    });
+    return { url: blob.url, pathname: blob.pathname, contentType };
+  }
+  if (driver === 's3') {
+    requireS3Config();
+    await s3().send(
+      new PutObjectCommand({
+        Bucket: s3Bucket(),
+        Key: key,
+        Body: createReadStream(filePath),
+        ContentType: contentType,
+        ContentLength: info.size,
+      }),
+      // The SDK only honors the signal from the handler options — inside the
+      // command input it is ignored and a cancelled upload keeps streaming.
+      abortSignal ? { abortSignal } : undefined,
+    );
+    return { url: `${s3PublicBase()}/${key}`, pathname: key, contentType };
+  }
+
+  const token = requireHfConfig();
+  await uploadFile({
+    repo: { type: 'dataset', name: hfRepo() },
+    file: { path: key, content: pathToFileURL(filePath) },
+    credentials: { accessToken: token },
+    ...(abortSignal ? { abortSignal } : {}),
+  });
+  return {
+    url: `${HF_RESOLVE_PREFIX}${hfRepo()}/resolve/main/${key}`,
+    pathname: key,
+    contentType,
+  };
 }
 
 /**

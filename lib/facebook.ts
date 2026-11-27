@@ -32,11 +32,13 @@ export const FACEBOOK_SCOPES = [
 
 export class FacebookApiError extends Error {
   readonly code?: number;
+  readonly ambiguous: boolean;
 
-  constructor(message: string, code?: number) {
+  constructor(message: string, code?: number, ambiguous = false) {
     super(message);
     this.name = 'FacebookApiError';
     this.code = code;
+    this.ambiguous = ambiguous;
   }
 }
 
@@ -789,7 +791,8 @@ export async function graphPostForm<T>(
   fields: Record<string, string>,
   accessToken: string,
   files: GraphUploadFile[] = [],
-  timeoutMs = TIMEOUT_MS
+  timeoutMs = TIMEOUT_MS,
+  ambiguous = false
 ): Promise<T> {
   const form = new FormData();
   for (const [key, value] of Object.entries(fields)) {
@@ -818,22 +821,36 @@ export async function graphPostForm<T>(
       }
     );
   } catch {
-    throw new FacebookApiError('Facebook could not be reached.');
+    throw new FacebookApiError('Facebook could not be reached.', undefined, ambiguous);
   }
 
   const body = (await response.json().catch(() => null)) as
     | (T & GraphErrorBody)
     | null;
 
-  if (!response.ok || body?.error) {
+  // Only a Graph error object with a message proves Graph rejected the
+  // request. A non-OK response with any other body (e.g. a gateway's 503
+  // page or {"error":"upstream unavailable"}) may have been accepted by
+  // Graph — keep the caller's ambiguity so the scheduler never treats a
+  // possibly-live publish as a definite failure and repost it.
+  const error = body?.error;
+  if (
+    error &&
+    typeof error === "object" &&
+    typeof error.message === "string"
+  ) {
+    throw new FacebookApiError(error.message, error.code);
+  }
+  if (!response.ok) {
     throw new FacebookApiError(
-      body?.error?.message ?? `Facebook request failed (${response.status}).`,
-      body?.error?.code
+      `Facebook request failed (${response.status}).`,
+      undefined,
+      ambiguous
     );
   }
 
   if (!body) {
-    throw new FacebookApiError('Facebook returned an empty response.');
+    throw new FacebookApiError('Facebook returned an empty response.', undefined, ambiguous);
   }
 
   return body;
@@ -843,13 +860,16 @@ async function graphPost<T>(
   path: string,
   fields: Record<string, string>,
   accessToken: string,
-  file?: { bytes: Buffer; type: string; filename: string }
+  file?: { bytes: Buffer; type: string; filename: string },
+  ambiguous = false
 ): Promise<T> {
   return graphPostForm(
     path,
     fields,
     accessToken,
-    file ? [{ field: 'source', ...file }] : []
+    file ? [{ field: 'source', ...file }] : [],
+    undefined,
+    ambiguous
   );
 }
 
@@ -942,16 +962,29 @@ async function uploadPagePhoto(
   return result.id;
 }
 
+function requiredPostId(id: string | undefined): string {
+  if (!id) {
+    throw new FacebookApiError(
+      'Facebook did not return a post id.',
+      undefined,
+      true
+    );
+  }
+  return id;
+}
+
 export async function publishPagePost({
   pageId,
   accessToken,
   message,
   images = [],
+  beforePublish,
 }: {
   pageId: string;
   accessToken: string;
   message: string;
   images?: PublishImage[];
+  beforePublish?: () => Promise<void>;
 }): Promise<PublishedPost> {
   if (images.length > 1) {
     const mediaIds: string[] = [];
@@ -964,19 +997,24 @@ export async function publishPagePost({
       fields[`attached_media[${index}]`] = JSON.stringify({ media_fbid: id });
     });
 
+    await beforePublish?.();
     const result = await graphPost<{ id: string }>(
       `${pageId}/feed`,
       fields,
-      accessToken
+      accessToken,
+      undefined,
+      true
     );
+    const id = requiredPostId(result.id);
     return {
-      id: result.id,
-      permalink: await postPermalink(result.id, accessToken),
+      id,
+      permalink: await postPermalink(id, accessToken),
     };
   }
 
   const image = images[0];
   if (image && 'base64' in image) {
+    await beforePublish?.();
     const result = await graphPost<{ id: string }>(
       `${pageId}/photos`,
       { caption: message, published: 'true' },
@@ -985,26 +1023,36 @@ export async function publishPagePost({
         bytes: Buffer.from(image.base64, 'base64'),
         type: image.type,
         filename: image.filename,
-      }
+      },
+      true
     );
-    return { id: result.id, permalink: await photoPermalink(result.id, accessToken) };
+    const id = requiredPostId(result.id);
+    return { id, permalink: await photoPermalink(id, accessToken) };
   }
 
   if (image && 'url' in image) {
+    await beforePublish?.();
     const result = await graphPost<{ id: string }>(
       `${pageId}/photos`,
       { caption: message, url: image.url, published: 'true' },
-      accessToken
+      accessToken,
+      undefined,
+      true
     );
-    return { id: result.id, permalink: await photoPermalink(result.id, accessToken) };
+    const id = requiredPostId(result.id);
+    return { id, permalink: await photoPermalink(id, accessToken) };
   }
 
+  await beforePublish?.();
   const result = await graphPost<{ id: string }>(
     `${pageId}/feed`,
     { message },
-    accessToken
+    accessToken,
+    undefined,
+    true
   );
-  return { id: result.id, permalink: await postPermalink(result.id, accessToken) };
+  const id = requiredPostId(result.id);
+  return { id, permalink: await postPermalink(id, accessToken) };
 }
 
 export type ReelVideo = {

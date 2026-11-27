@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
-vi.mock("@/lib/db", () => ({ sql: vi.fn() }));
+vi.mock("@/lib/db", () => ({
+  // The avatar-release cancellation runs its lock + delete through
+  // sql.transaction([...]); resolve the statement results in order.
+  sql: Object.assign(vi.fn(), {
+    transaction: vi.fn(async (queries: unknown[]) => Promise.all(queries)),
+  }),
+}));
 vi.mock("@/lib/schedule-events", () => ({ recordScheduleEvent: vi.fn() }));
 vi.mock("@/lib/facebook-page-token", () => ({
   getPrimaryPage: vi.fn(),
@@ -47,6 +53,7 @@ import {
   rescheduleFacebookScheduledPost,
 } from "@/lib/facebook";
 import { getPrimaryPage, resolvePageToken } from "@/lib/facebook-page-token";
+import { InstagramApiError } from "@/lib/instagram";
 import { recordScheduleEvent } from "@/lib/schedule-events";
 import { resolvePlatformAccount } from "@/lib/publishing/connection";
 import {
@@ -84,6 +91,8 @@ function useDb(overrides: {
   native?: unknown[];
   staleRescheduling?: unknown[];
   updatedRows?: unknown[];
+  completion?: unknown[];
+  completionError?: Error;
 }) {
   sqlMock.mockImplementation(async (strings: TemplateStringsArray) => {
     const query = strings.join(" ");
@@ -97,11 +106,15 @@ function useDb(overrides: {
       // attempts mirrors the fixture's pre-claim value + 1.
       return overrides.claimRow ?? [{ id: 1, attempts: 2 }];
     if (query.includes("source = 'local'")) return overrides.claim ?? [];
+    if (query.includes("WITH published AS")) {
+      if (overrides.completionError) throw overrides.completionError;
+      return overrides.completion ?? overrides.updatedRows ?? [{ id: 1, media_url: null, avatar_blob_url: null }];
+    }
+    if (query.includes("RETURNING id"))
+      return overrides.updatedRows ?? [{ id: 1 }];
     if (query.includes("status = 'publishing'")) return overrides.stuck ?? [];
     if (query.includes("source IN ('facebook', 'youtube')"))
       return overrides.native ?? [];
-    if (query.includes("RETURNING id"))
-      return overrides.updatedRows ?? [{ id: 1 }];
     return [];
   });
 }
@@ -118,6 +131,7 @@ function claimedRow(overrides: Record<string, unknown> = {}) {
     text: "hello",
     image_url: null,
     image_urls: null,
+    avatar_job_id: null,
     attempts: 1,
     ...overrides,
   };
@@ -133,6 +147,7 @@ function nativeRow(overrides: Record<string, unknown> = {}) {
     facebook_post_id: "fb_1",
     facebook_post_ids: null,
     page_id: "pg1",
+    avatar_job_id: null,
     scheduled_for: minutesAgo(5),
     ...overrides,
   };
@@ -167,6 +182,7 @@ describe("publishDuePosts", () => {
       accessToken: "tok",
       message: "hello",
       images: [],
+      beforePublish: expect.any(Function),
     });
     expect(events().map((event) => event.event)).toEqual([
       "claimed",
@@ -307,6 +323,510 @@ describe("publishDuePosts", () => {
     });
   });
 
+  describe("scheduled avatar videos", () => {
+    const avatarUrl = "https://blob.example/avatar-owned.mp4";
+    const upload = {
+      path: "/tmp/avatar.mp4",
+      size: 10,
+      type: "video/mp4",
+      filename: "avatar.mp4",
+    };
+
+    function avatarRow(overrides: Record<string, unknown> = {}) {
+      return claimedRow({
+        kind: "video",
+        image_url: avatarUrl,
+        avatar_job_id: "avatar-1",
+        ...overrides,
+      });
+    }
+
+    beforeEach(() => {
+      vi.mocked(getPrimaryPage).mockResolvedValue({ pageId: "pg1", token: "tok" });
+      vi.mocked(downloadVideoFromUrl).mockResolvedValue({
+        upload,
+        cleanup: vi.fn().mockResolvedValue(undefined),
+      });
+      vi.mocked(publishPageVideo).mockResolvedValue({ id: "fb_avatar", permalink: null });
+    });
+
+    it("atomically completes the avatar and deduplicates its source media cleanup", async () => {
+      useDb({
+        claim: [avatarRow()],
+        completion: [{ id: 1, media_url: avatarUrl, avatar_blob_url: avatarUrl }],
+      });
+
+      await expect(publishDuePosts({ source: "scheduler" })).resolves.toEqual({
+        due: 1,
+        published: 1,
+        failed: 0,
+        synced: 0,
+      });
+
+      const completionCall = sqlMock.mock.calls.find((call) =>
+        (call[0] as TemplateStringsArray).join(" ").includes("WITH published AS")
+      );
+      const completionText = (completionCall![0] as TemplateStringsArray).join(" ");
+      expect(completionText).toContain("UPDATE scheduled_posts");
+      expect(completionText).toContain("SET status = 'published'");
+      expect(completionText).toContain("UPDATE avatar_jobs");
+      expect(completionText).toContain("publish_state = 'scheduled'");
+      expect(completionText).toContain("SET publish_state = 'published'");
+      expect(completionText).toContain("avatar_blob_url");
+      expect(
+        sqlMock.mock.calls.some(
+          (call) =>
+            (call[0] as TemplateStringsArray).join(" ").includes("AND attempts =") &&
+            call.slice(1).includes(2)
+        )
+      ).toBe(true);
+      expect(deleteStagedBlobs).toHaveBeenCalledTimes(1);
+      expect(deleteStagedBlobs).toHaveBeenCalledWith([avatarUrl]);
+      expect(events().map((event) => event.event)).toEqual(["claimed", "published"]);
+      const persistIndex = sqlMock.mock.calls.findIndex((call) =>
+        (call[0] as TemplateStringsArray).join(" ").includes("SET facebook_post_id =")
+      );
+      expect(persistIndex).toBeGreaterThanOrEqual(0);
+      expect(sqlMock.mock.invocationCallOrder[persistIndex]).toBeLessThan(
+        sqlMock.mock.invocationCallOrder[sqlMock.mock.calls.indexOf(completionCall!)]
+      );
+    });
+
+    it("publishes the avatar-bound composite and cleans up both media files after completion", async () => {
+      const compositeUrl =
+        "https://store.example/compose/avatars/avatar-1/123-avatar-composite.mp4";
+      useDb({
+        claim: [avatarRow({ image_url: compositeUrl })],
+        completion: [
+          { id: 1, media_url: compositeUrl, avatar_blob_url: avatarUrl },
+        ],
+      });
+
+      await expect(publishDuePosts({ source: "scheduler" })).resolves.toEqual({
+        due: 1,
+        published: 1,
+        failed: 0,
+        synced: 0,
+      });
+
+      expect(downloadVideoFromUrl).toHaveBeenCalledWith(compositeUrl);
+      expect(deleteStagedBlobs).toHaveBeenCalledTimes(1);
+      expect(deleteStagedBlobs).toHaveBeenCalledWith([compositeUrl, avatarUrl]);
+      const sqlTexts = sqlMock.mock.calls.map((call) =>
+        (call[0] as TemplateStringsArray).join(" ")
+      );
+      expect(
+        sqlTexts.some(
+          (text) =>
+            text.includes("FROM scheduled_posts") &&
+            text.includes("avatar_jobs.blob_url = scheduled_posts.image_url") &&
+            text.includes("'/compose/avatars/' || avatar_jobs.id || '/'")
+        )
+      ).toBe(true);
+      expect(
+        sqlTexts.some(
+          (text) =>
+            text.includes("SET status = 'publishing', attempts = attempts + 1") &&
+            text.includes("'/compose/avatars/' || avatar_jobs.id || '/'")
+        )
+      ).toBe(true);
+      const completionCall = sqlMock.mock.calls.find((call) =>
+        (call[0] as TemplateStringsArray).join(" ").includes("WITH published AS")
+      )!;
+      expect(sqlMock.mock.invocationCallOrder[sqlMock.mock.calls.indexOf(completionCall)])
+        .toBeLessThan(vi.mocked(deleteStagedBlobs).mock.invocationCallOrder[0]);
+    });
+
+    it("keeps avatar media when completion does not return its blob URL", async () => {
+      useDb({
+        claim: [avatarRow()],
+        completion: [{ id: 1, media_url: avatarUrl, avatar_blob_url: null }],
+      });
+
+      await publishDuePosts({ source: "scheduler" });
+
+      expect(deleteStagedBlobs).not.toHaveBeenCalled();
+    });
+
+    it("never requeues after Graph success when the durable completion write fails", async () => {
+      useDb({
+        claim: [avatarRow()],
+        completionError: new Error("database unavailable"),
+      });
+
+      await expect(publishDuePosts({ source: "scheduler" })).resolves.toMatchObject({
+        due: 1,
+        published: 1,
+        failed: 0,
+      });
+
+      expect(publishPageVideo).toHaveBeenCalledTimes(1);
+      expect(deleteStagedBlobs).not.toHaveBeenCalled();
+      expect(events().map((event) => event.event)).toEqual(["claimed"]);
+      const statusWrites = sqlMock.mock.calls.filter((call) => {
+        const text = (call[0] as TemplateStringsArray).join(" ");
+        return text.includes("UPDATE scheduled_posts") &&
+          text.includes("SET status =") &&
+          !text.includes("WITH published AS") &&
+          !text.includes("attempts = attempts + 1");
+      });
+      expect(statusWrites).toEqual([]);
+    });
+
+    it("marks the video publish workflow at the uploader's publish boundary", async () => {
+      useDb({ claim: [avatarRow()] });
+      // The marker must be written while the upload is still running, so a
+      // crash between the marker and the publish request can never be
+      // mistaken for a publish that never started.
+      let markerIndexWhenUploadResolved: number | undefined;
+      vi.mocked(publishPageVideo).mockImplementation(async ({ beforePublish }) => {
+        await beforePublish?.("fb_avatar");
+        markerIndexWhenUploadResolved = sqlMock.mock.calls.findIndex((call) =>
+          (call[0] as TemplateStringsArray).join(" ").includes("publish_started_at = now()")
+        );
+        return { id: "fb_avatar", permalink: null };
+      });
+
+      await publishDuePosts({ source: "scheduler" });
+
+      const markerIndex = sqlMock.mock.calls.findIndex((call) =>
+        (call[0] as TemplateStringsArray).join(" ").includes("publish_started_at = now()")
+      );
+      expect(markerIndex).toBeGreaterThanOrEqual(0);
+      expect(markerIndexWhenUploadResolved).toBe(markerIndex);
+      expect(vi.mocked(publishPageVideo).mock.calls[0][0].beforePublish).toBeTypeOf("function");
+      // Local preparation stays retryable: the marker is written after the
+      // download, not before it.
+      expect(vi.mocked(downloadVideoFromUrl).mock.invocationCallOrder[0]).toBeLessThan(
+        sqlMock.mock.invocationCallOrder[markerIndex]
+      );
+    });
+
+    it("persists the video id with the marker before an ambiguous finish", async () => {
+      useDb({ claim: [avatarRow()] });
+      vi.mocked(publishPageVideo).mockImplementation(async ({ beforePublish }) => {
+        await beforePublish?.("fb_avatar");
+        throw new FacebookApiError("Facebook could not be reached.", undefined, true);
+      });
+
+      await publishDuePosts({ source: "scheduler" });
+
+      const markerCall = sqlMock.mock.calls.find((call) =>
+        (call[0] as TemplateStringsArray).join(" ").includes("publish_started_at = now()")
+      );
+      expect(markerCall).toBeDefined();
+      expect(markerCall!.slice(1)).toContain("fb_avatar");
+      expect(markerCall!.slice(1)).toContain(2);
+      expect(deleteStagedBlobs).not.toHaveBeenCalled();
+      expect(events().map((event) => event.event)).toEqual(["claimed"]);
+    });
+
+    it("clears the provisional video id after a definite Graph refusal", async () => {
+      useDb({ claim: [avatarRow()] });
+      vi.mocked(publishPageVideo).mockImplementation(async ({ beforePublish }) => {
+        await beforePublish?.("fb_avatar");
+        throw new Error("Facebook refused the video");
+      });
+
+      await expect(publishDuePosts({ source: "scheduler" })).resolves.toMatchObject({
+        published: 0,
+        failed: 0,
+      });
+
+      const failureCall = sqlMock.mock.calls.find((call) => {
+        const text = (call[0] as TemplateStringsArray).join(" ");
+        return text.includes("facebook_post_id = NULL") && text.includes("RETURNING id");
+      });
+      expect(failureCall).toBeDefined();
+      expect(failureCall!.slice(1)).toContain(2);
+      expect(events().map((event) => event.event)).toEqual(["claimed", "retrying"]);
+    });
+
+    it("pauses retries and keeps avatar ownership after an ambiguous Graph failure", async () => {
+      useDb({ claim: [avatarRow()] });
+      vi.mocked(publishPageVideo).mockRejectedValue(
+        new FacebookApiError("Facebook could not be reached.", undefined, true)
+      );
+
+      await expect(publishDuePosts({ source: "scheduler" })).resolves.toMatchObject({
+        published: 0,
+        failed: 0,
+      });
+
+      const pausedWrite = sqlMock.mock.calls.find((call) =>
+        call.slice(1).some(
+          (value) => typeof value === "string" && value.includes("Automatic retry is paused")
+        )
+      );
+      expect(pausedWrite).toBeDefined();
+      expect(deleteStagedBlobs).not.toHaveBeenCalled();
+      expect(
+        sqlMock.mock.calls.some((call) =>
+          (call[0] as TemplateStringsArray).join(" ").includes("UPDATE avatar_jobs SET publish_state = 'ready'")
+        )
+      ).toBe(false);
+      expect(events().map((event) => event.event)).toEqual(["claimed"]);
+    });
+
+    it("keeps a terminally failed avatar scheduled while its failed row references it", async () => {
+      useDb({
+        claim: [avatarRow({ attempts: 2 })],
+        claimRow: [{ id: 1, attempts: 3 }],
+      });
+      vi.mocked(publishPageVideo).mockRejectedValue(new Error("Facebook refused"));
+
+      await expect(publishDuePosts({ source: "scheduler" })).resolves.toMatchObject({
+        published: 0,
+        failed: 1,
+      });
+
+      expect(
+        sqlMock.mock.calls.some((call) =>
+          (call[0] as TemplateStringsArray).join(" ").includes("UPDATE avatar_jobs SET publish_state = 'ready'")
+        )
+      ).toBe(false);
+      expect(events().map((event) => event.event)).toEqual(["claimed", "failed"]);
+    });
+
+    it("leaves the avatar scheduled when a failed publish will be requeued", async () => {
+      useDb({
+        claim: [avatarRow({ attempts: 1 })],
+        claimRow: [{ id: 1, attempts: 2 }],
+        updatedRows: [{ id: 1, avatar_job_id: "avatar-1" }],
+      });
+      vi.mocked(publishPageVideo).mockRejectedValue(new Error("temporary failure"));
+
+      await expect(publishDuePosts({ source: "scheduler" })).resolves.toMatchObject({
+        published: 0,
+        failed: 0,
+      });
+
+      expect(
+        sqlMock.mock.calls.some((call) =>
+          (call[0] as TemplateStringsArray).join(" ").includes("UPDATE avatar_jobs SET publish_state = 'ready'")
+        )
+      ).toBe(false);
+      expect(events().map((event) => event.event)).toEqual(["claimed", "retrying"]);
+    });
+
+    it("never requeues a started publish whose platform id was not persisted", async () => {
+      useDb({
+        stuck: [
+          {
+            id: 1,
+            workspace_id: "ws1",
+            news_item_id: null,
+            attempts: 1,
+            facebook_post_id: null,
+            publish_started_at: minutesAgo(10),
+            kind: "video",
+            avatar_job_id: "avatar-1",
+          },
+        ],
+      });
+
+      await publishDuePosts({ source: "scheduler" });
+
+      expect(resolvePageToken).not.toHaveBeenCalled();
+      expect(
+        sqlMock.mock.calls.some((call) => {
+          const text = (call[0] as TemplateStringsArray).join(" ");
+          return text.includes("SET status =") && text.includes("scheduled");
+        })
+      ).toBe(false);
+      expect(deleteStagedBlobs).not.toHaveBeenCalled();
+    });
+
+    it("never requeues a stored platform id when publication is not confirmed", async () => {
+      useDb({
+        stuck: [
+          {
+            id: 1,
+            workspace_id: "ws1",
+            news_item_id: null,
+            attempts: 1,
+            facebook_post_id: "fb_avatar",
+            publish_started_at: minutesAgo(10),
+            kind: "video",
+            avatar_job_id: "avatar-1",
+          },
+        ],
+      });
+      vi.mocked(resolvePageToken).mockResolvedValue("tok");
+      vi.mocked(isFacebookVideoPublished).mockResolvedValue(false);
+
+      await publishDuePosts({ source: "scheduler" });
+
+      expect(
+        sqlMock.mock.calls.some((call) => {
+          const text = (call[0] as TemplateStringsArray).join(" ");
+          return text.includes("SET status =") && text.includes("scheduled");
+        })
+      ).toBe(false);
+      expect(deleteStagedBlobs).not.toHaveBeenCalled();
+    });
+
+    it("requeues an interrupted row only when no external publish began", async () => {
+      useDb({
+        stuck: [
+          {
+            id: 1,
+            workspace_id: "ws1",
+            news_item_id: null,
+            attempts: 1,
+            facebook_post_id: null,
+            publish_started_at: null,
+            kind: "video",
+            avatar_job_id: "avatar-1",
+          },
+        ],
+      });
+
+      await publishDuePosts({ source: "scheduler" });
+
+      expect(events()[0]).toMatchObject({ event: "retrying" });
+      expect(resolvePageToken).not.toHaveBeenCalled();
+    });
+
+    it("excludes paused rows without platform ids from recovery slots", async () => {
+      useDb({});
+
+      await publishDuePosts({ source: "scheduler" });
+
+      const recoveryQuery = sqlMock.mock.calls.find((call) => {
+        const text = (call[0] as TemplateStringsArray).join(" ");
+        return text.includes("status = 'publishing'") && text.includes("FOR UPDATE SKIP LOCKED");
+      });
+      expect(recoveryQuery).toBeDefined();
+      const text = (recoveryQuery![0] as TemplateStringsArray).join(" ");
+      expect(text).toContain("facebook_post_id IS NOT NULL OR publish_started_at IS NULL");
+    });
+
+    it("selects recovery candidates oldest first so the slots rotate", async () => {
+      useDb({});
+
+      await publishDuePosts({ source: "scheduler" });
+
+      const recoveryQuery = sqlMock.mock.calls.find((call) => {
+        const text = (call[0] as TemplateStringsArray).join(" ");
+        return text.includes("status = 'publishing'") && text.includes("FOR UPDATE SKIP LOCKED");
+      });
+      expect(recoveryQuery).toBeDefined();
+      const text = (recoveryQuery![0] as TemplateStringsArray).join(" ");
+      // Without an ordering policy the same rows can be returned on every
+      // sweep and starve the rows behind them.
+      expect(text).toContain("ORDER BY updated_at ASC");
+      expect(text).toContain("LIMIT 10");
+    });
+
+    it("defers a row whose publication cannot be confirmed", async () => {
+      useDb({
+        stuck: [
+          {
+            id: 1,
+            workspace_id: "ws1",
+            news_item_id: null,
+            attempts: 1,
+            facebook_post_id: "fb_avatar",
+            publish_started_at: null,
+            kind: "video",
+            avatar_job_id: "avatar-1",
+            page_id: null,
+          },
+        ],
+      });
+      vi.mocked(resolvePageToken).mockResolvedValue("tok");
+      vi.mocked(isFacebookVideoPublished).mockResolvedValue(false);
+      vi.mocked(isFacebookPostPublished).mockResolvedValue(false);
+
+      await publishDuePosts({ source: "scheduler" });
+
+      const defer = sqlMock.mock.calls.find((call) => {
+        const text = (call[0] as TemplateStringsArray).join(" ");
+        return (
+          text.includes("UPDATE scheduled_posts") &&
+          text.includes("SET updated_at = now()") &&
+          text.includes("status = 'publishing'")
+        );
+      });
+      expect(defer).toBeDefined();
+      expect(defer!.slice(1)).toContain(1);
+      // The outcome is unknown, so the row is never republished and never
+      // reported as a failure.
+      expect(events().map((event) => event.event)).toEqual([]);
+      expect(
+        sqlMock.mock.calls.some((call) =>
+          (call[0] as TemplateStringsArray).join(" ").includes("status = 'failed'")
+        ),
+      ).toBe(false);
+    });
+
+    it("probes a stuck row with the page that published it", async () => {
+      useDb({
+        stuck: [
+          {
+            id: 1,
+            workspace_id: "ws1",
+            news_item_id: null,
+            attempts: 1,
+            facebook_post_id: "fb_avatar",
+            publish_started_at: null,
+            kind: "video",
+            avatar_job_id: "avatar-1",
+            page_id: "pg-secondary",
+          },
+        ],
+        completion: [{ id: 1, media_url: avatarUrl, avatar_blob_url: avatarUrl }],
+      });
+      vi.mocked(resolvePageToken).mockResolvedValue("tok");
+      vi.mocked(isFacebookVideoPublished).mockResolvedValue(true);
+
+      await publishDuePosts({ source: "scheduler" });
+
+      // The primary Page's token cannot confirm a video that went out on a
+      // secondary Page.
+      expect(resolvePageToken).toHaveBeenCalledWith("ws1", "pg-secondary");
+      expect(isFacebookVideoPublished).toHaveBeenCalledWith("fb_avatar", "tok");
+    });
+
+    it("marks a recovered publishing row and its avatar published when Facebook confirms it", async () => {
+      useDb({
+        stuck: [
+          {
+            id: 1,
+            workspace_id: "ws1",
+            news_item_id: null,
+            attempts: 1,
+            facebook_post_id: "fb_avatar",
+            kind: "video",
+            avatar_job_id: "avatar-1",
+          },
+        ],
+        completion: [{ id: 1, media_url: avatarUrl, avatar_blob_url: avatarUrl }],
+      });
+      vi.mocked(resolvePageToken).mockResolvedValue("tok");
+      vi.mocked(isFacebookVideoPublished).mockResolvedValue(true);
+
+      await expect(publishDuePosts({ source: "scheduler" })).resolves.toMatchObject({
+        due: 0,
+        published: 0,
+        failed: 0,
+      });
+
+      expect(deleteStagedBlobs).toHaveBeenCalledWith([avatarUrl]);
+      expect(events()[0]).toMatchObject({
+        event: "published",
+        facebookPostId: "fb_avatar",
+        metadata: expect.objectContaining({ recovered: true }),
+      });
+      expect(
+        sqlMock.mock.calls.some((call) =>
+          (call[0] as TemplateStringsArray).join(" ").includes("SET publish_state = 'published'")
+        )
+      ).toBe(true);
+    });
+  });
+
   describe("scheduled Instagram posts", () => {
     const igImage =
       "https://bucket.public.blob.vercel-storage.com/instagram/img.jpg";
@@ -351,6 +871,7 @@ describe("publishDuePosts", () => {
         accessToken: "page-token",
         imageUrl: igImage,
         caption: "hello",
+        beforePublish: expect.any(Function),
       });
       expect(deleteStagedBlobs).toHaveBeenCalledWith([igImage]);
       expect(events().map((event) => event.event)).toEqual([
@@ -392,6 +913,25 @@ describe("publishDuePosts", () => {
       });
     });
 
+    it("pauses retries when Instagram may have accepted the publish", async () => {
+      useDb({ claim: [instagramRow()] });
+      vi.mocked(publishInstagramImagePost).mockRejectedValue(
+        new InstagramApiError("Instagram could not be reached.", undefined, true)
+      );
+
+      await publishDuePosts({ source: "scheduler" });
+
+      expect(events().map((event) => event.event)).toEqual(["claimed"]);
+      expect(deleteStagedBlobs).not.toHaveBeenCalled();
+      expect(
+        sqlMock.mock.calls.some((call) =>
+          call.slice(1).some(
+            (value) => typeof value === "string" && value.includes("Automatic retry is paused")
+          )
+        )
+      ).toBe(true);
+    });
+
     it("retries when Instagram refuses the publish", async () => {
       useDb({ claim: [instagramRow()] });
       vi.mocked(publishInstagramImagePost).mockRejectedValue(
@@ -425,6 +965,30 @@ describe("syncNativeSchedules", () => {
       facebookPostId: "fb_1",
       metadata: { kind: "post", executor: "facebook" },
     });
+  });
+
+  it("completes a linked avatar when a native row is confirmed published", async () => {
+    useDb({
+      native: [nativeRow({ avatar_job_id: "avatar-1" })],
+      completion: [{
+        id: 1,
+        media_url: "https://blob.example/avatar.mp4",
+        avatar_blob_url: "https://blob.example/avatar.mp4",
+      }],
+    });
+    vi.mocked(resolvePageToken).mockResolvedValue("tok");
+    vi.mocked(isFacebookPostPublished).mockResolvedValue(true);
+
+    await expect(syncNativeSchedules()).resolves.toBe(1);
+
+    expect(deleteStagedBlobs).toHaveBeenCalledWith([
+      "https://blob.example/avatar.mp4",
+    ]);
+    expect(
+      sqlMock.mock.calls.some((call) =>
+        (call[0] as TemplateStringsArray).join(" ").includes("SET publish_state = 'published'")
+      )
+    ).toBe(true);
   });
 
   it("tries the next probe shape when one is inconclusive", async () => {
@@ -1006,6 +1570,72 @@ describe("recoverStaleReschedules", () => {
     ]);
   });
 
+  it("releases an avatar after recovering a durable local deletion", async () => {
+    useRecoveryDb({
+      staleRescheduling: [
+        staleRow({
+          source: "local",
+          avatar_job_id: "avatar-1",
+          error_message: JSON.stringify({ claim: "c1", action: "delete" }),
+        }),
+      ],
+      deleted: [
+        {
+          id: 42,
+          news_item_id: 7,
+          scheduled_for: minutesAgo(30),
+          avatar_job_id: "avatar-1",
+          image_url: "https://blob.example/avatar-owned.mp4",
+        },
+      ],
+    });
+
+    await expect(recoverStaleReschedules()).resolves.toBe(1);
+
+    const deleteText = (deleteCalls()[0][0] as TemplateStringsArray).join(" ");
+    expect(deleteText).toContain("WITH deleted AS");
+    expect(deleteText).toContain(
+      "RETURNING id, workspace_id, news_item_id, scheduled_for, avatar_job_id"
+    );
+    expect(deleteText).toContain("UPDATE avatar_jobs");
+    expect(deleteText).toContain("publish_state = 'scheduled'");
+    expect(deleteText).toContain("NOT EXISTS");
+    expect(deleteCalls()[0]).toContain("ws1");
+    expect(deleteStagedBlobs).not.toHaveBeenCalled();
+  });
+
+  it("retains the reusable composite after recovering a durable local deletion", async () => {
+    const compositeUrl =
+      "https://store.example/compose/avatars/avatar-1/123-avatar-composite.mp4";
+    useRecoveryDb({
+      staleRescheduling: [
+        staleRow({
+          source: "local",
+          avatar_job_id: "avatar-1",
+          error_message: JSON.stringify({ claim: "c1", action: "delete" }),
+        }),
+      ],
+      deleted: [
+        {
+          id: 42,
+          news_item_id: 7,
+          scheduled_for: minutesAgo(30),
+          avatar_job_id: "avatar-1",
+          image_url: compositeUrl,
+        },
+      ],
+    });
+
+    await expect(recoverStaleReschedules()).resolves.toBe(1);
+
+    expect(deleteStagedBlobs).not.toHaveBeenCalled();
+    const deleteText = (deleteCalls()[0][0] as TemplateStringsArray).join(" ");
+    expect(deleteText).toContain("UPDATE avatar_jobs");
+    expect(deleteText).toContain("publish_state = 'scheduled'");
+    expect(deleteText).toContain("NOT EXISTS");
+    expect(deleteCalls()[0]).toContain("ws1");
+  });
+
   it("deletes without re-canceling a Page Facebook no longer holds", async () => {
     useRecoveryDb({
       staleRescheduling: [
@@ -1090,12 +1720,15 @@ describe("publishDuePosts video posts", () => {
     expect(downloadVideoFromUrl).toHaveBeenCalledWith(
       "https://blob.example/v1.mp4"
     );
-    expect(publishPageVideo).toHaveBeenCalledWith({
-      pageId: "pg2",
-      accessToken: "tok2",
-      description: "Story text",
-      video: upload,
-    });
+    expect(publishPageVideo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pageId: "pg2",
+        accessToken: "tok2",
+        description: "Story text",
+        video: upload,
+        beforePublish: expect.any(Function),
+      })
+    );
     expect(cleanup).toHaveBeenCalledTimes(1);
     expect(deleteStagedBlobs).toHaveBeenCalledWith([
       "https://blob.example/v1.mp4",

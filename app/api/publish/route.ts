@@ -11,6 +11,7 @@ import {
 } from '@/lib/facebook';
 import {
   downloadVideoFromUrl,
+  MAX_VIDEO_BYTES,
   publishPageVideo,
 } from '@/lib/publishing/videos';
 import { readMp4DurationSecondsFromFile } from '@/lib/reel-meta';
@@ -19,6 +20,17 @@ import {
   notifyWorkspace,
 } from '@/lib/notifications';
 import { recordNativeSchedule } from '@/lib/schedule-mirror';
+import {
+  claimAvatarForPublish,
+  finishAvatarPublish,
+  releaseAvatarPublish,
+} from '@/lib/avatar/queue';
+import { deleteStagedBlobs } from '@/lib/blob';
+import {
+  assertAvatarCompositeUrl,
+  isAvatarCompositeUrl,
+} from '@/lib/avatar/media';
+import { MEDIA_REJECTED_BEFORE_GRAPH } from '@/lib/avatar/publish-cleanup';
 
 export const dynamic = 'force-dynamic';
 
@@ -71,6 +83,30 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'newsItemId is required.' }, { status: 400 });
   }
 
+  const avatarJobId =
+    typeof body?.avatarJobId === 'string' && body.avatarJobId.trim()
+      ? body.avatarJobId.trim()
+      : null;
+  if (
+    body?.avatarJobId !== undefined &&
+    body.avatarJobId !== null &&
+    !avatarJobId
+  ) {
+    return NextResponse.json(
+      { error: 'Choose a valid avatar video.' },
+      { status: 400 }
+    );
+  }
+  if (
+    avatarJobId &&
+    (typeof body?.videoUrl !== 'string' || !body.videoUrl)
+  ) {
+    return NextResponse.json(
+      { error: 'An avatar video URL is required.' },
+      { status: 400 }
+    );
+  }
+
   // Resolve the story and the draft this publish belongs to BEFORE the
   // external call. Two things depend on picking them here: a draft
   // regenerated while Facebook is answering must not be the one marked
@@ -108,6 +144,28 @@ export async function POST(request: Request) {
     );
   }
 
+  let claimedAvatarId: string | null = null;
+  let avatarBlobUrl: string | null = null;
+  let graphStarted = false;
+  let completedPublish: { id: string; permalink: string | null } | null = null;
+
+  const releasePreGraphAvatar = async () => {
+    if (!claimedAvatarId || graphStarted) return;
+    const id = claimedAvatarId;
+    claimedAvatarId = null;
+    try {
+      await releaseAvatarPublish(id, access.workspace.id);
+    } catch (releaseError) {
+      console.error(
+        JSON.stringify({
+          route: 'publish',
+          event: 'avatar_release_failed',
+          error: releaseError instanceof Error ? releaseError.name : 'unknown',
+        })
+      );
+    }
+  };
+
   try {
     const imageUrls = Array.isArray(body?.imageUrls)
       ? body.imageUrls
@@ -116,6 +174,39 @@ export async function POST(request: Request) {
         : [];
     const videoUrl =
       typeof body?.videoUrl === 'string' && body.videoUrl ? body.videoUrl : null;
+
+    if (avatarJobId) {
+      const composite = isAvatarCompositeUrl(avatarJobId, videoUrl as string);
+      if (composite) {
+        try {
+          await assertAvatarCompositeUrl(avatarJobId, videoUrl as string);
+        } catch {
+          return NextResponse.json(
+            { error: 'The avatar overlay is not a valid staged video.' },
+            { status: 400 }
+          );
+        }
+      }
+      const claimedUrl = await claimAvatarForPublish(
+        avatarJobId,
+        access.workspace.id,
+        videoUrl as string,
+        composite
+      );
+      if (!claimedUrl) {
+        return NextResponse.json(
+          {
+            error: 'This avatar video is not ready or has already been used.',
+            code: 'avatar_unavailable',
+          },
+          { status: 409 }
+        );
+      }
+      claimedAvatarId = avatarJobId;
+      avatarBlobUrl = claimedUrl;
+      // A standalone avatar is fenced to the database URL by the claim. A
+      // composite was validated and bound to this avatar before the claim.
+    }
 
     let published: { id: string; permalink: string | null };
     let kind: 'post' | 'video' = 'post';
@@ -128,8 +219,12 @@ export async function POST(request: Request) {
       try {
         const type = downloaded.upload.type;
         if (!type.includes('video/mp4') && !type.includes('video/quicktime')) {
+          await releasePreGraphAvatar();
           return NextResponse.json(
-            { error: 'Attach an MP4 or MOV video.' },
+            {
+              error: 'Attach an MP4 or MOV video.',
+              code: MEDIA_REJECTED_BEFORE_GRAPH,
+            },
             { status: 400 }
           );
         }
@@ -137,13 +232,28 @@ export async function POST(request: Request) {
           downloaded.upload.path
         );
         if (duration !== null && duration > 45 * 60) {
+          await releasePreGraphAvatar();
           return NextResponse.json(
             {
               error: `Facebook videos must be 45 minutes or shorter. This video is ${Math.round(duration / 60)} minutes.`,
+              code: MEDIA_REJECTED_BEFORE_GRAPH,
             },
             { status: 400 }
           );
         }
+        if (claimedAvatarId && downloaded.upload.size > MAX_VIDEO_BYTES) {
+          await releasePreGraphAvatar();
+          return NextResponse.json(
+            {
+              error: 'Videos must be 1 GB or smaller for the chunked uploader.',
+              code: MEDIA_REJECTED_BEFORE_GRAPH,
+            },
+            { status: 400 }
+          );
+        }
+        // From here on a failure is ambiguous: Graph may have accepted the
+        // upload before the connection failed. Keep the ownership claim.
+        graphStarted = true;
         const video = await publishPageVideo({
           pageId: target.id,
           accessToken: target.accessToken,
@@ -151,24 +261,41 @@ export async function POST(request: Request) {
           video: downloaded.upload,
         });
         published = video;
+        completedPublish = video;
         kind = 'video';
       } finally {
         await downloaded.cleanup();
       }
     } else {
+      const images = parseImages(imageUrls);
+      graphStarted = true;
       const post = await publishPagePost({
         pageId: target.id,
         accessToken: target.accessToken,
         message,
-        images: parseImages(imageUrls),
+        images,
       });
       published = post;
     }
+    completedPublish = published;
 
+    // The external publish is already complete. Ancillary database failures
+    // must not turn it into a failed response or release the avatar claim.
     if (story?.draft_id) {
-      await sql`
-        UPDATE drafts SET status = 'published'
-        WHERE id = ${story.draft_id}`;
+      try {
+        await sql`
+          UPDATE drafts SET status = 'published'
+          WHERE id = ${story.draft_id}`;
+      } catch (draftError) {
+        console.error(
+          JSON.stringify({
+            route: 'publish',
+            event: 'draft_update_failed',
+            draftId: story.draft_id,
+            error: draftError instanceof Error ? draftError.name : 'unknown',
+          })
+        );
+      }
     }
 
     // This route publishes straight away and used to leave no trace beyond
@@ -177,30 +304,98 @@ export async function POST(request: Request) {
     // linked to the story and the draft it published, so the activity log
     // keeps one entry for it rather than the draft and the event side by
     // side.
-    await recordNativeSchedule({
-      workspaceId: access.workspace.id,
-      userId: access.user.id,
-      kind,
-      text: message,
-      scheduledFor: null,
-      results: [
-        {
-          page: { id: target.id, name: target.name },
-          ok: true,
-          id: published.id,
-          permalink: published.permalink,
-        },
-      ],
-      newsItemId: story?.id ?? null,
-      draftId: story?.draft_id ?? null,
-    });
+    let scheduledPostId: number | null = null;
+    try {
+      scheduledPostId = await recordNativeSchedule({
+        workspaceId: access.workspace.id,
+        userId: access.user.id,
+        kind,
+        text: message,
+        scheduledFor: null,
+        results: [
+          {
+            page: { id: target.id, name: target.name },
+            ok: true,
+            id: published.id,
+            permalink: published.permalink,
+          },
+        ],
+        newsItemId: story?.id ?? null,
+        draftId: story?.draft_id ?? null,
+        ...(avatarJobId ? { avatarJobId, mediaUrl: videoUrl } : {}),
+      });
+    } catch (mirrorError) {
+      console.error(
+        JSON.stringify({
+          route: 'publish',
+          event: 'mirror_failed',
+          error: mirrorError instanceof Error ? mirrorError.name : 'unknown',
+        })
+      );
+    }
+
+    let warning: string | undefined;
+    if (claimedAvatarId) {
+      if (scheduledPostId == null) {
+        warning =
+          'Published, but the local activity record could not be saved. The avatar media was kept for recovery.';
+      } else {
+        try {
+          const finished = await finishAvatarPublish(
+            claimedAvatarId,
+            access.workspace.id,
+            scheduledPostId
+          );
+          if (!finished) {
+            warning =
+              'Published, but the local avatar record is incomplete. The avatar media was kept for recovery.';
+          } else if (avatarBlobUrl) {
+            try {
+              await deleteStagedBlobs(
+                [...new Set([videoUrl, avatarBlobUrl])].filter(
+                  (url): url is string => Boolean(url)
+                )
+              );
+            } catch {
+              // The durable ownership transition succeeded; cleanup is best-effort.
+            }
+          }
+        } catch (finishError) {
+          warning =
+            'Published, but the local avatar record is incomplete. The avatar media was kept for recovery.';
+          console.error(
+            JSON.stringify({
+              route: 'publish',
+              event: 'avatar_finish_failed',
+              error: finishError instanceof Error ? finishError.name : 'unknown',
+            })
+          );
+        }
+      }
+    }
 
     return NextResponse.json({
       id: published.id,
       permalink: published.permalink,
       page: { id: target.id, name: target.name },
+      ...(warning ? { warning } : {}),
     });
   } catch (error) {
+    await releasePreGraphAvatar();
+
+    if (completedPublish) {
+      return NextResponse.json({
+        id: completedPublish.id,
+        permalink: completedPublish.permalink,
+        page: { id: target.id, name: target.name },
+        ...(claimedAvatarId
+          ? {
+              warning:
+                'Published, but the local record is incomplete. The avatar media was kept for recovery.',
+            }
+          : {}),
+      });
+    }
     if (error instanceof FacebookApiError) {
       const permissionIssue =
         error.code === 10 || error.code === 200 || error.code === 190;

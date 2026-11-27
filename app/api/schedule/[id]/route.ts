@@ -13,6 +13,7 @@ import {
 } from "@/lib/facebook";
 import { facebookTargets } from "@/lib/facebook-schedule";
 import { resolvePageToken } from "@/lib/facebook-page-token";
+import { deleteScheduledPostWithAvatarRelease } from "@/lib/schedule-cancellation";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +28,8 @@ type TargetRow = {
   facebook_post_id: string | null;
   facebook_post_ids: unknown;
   page_id: string | null;
+  avatar_job_id: string | null;
+  image_url: string | null;
 };
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -47,7 +50,7 @@ export async function DELETE(
 
   const existing = (await sql`
     SELECT id, workspace_id, news_item_id, kind, source, status, scheduled_for,
-           facebook_post_id, facebook_post_ids, page_id
+           facebook_post_id, facebook_post_ids, page_id, avatar_job_id, image_url
     FROM scheduled_posts
     WHERE id = ${id} AND workspace_id = ${access.workspace.id}
   `) as unknown as TargetRow[];
@@ -60,6 +63,12 @@ export async function DELETE(
   if (row.status === "rescheduling") {
     return NextResponse.json(
       { error: "This post is being rescheduled right now. Try again in a moment." },
+      { status: 409 }
+    );
+  }
+  if (row.status === "publishing") {
+    return NextResponse.json(
+      { error: "This post is publishing now. Wait for it to finish before deleting it." },
       { status: 409 }
     );
   }
@@ -116,28 +125,19 @@ export async function DELETE(
     }
   }
 
-  const rows = (await sql`
-    DELETE FROM scheduled_posts
-    WHERE id = ${id}
-      AND workspace_id = ${access.workspace.id}
-      AND (
-        (status = 'rescheduling' AND error_message = ${deleteClaim})
-        OR status = ${row.status}
-      )
-    RETURNING id, news_item_id, scheduled_for`) as unknown as {
-    id: number;
-    news_item_id: number | null;
-    scheduled_for: string;
-  }[];
+  const canceled = await deleteScheduledPostWithAvatarRelease({
+    id,
+    workspaceId: access.workspace.id,
+    status: row.status,
+    claim: row.status === "scheduled" ? deleteClaim : undefined,
+  });
 
-  if (!rows.length) {
+  if (!canceled) {
     return NextResponse.json(
       { error: "This post changed or was deleted. Reload the calendar." },
       { status: 409 }
     );
   }
-
-  const canceled = rows[0];
   await recordScheduleEvent({
     workspaceId: access.workspace.id,
     scheduledPostId: canceled.id,
@@ -181,7 +181,7 @@ export async function PATCH(
 
   const rows = (await sql`
     SELECT id, workspace_id, news_item_id, kind, source, status, scheduled_for,
-           facebook_post_id, facebook_post_ids, page_id
+           facebook_post_id, facebook_post_ids, page_id, avatar_job_id, image_url
     FROM scheduled_posts
     WHERE id = ${id} AND workspace_id = ${access.workspace.id}
   `) as unknown as TargetRow[];

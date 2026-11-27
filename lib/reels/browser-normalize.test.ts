@@ -109,9 +109,36 @@ describe("buildBrowserTranscodeArgs", () => {
     expect(args).toContain("yuv420p");
     expect(args).toContain("+faststart");
     expect(args).toContain("scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920");
+    expect(
+      buildBrowserTranscodeArgs("input.mov", "output.mp4", {
+        aspectRatio: "9:16",
+      }),
+    ).toEqual(args);
     expect(args[0]).toBe("-i");
     expect(args[1]).toBe("input.mov");
     expect(args[args.length - 1]).toBe("output.mp4");
+  });
+
+  it("cover-crops transcodes to 1920x1080 when requested", () => {
+    const args = buildBrowserTranscodeArgs("input.webm", "output.mp4", {
+      aspectRatio: "16:9",
+    });
+    expect(args).toContain(
+      "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080",
+    );
+    expect(args).not.toContain(
+      "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+    );
+  });
+
+  it("preserves the recorded aspect ratio when requested", () => {
+    const args = buildBrowserTranscodeArgs("input.webm", "output.mp4", {
+      preserveAspect: true,
+    });
+    expect(args).toContain("scale=trunc(iw/2)*2:trunc(ih/2)*2");
+    expect(args).not.toContain(
+      "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+    );
   });
 
   it("writes the Facebook-safe audio/video spec", () => {
@@ -132,8 +159,12 @@ describe("buildBakeRemuxArgs", () => {
 });
 
 describe("finalizeBakedVideo", () => {
-  it("remuxes MP4 bakes losslessly — no re-encode", async () => {
-    const out = await finalizeBakedVideo(new Blob(["fmp4"], { type: "video/mp4" }));
+  it("remuxes 16:9 MP4 bakes losslessly — no re-encode", async () => {
+    const out = await finalizeBakedVideo(
+      new Blob(["fmp4"], { type: "video/mp4" }),
+      undefined,
+      { aspectRatio: "16:9" },
+    );
     expect(out.name).toBe("baked-reel.mp4");
     expect(out.type).toBe("video/mp4");
     const instance = ffmpegState.instances[0];
@@ -149,7 +180,33 @@ describe("finalizeBakedVideo", () => {
     expect(out.type).toBe("video/mp4");
     const instance = ffmpegState.instances[0];
     expect(instance.lastArgs).toContain("libx264");
+    expect(instance.lastArgs).toContain(
+      "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+    );
     expect(instance.terminated).toBe(true);
+  });
+
+  it("transcodes 16:9 WebM bakes with the landscape crop", async () => {
+    await finalizeBakedVideo(
+      new Blob(["webm"], { type: "video/webm" }),
+      undefined,
+      { aspectRatio: "16:9", name: "narrated-video.mp4" },
+    );
+    expect(ffmpegState.instances[0].lastArgs).toContain(
+      "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080",
+    );
+  });
+
+  it("keeps narrated WebM dimensions and uses the requested file name", async () => {
+    const out = await finalizeBakedVideo(
+      new Blob(["webm"], { type: "video/webm" }),
+      undefined,
+      { preserveAspect: true, name: "narrated-photos.mp4" },
+    );
+    expect(out.name).toBe("narrated-photos.mp4");
+    expect(ffmpegState.instances[0].lastArgs).toContain(
+      "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+    );
   });
 
   it("treats an untagged bake as WebM and transcodes it", async () => {
@@ -244,6 +301,9 @@ describe("normalizeVideo", () => {
     expect(ffmpegState.instances).toHaveLength(1);
     const instance = ffmpegState.instances[0];
     expect(instance.lastArgs).toContain("libx264");
+    expect(instance.lastArgs).toContain(
+      "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+    );
     expect(instance.terminated).toBe(true);
     expect(ffmpegState.loadCalls[0].coreURL).toContain("/dist/esm/ffmpeg-core.js");
     instance.handlers.progress[0]({ progress: 0.5 });

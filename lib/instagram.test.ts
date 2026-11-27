@@ -92,6 +92,54 @@ describe("getContainerStatus", () => {
 });
 
 describe("publishMediaContainer", () => {
+  it("marks a network failure as ambiguous", async () => {
+    fetchMock.mockRejectedValueOnce(new Error("ECONNRESET"));
+
+    await expect(
+      publishMediaContainer({
+        igUserId: "ig-77",
+        accessToken: "tok",
+        containerId: "c-1",
+      })
+    ).rejects.toMatchObject({ ambiguous: true });
+  });
+
+  it("keeps an explicit Graph refusal definite", async () => {
+    respond({ error: { message: "Denied", code: 190 } }, false, 400);
+
+    await expect(
+      publishMediaContainer({
+        igUserId: "ig-77",
+        accessToken: "tok",
+        containerId: "c-1",
+      })
+    ).rejects.toMatchObject({ code: 190, ambiguous: false });
+  });
+
+  it("preserves ambiguity for non-Graph HTTP failures", async () => {
+    respond(null, false, 503);
+
+    await expect(
+      publishMediaContainer({
+        igUserId: "ig-77",
+        accessToken: "tok",
+        containerId: "c-1",
+      })
+    ).rejects.toMatchObject({ ambiguous: true });
+  });
+
+  it("treats a successful response without a media id as ambiguous", async () => {
+    respond({});
+
+    await expect(
+      publishMediaContainer({
+        igUserId: "ig-77",
+        accessToken: "tok",
+        containerId: "c-1",
+      })
+    ).rejects.toMatchObject({ ambiguous: true });
+  });
+
   it("posts creation_id and returns the media id", async () => {
     respond({ id: "media-1" });
     const id = await publishMediaContainer({

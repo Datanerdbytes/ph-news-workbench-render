@@ -31,6 +31,16 @@ import { toast } from 'sonner';
 import { cn } from 'cn';
 import { AppFrame } from '@/components/app-frame';
 import { AssistantChat } from '@/components/assistant-chat';
+import {
+  VoiceOverPanel,
+  type VoiceOverAudio,
+} from '@/components/compose/voice-over-panel';
+import {
+  NarrationModeSelector,
+  type NarrationMode,
+} from '@/components/compose/narration-mode-selector';
+import { TalkingAvatarPanel } from '@/components/compose/talking-avatar-panel';
+import { AvatarOverlayEditor } from '@/components/compose/avatar-overlay-editor';
 import { FacebookMark } from '@/components/facebook-mark';
 import { useFacebookConnection } from '@/components/facebook-connection';
 import { FacebookPreview } from '@/components/facebook-preview';
@@ -60,6 +70,21 @@ import {
 } from '@/lib/format';
 import { stageUpload } from '@/lib/stage-client';
 import { deleteStagedBlob } from '@/lib/blob-cleanup';
+import { DEFAULT_AVATAR_ID, type AvatarId } from '@/lib/avatar/avatars';
+import {
+  ACTIVE_AVATAR_STATUSES,
+  avatarMediaUrl,
+  preferredAvatarJob,
+  readAvatarJobResponse,
+  type PublicAvatarJob,
+} from '@/lib/avatar/jobs';
+import { useAvatarJobPolling } from '@/lib/avatar/use-avatar-job-polling';
+import { shouldDeleteAvatarCompositeAfterPublishFailure } from '@/lib/avatar/publish-cleanup';
+import { normalizeSpeechText } from '@/lib/tts/text';
+import {
+  defaultVoiceForLanguage,
+  type TtsVoiceId,
+} from '@/lib/tts/voices';
 import { fetchQueueItem, fetchQueuePage, type QueueItem } from '@/lib/story-queue';
 import {
   MediaPreviewCard,
@@ -68,6 +93,11 @@ import {
 import { VideoAnimationPicker } from '@/components/videos/video-animation-picker';
 import { VideoAnimationOverlay } from '@/components/videos/video-animation-overlay';
 import { bakeAndFinalizeVideo } from '@/lib/videos/bake';
+import { bakeAndFinalizeNarratedSlideshow } from '@/lib/videos/slideshow';
+import {
+  DEFAULT_AVATAR_PLACEMENT,
+  type AvatarPlacement,
+} from '@/lib/videos/composition';
 import {
   attachmentsFromSlots,
   presetDefaultValues,
@@ -93,6 +123,10 @@ const ALLOWED_IMAGE_TYPES = new Set([
   'image/png',
   'image/webp',
 ]);
+
+function isAvatarJobActive(job: PublicAvatarJob | null): boolean {
+  return Boolean(job && ACTIVE_AVATAR_STATUSES.includes(job.status));
+}
 
 function publishButtonLabel(
   baking: boolean,
@@ -192,6 +226,32 @@ function ComposeWorkspace() {
   const [baking, setBaking] = useState(false);
   const [bakePct, setBakePct] = useState<number | null>(null);
   const animations = attachmentsFromSlots(animSlots, animLoops);
+  const [narrationMode, setNarrationMode] = useState<NarrationMode>('off');
+  const voiceOverEnabled = narrationMode === 'voice';
+  const [voiceId, setVoiceId] = useState<TtsVoiceId>('en-PH-RosaNeural');
+  const [speechSpeed, setSpeechSpeed] = useState(1);
+  const [originalVolume, setOriginalVolume] = useState(0.25);
+  const [narration, setNarration] = useState<VoiceOverAudio | null>(null);
+  const [ttsGenerating, setTtsGenerating] = useState(false);
+  const [ttsError, setTtsError] = useState('');
+  const ttsSequence = useRef(0);
+  const ttsAbortRef = useRef<AbortController | null>(null);
+  const narrationUrlRef = useRef<string | null>(null);
+  const [avatarId, setAvatarId] = useState<AvatarId>(DEFAULT_AVATAR_ID);
+  const [avatarPlacement, setAvatarPlacement] = useState<AvatarPlacement>(
+    DEFAULT_AVATAR_PLACEMENT,
+  );
+  const [avatarJob, setAvatarJob] = useState<PublicAvatarJob | null>(null);
+  const [avatarAction, setAvatarAction] = useState<
+    'creating' | 'canceling' | 'removing' | null
+  >(null);
+  const [avatarError, setAvatarError] = useState('');
+  const avatarSequence = useRef(0);
+  const avatarAbortRef = useRef<AbortController | null>(null);
+  const avatarJobRef = useRef<PublicAvatarJob | null>(null);
+  useEffect(() => {
+    avatarJobRef.current = avatarJob;
+  }, [avatarJob]);
 
   // Field values are keyed by slot: the same preset can open and close the
   // video with different text. Attaching seeds the slot with preset defaults.
@@ -277,9 +337,323 @@ function ComposeWorkspace() {
   useEffect(
     () => () => {
       scheduleAttempt.current += 1;
+      ttsSequence.current += 1;
+      ttsAbortRef.current?.abort();
+      avatarSequence.current += 1;
+      avatarAbortRef.current?.abort();
+      if (narrationUrlRef.current) {
+        URL.revokeObjectURL(narrationUrlRef.current);
+        narrationUrlRef.current = null;
+      }
     },
     []
   );
+
+  function clearVoiceOver() {
+    ttsSequence.current += 1;
+    ttsAbortRef.current?.abort();
+    ttsAbortRef.current = null;
+    setTtsGenerating(false);
+    setTtsError('');
+    if (narrationUrlRef.current) {
+      URL.revokeObjectURL(narrationUrlRef.current);
+      narrationUrlRef.current = null;
+    }
+    setNarration(null);
+  }
+
+  function changeNarrationMode(mode: NarrationMode) {
+    setNarrationMode(mode);
+    if (mode !== 'voice') clearVoiceOver();
+    if (mode === 'avatar') void refreshAvatarJobs();
+  }
+
+  function changeLanguage(value: 'en' | 'tl') {
+    setLanguage(value);
+    setVoiceId(defaultVoiceForLanguage(value));
+  }
+
+  async function generateVoiceOver() {
+    const text = normalizeSpeechText(draft);
+    if (
+      !text ||
+      !voiceOverEnabled ||
+      (!videoFile && !images.length) ||
+      ttsGenerating ||
+      editorLocked ||
+      drafting ||
+      publishing ||
+      scheduling ||
+      deleting
+    ) {
+      return;
+    }
+    const requestId = ++ttsSequence.current;
+    ttsAbortRef.current?.abort();
+    const controller = new AbortController();
+    ttsAbortRef.current = controller;
+    setTtsGenerating(true);
+    setTtsError('');
+    try {
+      const response = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, voiceId, speed: speechSpeed }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => null);
+        throw new Error(
+          data?.error ?? 'The voice-over could not be generated. Please try again.'
+        );
+      }
+      const blob = await response.blob();
+      if (!blob.size) {
+        throw new Error('The speech service returned no audio. Please try again.');
+      }
+      if (requestId !== ttsSequence.current) return;
+      if (narrationUrlRef.current) URL.revokeObjectURL(narrationUrlRef.current);
+      const url = URL.createObjectURL(blob);
+      narrationUrlRef.current = url;
+      setNarration({
+        blob,
+        url,
+        text,
+        voiceId,
+        speed: speechSpeed,
+        duration: 0,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') return;
+      if (requestId === ttsSequence.current) {
+        setTtsError(
+          error instanceof Error
+            ? error.message
+            : 'The voice-over could not be generated. Please try again.'
+        );
+      }
+    } finally {
+      if (requestId === ttsSequence.current) {
+        ttsAbortRef.current = null;
+        setTtsGenerating(false);
+      }
+    }
+  }
+
+  const updateAvatarJob = useCallback((job: PublicAvatarJob | null) => {
+    avatarJobRef.current = job;
+    setAvatarJob(job);
+  }, []);
+
+  const clearAvatar = useCallback((removeRemote = false) => {
+    const previous = avatarJobRef.current;
+    avatarSequence.current += 1;
+    avatarAbortRef.current?.abort();
+    avatarAbortRef.current = null;
+    updateAvatarJob(null);
+    setAvatarPlacement(DEFAULT_AVATAR_PLACEMENT);
+    setAvatarAction(null);
+    setAvatarError('');
+    if (
+      !removeRemote ||
+      !previous ||
+      (!isAvatarJobActive(previous) && previous.publishState !== 'ready')
+    ) {
+      return;
+    }
+    void fetch(`/api/avatar/syntheses/${encodeURIComponent(previous.id)}`, {
+      method: 'DELETE',
+      keepalive: true,
+    }).catch(() => undefined);
+  }, [updateAvatarJob]);
+
+  async function refreshAvatarJobs() {
+    if (avatarAction || avatarAbortRef.current) return;
+    const requestId = ++avatarSequence.current;
+    const controller = new AbortController();
+    avatarAbortRef.current = controller;
+    try {
+      const response = await fetch('/api/avatar/syntheses', {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !Array.isArray(data)) {
+        throw new Error(data?.error ?? 'Avatar jobs could not be loaded.');
+      }
+      if (requestId !== avatarSequence.current) return;
+      updateAvatarJob(preferredAvatarJob(data as PublicAvatarJob[]));
+      setAvatarError('');
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') return;
+      if (requestId === avatarSequence.current && !avatarJobRef.current) {
+        setAvatarError(
+          error instanceof Error ? error.message : 'Avatar jobs could not be loaded.',
+        );
+      }
+    } finally {
+      if (requestId === avatarSequence.current) avatarAbortRef.current = null;
+    }
+  }
+
+  async function generateAvatar() {
+    const text = normalizeSpeechText(draft);
+    const previous = avatarJobRef.current;
+    if (
+      narrationMode !== 'avatar' ||
+      !text ||
+      isAvatarJobActive(previous) ||
+      (previous !== null && previous.publishState !== 'ready') ||
+      avatarAction ||
+      avatarAbortRef.current ||
+      editorLocked ||
+      drafting ||
+      publishing ||
+      scheduling ||
+      deleting
+    ) {
+      return;
+    }
+    const requestId = ++avatarSequence.current;
+    const controller = new AbortController();
+    avatarAbortRef.current = controller;
+    setAvatarError('');
+    try {
+      if (previous) {
+        setAvatarAction('removing');
+        const removal = await fetch(
+          `/api/avatar/syntheses/${encodeURIComponent(previous.id)}`,
+          { method: 'DELETE', signal: controller.signal },
+        );
+        if (!removal.ok) {
+          const data = await removal.json().catch(() => null);
+          throw new Error(data?.error ?? 'The previous avatar could not be removed.');
+        }
+        if (requestId !== avatarSequence.current) return;
+        updateAvatarJob(null);
+      }
+      setAvatarAction('creating');
+      const response = await fetch('/api/avatar/syntheses', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, avatarId, voiceId, speed: speechSpeed }),
+        signal: controller.signal,
+      });
+      const job = await readAvatarJobResponse(
+        response,
+        'The avatar job could not be created.',
+      );
+      if (requestId !== avatarSequence.current) return;
+      updateAvatarJob(job);
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') return;
+      if (requestId === avatarSequence.current) {
+        setAvatarError(
+          error instanceof Error ? error.message : 'The avatar could not be generated.',
+        );
+      }
+    } finally {
+      if (requestId === avatarSequence.current) {
+        avatarAbortRef.current = null;
+        setAvatarAction(null);
+      }
+    }
+  }
+
+  async function cancelAvatar() {
+    const job = avatarJobRef.current;
+    if (!job || !isAvatarJobActive(job) || avatarAction || avatarAbortRef.current) {
+      return;
+    }
+    const requestId = ++avatarSequence.current;
+    const controller = new AbortController();
+    avatarAbortRef.current = controller;
+    setAvatarAction('canceling');
+    setAvatarError('');
+    try {
+      const response = await fetch(
+        `/api/avatar/syntheses/${encodeURIComponent(job.id)}`,
+        { method: 'DELETE', signal: controller.signal },
+      );
+      const cancelled = await readAvatarJobResponse(
+        response,
+        'The avatar job could not be canceled.',
+      );
+      if (requestId !== avatarSequence.current) return;
+      updateAvatarJob(cancelled);
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') return;
+      if (requestId === avatarSequence.current) {
+        setAvatarError(
+          error instanceof Error ? error.message : 'The avatar job could not be canceled.',
+        );
+      }
+    } finally {
+      if (requestId === avatarSequence.current) {
+        avatarAbortRef.current = null;
+        setAvatarAction(null);
+      }
+    }
+  }
+
+  async function removeAvatar() {
+    const job = avatarJobRef.current;
+    if (
+      !job ||
+      isAvatarJobActive(job) ||
+      job.publishState !== 'ready' ||
+      avatarAction ||
+      avatarAbortRef.current
+    ) {
+      return;
+    }
+    const requestId = ++avatarSequence.current;
+    const controller = new AbortController();
+    avatarAbortRef.current = controller;
+    setAvatarAction('removing');
+    setAvatarError('');
+    try {
+      const response = await fetch(
+        `/api/avatar/syntheses/${encodeURIComponent(job.id)}`,
+        { method: 'DELETE', signal: controller.signal },
+      );
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(data?.error ?? 'The avatar could not be removed.');
+      }
+      if (requestId !== avatarSequence.current) return;
+      updateAvatarJob(null);
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') return;
+      if (requestId === avatarSequence.current) {
+        setAvatarError(
+          error instanceof Error ? error.message : 'The avatar could not be removed.',
+        );
+      }
+    } finally {
+      if (requestId === avatarSequence.current) {
+        avatarAbortRef.current = null;
+        setAvatarAction(null);
+      }
+    }
+  }
+
+  const handleAvatarPoll = useCallback(
+    (next: PublicAvatarJob) => {
+      if (avatarJobRef.current?.id !== next.id) return;
+      updateAvatarJob(next);
+    },
+    [updateAvatarJob]
+  );
+  const handleAvatarPollError = useCallback((message: string) => {
+    setAvatarError(message);
+  }, []);
+  useAvatarJobPolling({
+    job: avatarJob,
+    onJob: handleAvatarPoll,
+    onError: handleAvatarPollError,
+  });
+
   const scheduleRetry = useScheduleRetry();
   const scheduleNow = useScheduleClock();
   const scheduleProblem = resolveScheduledFor(scheduledFor, scheduleNow).error;
@@ -433,6 +807,7 @@ function ComposeWorkspace() {
           videoUrl: videoPreviewUrl,
           attachments: animations,
           values: animValues,
+          aspectRatio: '16:9',
           onProgress: (pct) => {
             if (ownsBake()) setBakePct(pct);
           },
@@ -468,6 +843,153 @@ function ComposeWorkspace() {
     }
   }
 
+  async function narratedMediaUrl(isCurrent?: () => boolean): Promise<string | null> {
+    if (!voiceOverReady || !narration) {
+      throw new Error('Generate the voice-over before publishing.');
+    }
+    if (rendersInFlight.current >= MAX_CONCURRENT_BAKES) {
+      throw new Error(
+        'The previous media render is still finishing — try again in a moment.'
+      );
+    }
+    const bakeId = ++bakeSequence.current;
+    const ownsBake = () => bakeId === bakeSequence.current;
+    setBaking(true);
+    setBakePct(0);
+    try {
+      let finalized: File;
+      rendersInFlight.current += 1;
+      try {
+        if (videoUrl && videoPreviewUrl) {
+          finalized = await bakeAndFinalizeVideo({
+            videoUrl: videoPreviewUrl,
+            attachments: animations,
+            values: animValues,
+            aspectRatio: '16:9',
+            narration: narration.blob,
+            originalAudioVolume: originalVolume,
+            onProgress: (pct) => {
+              if (ownsBake()) setBakePct(pct);
+            },
+          });
+        } else if (images.length) {
+          finalized = await bakeAndFinalizeNarratedSlideshow({
+            images,
+            narration: narration.blob,
+            onProgress: (pct) => {
+              if (ownsBake()) setBakePct(pct);
+            },
+          });
+        } else {
+          throw new Error('Attach a photo or video for the voice-over.');
+        }
+      } finally {
+        rendersInFlight.current -= 1;
+      }
+      if (isCurrent && !isCurrent()) return null;
+      const staged = await stageUpload(
+        `compose/${Date.now()}-${finalized.name.replace(/[^\w.-]+/g, '_')}`,
+        finalized,
+        { contentType: 'video/mp4' }
+      );
+      return staged.url;
+    } catch (error) {
+      if (ownsBake()) {
+        toast.error('Voice-over could not be attached', {
+          description:
+            error instanceof Error
+              ? error.message
+              : 'The narrated media could not be rendered in this browser.',
+        });
+      }
+      throw error;
+    } finally {
+      if (ownsBake()) {
+        setBaking(false);
+        setBakePct(null);
+      }
+    }
+  }
+
+  async function avatarCompositeMediaUrl(isCurrent?: () => boolean): Promise<string | null> {
+    if (!avatarReady || !avatarJob?.videoUrl) {
+      throw new Error('Generate the avatar video before publishing.');
+    }
+    if (!videoFile && !images.length) return avatarJob.videoUrl;
+    if (rendersInFlight.current >= MAX_CONCURRENT_BAKES) {
+      throw new Error(
+        'The previous media render is still finishing — try again in a moment.'
+      );
+    }
+    const bakeId = ++bakeSequence.current;
+    const ownsBake = () => bakeId === bakeSequence.current;
+    setBaking(true);
+    setBakePct(0);
+    try {
+      let finalized: File;
+      rendersInFlight.current += 1;
+      try {
+        if (videoUrl && videoPreviewUrl) {
+          finalized = await bakeAndFinalizeVideo({
+            videoUrl: videoPreviewUrl,
+            attachments: animations,
+            values: animValues,
+            aspectRatio: '16:9',
+            avatarUrl: avatarMediaUrl(avatarJob.id),
+            avatarPlacement,
+            originalAudioVolume: originalVolume,
+            onProgress: (pct) => {
+              if (ownsBake()) setBakePct(pct);
+            },
+          });
+        } else if (images.length) {
+          finalized = await bakeAndFinalizeNarratedSlideshow({
+            images,
+            avatarUrl: avatarMediaUrl(avatarJob.id),
+            avatarPlacement,
+            onProgress: (pct) => {
+              if (ownsBake()) setBakePct(pct);
+            },
+          });
+        } else {
+          throw new Error('Attach a photo or video for the avatar overlay.');
+        }
+      } finally {
+        rendersInFlight.current -= 1;
+      }
+      if (isCurrent && !isCurrent()) return null;
+      const staged = await stageUpload(
+        `compose/avatars/${avatarJob.id}/${Date.now()}-${finalized.name.replace(/[^\w.-]+/g, '_')}`,
+        finalized,
+        { contentType: 'video/mp4' }
+      );
+      return staged.url;
+    } catch (error) {
+      if (ownsBake()) {
+        toast.error('Avatar overlay could not be attached', {
+          description:
+            error instanceof Error
+              ? error.message
+              : 'The avatar composite could not be rendered in this browser.',
+        });
+      }
+      throw error;
+    } finally {
+      if (ownsBake()) {
+        setBaking(false);
+        setBakePct(null);
+      }
+    }
+  }
+
+  async function postMediaUrl(isCurrent?: () => boolean): Promise<string | null> {
+    if (avatarReady && avatarJob?.videoUrl) {
+      return avatarCompositeMediaUrl(isCurrent);
+    }
+    if (voiceOverReady) return narratedMediaUrl(isCurrent);
+    return videoUrl ? animatedVideoUrl(isCurrent) : null;
+  }
+
   async function stageVideo(file: File) {
     setVideoStaging(true);
     try {
@@ -501,12 +1023,14 @@ function ComposeWorkspace() {
     setImages([]);
     setComposerRevision((revision) => revision + 1);
     applyVideoFile(null);
+    clearVoiceOver();
+    clearAvatar(true);
     setConfirmDelete(false);
     setScheduleOpen(false);
     setEditorLocked(false);
     setDraftLoadFailed(false);
     if (selected?.draft_id) void loadSavedDraft(selected);
-  }, [selectedId, selected, loadSavedDraft]);
+  }, [selectedId, selected, loadSavedDraft, clearAvatar]);
 
   async function generateDraft() {
     if (!selected || drafting || publishing || scheduling || deleting) return;
@@ -630,6 +1154,10 @@ function ComposeWorkspace() {
 
   async function schedulePost() {
     if (!selected || !draft.trim()) return;
+    if (narrationUnavailableReason) {
+      setScheduleError(narrationUnavailableReason);
+      return;
+    }
     // Regeneration will replace the draft this request would capture, so wait
     // for it to land instead of scheduling text the editor is about to drop.
     // A delete or a publish already in flight will clear or post this draft;
@@ -647,14 +1175,18 @@ function ComposeWorkspace() {
     setEditorLocked(true);
     const attempt = ++scheduleAttempt.current;
     try {
-      const finalVideoUrl = videoUrl
-        ? await animatedVideoUrl(() => attempt === scheduleAttempt.current)
-        : null;
+      const finalVideoUrl = await postMediaUrl(
+        () => attempt === scheduleAttempt.current
+      );
       // The animated bake re-stages a fresh blob; with the schedule abandoned,
       // no request will consume it — remove it instead of leaving it orphaned
       // in the store.
       const discardBake = () => {
-        if (finalVideoUrl && finalVideoUrl !== videoUrl) {
+        if (
+          finalVideoUrl &&
+          finalVideoUrl !== videoUrl &&
+          finalVideoUrl !== avatarJob?.videoUrl
+        ) {
           deleteStagedBlob(finalVideoUrl);
         }
       };
@@ -695,6 +1227,7 @@ function ComposeWorkspace() {
           draftId: selected.draft_id ?? undefined,
           text: draft,
           ...(finalVideoUrl ? { videoUrl: finalVideoUrl } : { imageUrls: images }),
+          ...(avatarReady && avatarJob ? { avatarJobId: avatarJob.id } : {}),
           scheduledFor: submit.iso,
           pageId: pages.selected[0],
         }),
@@ -707,11 +1240,15 @@ function ComposeWorkspace() {
         if (
           res.status === 400 ||
           res.status === 401 ||
-          res.status === 404
+          res.status === 404 ||
+          (res.status === 409 && data?.code === 'avatar_unavailable')
         ) {
           discardBake();
         }
         throw new Error(data.error ?? 'Could not schedule the post.');
+      }
+      if (avatarReady && avatarJob) {
+        updateAvatarJob({ ...avatarJob, publishState: 'scheduled' });
       }
       toast.success('Post scheduled', {
         description: when.toLocaleString('en-PH', {
@@ -767,6 +1304,8 @@ function ComposeWorkspace() {
         setStats(null);
         setImages([]);
         applyVideoFile(null);
+        clearVoiceOver();
+        clearAvatar(true);
         setConfirmDelete(false);
       }
       await load();
@@ -785,6 +1324,12 @@ function ComposeWorkspace() {
 
   async function publish() {
     if (!selected || !draft.trim()) return;
+    if (narrationUnavailableReason) {
+      toast.error('Narration is not ready', {
+        description: narrationUnavailableReason,
+      });
+      return;
+    }
     // The draft captured below would be replaced under the request.
     if (drafting || deleting) return;
     // A video must finish staging before the post can go out.
@@ -805,7 +1350,7 @@ function ComposeWorkspace() {
     publishingRef.current = true;
     setEditorLocked(true);
     try {
-      const finalVideoUrl = videoUrl ? await animatedVideoUrl() : null;
+      const finalVideoUrl = await postMediaUrl();
       const res = await fetch('/api/publish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -813,14 +1358,30 @@ function ComposeWorkspace() {
           newsItemId: selected.id,
           message: draft,
           ...(finalVideoUrl ? { videoUrl: finalVideoUrl } : { imageUrls: images }),
+          ...(avatarReady && avatarJob ? { avatarJobId: avatarJob.id } : {}),
           pageId: pages.selected[0],
         }),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
+        if (
+          finalVideoUrl &&
+          shouldDeleteAvatarCompositeAfterPublishFailure({
+            status: res.status,
+            code: data?.code,
+            avatarJobId: avatarReady && avatarJob ? avatarJob.id : null,
+            mediaUrl: finalVideoUrl,
+            sourceAvatarUrl: avatarJob?.videoUrl ?? null,
+          })
+        ) {
+          deleteStagedBlob(finalVideoUrl);
+        }
         throw new Error(data?.error ?? 'The post could not be published.');
       }
 
+      if (avatarReady && avatarJob) {
+        updateAvatarJob({ ...avatarJob, publishState: 'published' });
+      }
       toast.success(
         `Published to ${data.page?.name ?? facebook.page?.name ?? 'your Page'}`,
         {
@@ -861,6 +1422,62 @@ function ComposeWorkspace() {
 
   const selectedMeta = selected ? statusMeta(selected.status) : null;
   const words = wordCount(draft);
+  const speechText = normalizeSpeechText(draft);
+  const narrationStale = Boolean(
+    narration &&
+      (narration.text !== speechText ||
+        narration.voiceId !== voiceId ||
+        narration.speed !== speechSpeed)
+  );
+  const voiceOverReady = Boolean(
+    voiceOverEnabled && narration && !narrationStale && !ttsGenerating
+  );
+  const hasMedia = Boolean(videoFile || images.length);
+  const avatarActive = isAvatarJobActive(avatarJob);
+  const avatarStale = Boolean(
+    avatarJob &&
+      (avatarJob.text !== speechText ||
+        avatarJob.avatarId !== avatarId ||
+        avatarJob.voiceId !== voiceId ||
+        avatarJob.speed !== speechSpeed),
+  );
+  const avatarReady = Boolean(
+    narrationMode === 'avatar' &&
+      avatarJob?.status === 'completed' &&
+      avatarJob.publishState === 'ready' &&
+      avatarJob.videoUrl &&
+      !avatarStale &&
+      !avatarAction,
+  );
+  let narrationUnavailableReason: string | undefined;
+  if (narrationMode === 'avatar') {
+    if (!speechText) narrationUnavailableReason = 'Write a draft for the avatar';
+    else if (avatarAction)
+      narrationUnavailableReason = 'Wait for the avatar action to finish';
+    else if (avatarActive)
+      narrationUnavailableReason = 'Wait for the avatar video to finish generating';
+    else if (avatarStale)
+      narrationUnavailableReason =
+        'Regenerate the avatar for the updated draft or settings';
+    else if (!avatarJob)
+      narrationUnavailableReason = 'Generate the avatar video before publishing';
+    else if (avatarJob.publishState !== 'ready')
+      narrationUnavailableReason =
+        avatarJob.publishState === 'scheduled'
+          ? 'This avatar is already attached to a scheduled post'
+          : 'This avatar video is already being published or has been published';
+    else if (avatarJob.status !== 'completed' || !avatarJob.videoUrl)
+      narrationUnavailableReason = 'Generate a ready avatar video before publishing';
+  } else if (voiceOverEnabled && !hasMedia) {
+    narrationUnavailableReason = 'Attach a photo or video for the voice-over';
+  } else if (voiceOverEnabled && ttsGenerating) {
+    narrationUnavailableReason = 'Wait for the voice-over to finish generating';
+  } else if (voiceOverEnabled && !narration) {
+    narrationUnavailableReason = 'Generate the voice-over before publishing';
+  } else if (voiceOverEnabled && narrationStale) {
+    narrationUnavailableReason =
+      'Regenerate the voice-over for the updated draft or settings';
+  }
 
   const canPublish = facebook.scopes.includes('pages_manage_posts');
   const publishHint = facebook.loading
@@ -883,8 +1500,10 @@ function ComposeWorkspace() {
     publishUnavailableReason = 'Write or generate a draft to publish';
   else if (!pages.selected.length)
     publishUnavailableReason = 'Select a Facebook Page to publish';
+  else if (narrationUnavailableReason)
+    publishUnavailableReason = narrationUnavailableReason;
   else if (baking)
-    publishUnavailableReason = 'Wait for the video animation to finish';
+    publishUnavailableReason = 'Wait for the media render to finish';
   else if (imagesBusy)
     publishUnavailableReason = 'Wait for the images to finish uploading';
   else if (videoStaging || (videoFile && !videoUrl)) {
@@ -989,7 +1608,7 @@ function ComposeWorkspace() {
                           <button
                             key={value}
                             type="button"
-                            onClick={() => setLanguage(value)}
+                            onClick={() => changeLanguage(value)}
                             aria-pressed={language === value}
                             title={value === 'en' ? 'English' : 'Tagalog'}
                             className={cn(
@@ -1035,6 +1654,104 @@ function ComposeWorkspace() {
                       aria-label="Facebook post draft"
                       className="min-h-[260px] w-full resize-y bg-transparent text-[15px] leading-7 text-foreground outline-none placeholder:text-muted-foreground"
                     />
+                    <div className="mt-4 space-y-3">
+                      <NarrationModeSelector
+                        mode={narrationMode}
+                        onModeChange={changeNarrationMode}
+                        disabled={
+                          editorLocked ||
+                          drafting ||
+                          publishing ||
+                          scheduling ||
+                          deleting
+                        }
+                      />
+                      {voiceOverEnabled ? (
+                        <VoiceOverPanel
+                          enabled
+                          showToggle={false}
+                          onEnabledChange={(enabled) =>
+                            changeNarrationMode(enabled ? 'voice' : 'off')
+                          }
+                          voiceId={voiceId}
+                          onVoiceChange={setVoiceId}
+                          speed={speechSpeed}
+                          onSpeedChange={setSpeechSpeed}
+                          originalVolume={originalVolume}
+                          onOriginalVolumeChange={setOriginalVolume}
+                          showOriginalVolume={Boolean(videoFile)}
+                          audio={narration}
+                          generating={ttsGenerating}
+                          error={ttsError}
+                          stale={narrationStale}
+                          hasMedia={hasMedia}
+                          hasText={Boolean(speechText)}
+                          disabled={
+                            editorLocked ||
+                            drafting ||
+                            publishing ||
+                            scheduling ||
+                            deleting
+                          }
+                          onGenerate={() => void generateVoiceOver()}
+                          onRemove={clearVoiceOver}
+                          onDurationChange={(duration) =>
+                            setNarration((current) =>
+                              current ? { ...current, duration } : current
+                            )
+                          }
+                        />
+                      ) : null}
+                      {narrationMode === 'avatar' ? (
+                        <TalkingAvatarPanel
+                          avatarId={avatarId}
+                          onAvatarChange={setAvatarId}
+                          voiceId={voiceId}
+                          onVoiceChange={setVoiceId}
+                          speed={speechSpeed}
+                          onSpeedChange={setSpeechSpeed}
+                          job={avatarJob}
+                          busy={Boolean(avatarAction)}
+                          error={
+                            avatarError ||
+                            (avatarJob?.status === 'failed'
+                              ? avatarJob.error ?? ''
+                              : '')
+                          }
+                          stale={avatarStale}
+                          hasText={Boolean(speechText)}
+                          hasMedia={hasMedia}
+                          disabled={
+                            editorLocked ||
+                            drafting ||
+                            publishing ||
+                            scheduling ||
+                            deleting
+                          }
+                          onGenerate={() => void generateAvatar()}
+                          onCancel={() => void cancelAvatar()}
+                          onRemove={() => void removeAvatar()}
+                        />
+                      ) : null}
+                      {avatarReady && hasMedia && avatarJob?.videoUrl ? (
+                        <AvatarOverlayEditor
+                          avatarUrl={avatarMediaUrl(avatarJob.id)}
+                          baseVideoUrl={videoPreviewUrl}
+                          images={images}
+                          placement={avatarPlacement}
+                          onPlacementChange={setAvatarPlacement}
+                          originalAudioVolume={originalVolume}
+                          onOriginalAudioVolumeChange={setOriginalVolume}
+                          disabled={
+                            editorLocked ||
+                            drafting ||
+                            publishing ||
+                            scheduling ||
+                            deleting
+                          }
+                        />
+                      ) : null}
+                    </div>
                   </div>
 
                   <div className="border-t border-border/60 px-5 py-3">
@@ -1077,8 +1794,10 @@ function ComposeWorkspace() {
                                 aria-hidden
                               />
                               {bakePct != null
-                                ? `Baking ${Math.round(bakePct * 100)}%…`
-                                : 'Baking animation…'}
+                                ? `Rendering ${Math.round(bakePct * 100)}%…`
+                                : voiceOverEnabled
+                                  ? 'Baking voice-over…'
+                                  : 'Baking animation…'}
                             </>
                           ) : videoUrl ? (
                             'Video ready'
@@ -1299,6 +2018,7 @@ function ComposeWorkspace() {
                             imagesBusy ||
                             videoStaging ||
                             Boolean(videoFile && !videoUrl) ||
+                            Boolean(narrationUnavailableReason) ||
                             selected?.status === 'published'
                           }
                           aria-expanded={scheduleOpen}
@@ -1401,7 +2121,8 @@ function ComposeWorkspace() {
                               drafting ||
                               deleting ||
                               publishing ||
-                              imagesBusy
+                              imagesBusy ||
+                              Boolean(narrationUnavailableReason)
                             }
                           >
                             {scheduling ? 'Scheduling…' : 'Confirm schedule'}

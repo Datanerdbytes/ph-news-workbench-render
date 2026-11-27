@@ -46,7 +46,7 @@ ENV NODE_ENV=production \
 # hadolint ignore=DL3008
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl \
-       bubblewrap socat ripgrep \
+       bubblewrap socat ripgrep librsvg2-2 \
     && rm -rf /var/lib/apt/lists/*
 # yt-dlp resolves public video links behind the Live Page's Source URL field
 # (lib/live/resolve.ts runs `yt-dlp -J --no-playlist <url>`). The official
