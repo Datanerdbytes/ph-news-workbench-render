@@ -41,6 +41,8 @@ function row(overrides: Partial<AvatarJobRow> = {}): AvatarJobRow {
     progress: 1,
     status_message: "Avatar video is ready.",
     blob_url: BLOB_URL,
+    output_format: "mp4",
+    has_alpha: false,
     file_size: MP4_HEADER.byteLength,
     duration_seconds: 3,
     error: null,
@@ -98,6 +100,26 @@ describe("GET /api/avatar/syntheses/[id]/video", () => {
     expect(getAvatarJobMock).toHaveBeenCalledWith("job-1", "ws-1");
     expect(openStagedBlobMock).toHaveBeenCalledWith(BLOB_URL);
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(MP4_HEADER);
+  });
+
+  it("streams an alpha WebM with the persisted format metadata", async () => {
+    const header = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0]);
+    getAvatarJobMock.mockResolvedValue(
+      row({
+        blob_url: BLOB_URL.replace(".mp4", ".webm"),
+        output_format: "webm",
+        has_alpha: true,
+        file_size: header.byteLength,
+      }),
+    );
+    openStagedBlobMock.mockResolvedValue(new Response(header));
+
+    const response = await get();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("video/webm");
+    expect(response.headers.get("content-disposition")).toContain("avatar.webm");
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(header);
   });
 
   it("rejects an oversized object before streaming it", async () => {

@@ -5,9 +5,11 @@ import {
   CalendarClock,
   CircleAlert,
   CircleCheck,
+  Cloud,
   Eye,
   FileText,
   Heart,
+  KeyRound,
   MessageCircle,
   Newspaper,
   RefreshCw,
@@ -25,6 +27,14 @@ import {
   lastNDays,
   type AnalyticsRange,
 } from "@/lib/analytics/days";
+import type {
+  AzureCreditLot,
+  AzureUsage,
+  Money,
+  OpenRouterUsage,
+  UsageResponse,
+  UsageResult,
+} from "@/lib/usage/types";
 import { cn } from "cn";
 
 type TopPost = {
@@ -112,6 +122,14 @@ type PageInsights = {
   reason?: string;
 };
 
+function clientUsageUnavailable(): UsageResult<never> {
+  return {
+    status: "unavailable",
+    code: "upstream_unavailable",
+    message: "Provider usage is temporarily unavailable. Try refreshing shortly.",
+  };
+}
+
 function shortDate(iso: string) {
   if (!iso) return "";
   return new Date(iso).toLocaleDateString("en-PH", {
@@ -140,6 +158,8 @@ export default function AnalyticsPage() {
   const [insights, setInsights] = useState<PageInsights | null>(null);
   const [youtube, setYoutube] = useState<YouTubeInsights | null>(null);
   const [youtubeError, setYoutubeError] = useState(false);
+  const [usage, setUsage] = useState<UsageResponse | null>(null);
+  const [usageLoading, setUsageLoading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [insightsError, setInsightsError] = useState(false);
@@ -205,6 +225,31 @@ export default function AnalyticsPage() {
     return () => controller.abort();
   }, [reloadKey]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/usage", {
+      signal: controller.signal,
+      cache: "no-store",
+    })
+      .then(async (res) => {
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data) throw new Error("failed");
+        setUsage(data as UsageResponse);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setUsage({
+            openrouter: clientUsageUnavailable(),
+            azure: clientUsageUnavailable(),
+          });
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setUsageLoading(false);
+      });
+    return () => controller.abort();
+  }, [reloadKey]);
+
   const series = useMemo(() => {
     const byDay = new Map(daily.map((entry) => [entry.day, entry]));
     return lastNDays(range).map((day) => ({
@@ -244,7 +289,7 @@ export default function AnalyticsPage() {
       icon: FileText,
     },
     {
-      label: "AI spend",
+      label: "Estimated AI spend",
       value: totals ? `$${totals.cost.toFixed(3)}` : "—",
       hint: totals
         ? `${totals.tokens.toLocaleString()} tokens used`
@@ -257,6 +302,7 @@ export default function AnalyticsPage() {
 
   function retryAnalytics() {
     setLoading(true);
+    setUsageLoading(true);
     setLoadError(false);
     setReloadKey((key) => key + 1);
   }
@@ -350,6 +396,37 @@ export default function AnalyticsPage() {
             );
           })}
         </div>
+
+        <section className="mt-5" aria-labelledby="provider-usage-heading">
+          <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+            <div>
+              <h2
+                id="provider-usage-heading"
+                className="text-[13px] font-semibold"
+              >
+                Provider usage
+              </h2>
+              <p className="text-[10.5px] text-muted-foreground">
+                Live account credits and quotas · independent of workspace activity
+              </p>
+            </div>
+            {usageLoading ? (
+              <span
+                role="status"
+                className="text-[10.5px] text-muted-foreground"
+              >
+                Refreshing provider usage…
+              </span>
+            ) : null}
+          </div>
+          <div className="grid gap-3 lg:grid-cols-2">
+            <OpenRouterUsageCard
+              state={usage?.openrouter ?? null}
+              loading={usageLoading}
+            />
+            <AzureUsageCard state={usage?.azure ?? null} loading={usageLoading} />
+          </div>
+        </section>
 
         <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
           <div className="flex min-w-0 flex-col gap-3">
@@ -776,6 +853,328 @@ export default function AnalyticsPage() {
         </div>
       </div>
     </AppFrame>
+  );
+}
+
+function ProviderStatusBadge({
+  state,
+  loading,
+}: {
+  state: UsageResult<unknown> | null;
+  loading: boolean;
+}) {
+  const setup =
+    state?.status === "unavailable" && state.code === "not_configured";
+  const label = loading
+    ? "Loading"
+    : state?.status === "available"
+      ? "Live"
+      : setup
+        ? "Setup needed"
+        : "Unavailable";
+
+  return (
+    <span
+      className={cn(
+        "shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider",
+        loading || setup
+          ? "bg-surface-3 text-muted-foreground"
+          : state?.status === "available"
+            ? "bg-success/10 text-success"
+            : "bg-destructive/10 text-destructive"
+      )}
+    >
+      {label}
+    </span>
+  );
+}
+
+function UsageSkeleton() {
+  return (
+    <div className="mt-4 space-y-3" role="status" aria-label="Loading usage">
+      <span className="sr-only">Loading provider usage…</span>
+      <div className="h-8 w-32 animate-pulse rounded bg-surface-2 motion-reduce:animate-none" />
+      <div className="grid grid-cols-3 gap-3">
+        {[0, 1, 2].map((item) => (
+          <div key={item} className="space-y-1.5">
+            <div className="h-2.5 w-16 animate-pulse rounded bg-surface-2 motion-reduce:animate-none" />
+            <div className="h-4 w-12 animate-pulse rounded bg-surface-2 motion-reduce:animate-none" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function UsageUnavailableState({
+  state,
+}: {
+  state: UsageResult<unknown> | null;
+}) {
+  const setup =
+    state?.status === "unavailable" && state.code === "not_configured";
+  return (
+    <div
+      className="mt-4 rounded-lg border border-border bg-surface-2 px-3 py-3"
+      role="status"
+    >
+      <p className="flex items-center gap-1.5 text-[11.5px] font-semibold">
+        <CircleAlert className="size-3.5 text-muted-foreground" aria-hidden />
+        {setup ? "Setup needed" : "Usage unavailable"}
+      </p>
+      <p className="mt-1 text-[10.5px] leading-relaxed text-muted-foreground">
+        {state?.status === "unavailable"
+          ? state.message
+          : "Provider usage is temporarily unavailable. Try refreshing shortly."}
+      </p>
+    </div>
+  );
+}
+
+function formatUsdUsage(value: number) {
+  return `USD ${value.toLocaleString("en-PH", {
+    minimumFractionDigits: 6,
+    maximumFractionDigits: 6,
+  })}`;
+}
+
+function formatUsageMoney(amount: Money | null) {
+  if (!amount) return "—";
+  const value = amount.value.toLocaleString("en-PH", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 6,
+  });
+  return amount.currency ? `${amount.currency} ${value}` : value;
+}
+
+function formatUsageNumber(value: number | null) {
+  return value === null ? "—" : value.toLocaleString("en-PH");
+}
+
+function formatUsageDate(value: string | null) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "—";
+  return date.toLocaleDateString("en-PH", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function upcomingCreditExpirations(lots: AzureCreditLot[]) {
+  const now = Date.now();
+  const terminalStatuses = new Set(["expired", "canceled", "cancelled", "complete"]);
+  return lots
+    .filter(
+      (lot): lot is AzureCreditLot & { expirationDate: string } =>
+        lot.expirationDate !== null &&
+        Date.parse(lot.expirationDate) >= now &&
+        !terminalStatuses.has(lot.status?.toLowerCase() ?? "")
+    )
+    .sort(
+      (left, right) =>
+        Date.parse(left.expirationDate) - Date.parse(right.expirationDate)
+    );
+}
+
+function OpenRouterUsageCard({
+  state,
+  loading,
+}: {
+  state: UsageResult<OpenRouterUsage> | null;
+  loading: boolean;
+}) {
+  const data = state?.status === "available" ? state.data : null;
+  const showKeyLimits = data?.keyLimitUsd != null || data?.keyRemainingUsd != null;
+
+  return (
+    <section
+      className="rounded-xl border border-border bg-card p-4"
+      aria-labelledby="openrouter-usage-title"
+      aria-busy={loading}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-2.5">
+          <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-brand-soft text-brand">
+            <KeyRound className="size-4" aria-hidden />
+          </span>
+          <div>
+            <h3
+              id="openrouter-usage-title"
+              className="text-[13px] font-semibold"
+            >
+              OpenRouter
+            </h3>
+            <p className="text-[10.5px] text-muted-foreground">
+              Account key credits and free-tier quota
+            </p>
+          </div>
+        </div>
+        <ProviderStatusBadge state={state} loading={loading} />
+      </div>
+
+      {loading ? (
+        <UsageSkeleton />
+      ) : data ? (
+        <>
+          <div className="mt-4">
+            <p className="text-[9.5px] font-bold uppercase tracking-[0.12em] text-muted-foreground">
+              Credits used
+            </p>
+            <p className="mt-1 font-heading text-2xl font-semibold leading-none">
+              {formatUsdUsage(data.creditsUsedUsd)}
+            </p>
+          </div>
+          <dl className="mt-4 grid grid-cols-3 gap-3 border-t border-border pt-3">
+            <UsageMetric
+              label="Daily free used"
+              value={`${formatUsageNumber(data.dailyFreeRequests?.used ?? null)} / ${formatUsageNumber(data.dailyFreeRequests?.limit ?? null)}`}
+            />
+            <UsageMetric
+              label="Daily free limit"
+              value={formatUsageNumber(data.dailyFreeRequests?.limit ?? null)}
+            />
+            <UsageMetric
+              label="Daily free remaining"
+              value={formatUsageNumber(data.dailyFreeRequests?.remaining ?? null)}
+            />
+          </dl>
+          {showKeyLimits ? (
+            <dl className="mt-3 grid grid-cols-2 gap-3 border-t border-border pt-3">
+              {data.keyLimitUsd !== null && (
+                <UsageMetric
+                  label="Key limit"
+                  value={formatUsageMoney({
+                    currency: "USD",
+                    value: data.keyLimitUsd,
+                  })}
+                />
+              )}
+              {data.keyRemainingUsd !== null && (
+                <UsageMetric
+                  label="Key remaining"
+                  value={formatUsageMoney({
+                    currency: "USD",
+                    value: data.keyRemainingUsd,
+                  })}
+                />
+              )}
+            </dl>
+          ) : null}
+        </>
+      ) : (
+        <UsageUnavailableState state={state} />
+      )}
+    </section>
+  );
+}
+
+function AzureUsageCard({
+  state,
+  loading,
+}: {
+  state: UsageResult<AzureUsage> | null;
+  loading: boolean;
+}) {
+  const data = state?.status === "available" ? state.data : null;
+  const upcomingExpirations = data ? upcomingCreditExpirations(data.lots) : [];
+  const nextExpiration = upcomingExpirations[0] ?? null;
+  const expirationCount = upcomingExpirations.length;
+  const balanceIsEstimated = data?.isEstimatedBalance === true;
+
+  return (
+    <section
+      className="rounded-xl border border-border bg-card p-4"
+      aria-labelledby="azure-usage-title"
+      aria-busy={loading}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-2.5">
+          <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-brand-soft text-brand">
+            <Cloud className="size-4" aria-hidden />
+          </span>
+          <div>
+            <h3 id="azure-usage-title" className="text-[13px] font-semibold">
+              Azure
+            </h3>
+            <p className="text-[10.5px] text-muted-foreground">
+              MCA credit balance and upcoming expiration
+            </p>
+          </div>
+        </div>
+        <ProviderStatusBadge state={state} loading={loading} />
+      </div>
+
+      {loading ? (
+        <UsageSkeleton />
+      ) : data ? (
+        <>
+          <div className="mt-4">
+            <p className="text-[9.5px] font-bold uppercase tracking-[0.12em] text-muted-foreground">
+              {balanceIsEstimated
+                ? "Current credit balance (estimated)"
+                : "Current credit balance"}
+            </p>
+            <p className="mt-1 font-heading text-2xl font-semibold leading-none">
+              {formatUsageMoney(data.currentBalance)}
+            </p>
+          </div>
+          <dl className="mt-4 grid grid-cols-2 gap-x-3 gap-y-3 border-t border-border pt-3">
+            <UsageMetric
+              label="Azure-estimated balance"
+              value={formatUsageMoney(data.estimatedBalance)}
+            />
+            <UsageMetric
+              label="Pending eligible charges"
+              value={formatUsageMoney(data.pendingEligibleCharges)}
+            />
+            <UsageMetric
+              label="Expired credit"
+              value={formatUsageMoney(data.expiredCredit)}
+            />
+            <UsageMetric
+              label="Expiration"
+              value={formatUsageDate(nextExpiration?.expirationDate ?? null)}
+            />
+          </dl>
+          {balanceIsEstimated ? (
+            <p className="mt-3 text-[10px] leading-relaxed text-muted-foreground">
+              Azure marks these balance details as estimates and subject to
+              change.
+            </p>
+          ) : null}
+          {nextExpiration ? (
+            <p className="mt-3 text-[10px] leading-relaxed text-muted-foreground">
+              {nextExpiration.source ?? "Credit lot"}
+              {nextExpiration.status ? ` · ${nextExpiration.status}` : ""}
+              {expirationCount > 1
+                ? ` · ${expirationCount} lots list an expiration`
+                : ""}
+            </p>
+          ) : (
+            <p className="mt-3 text-[10px] text-muted-foreground">
+              No credit expiration was reported.
+            </p>
+          )}
+        </>
+      ) : (
+        <UsageUnavailableState state={state} />
+      )}
+    </section>
+  );
+}
+
+function UsageMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-[9px] font-bold uppercase tracking-[0.12em] text-muted-foreground">
+        {label}
+      </dt>
+      <dd className="mt-1 break-words font-heading text-[13px] font-semibold leading-tight">
+        {value}
+      </dd>
+    </div>
   );
 }
 

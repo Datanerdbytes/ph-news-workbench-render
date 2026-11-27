@@ -46,6 +46,8 @@ function row(overrides: Partial<AvatarJobRow> = {}): AvatarJobRow {
     progress: null,
     status_message: "Queued",
     blob_url: null,
+    output_format: "mp4",
+    has_alpha: false,
     file_size: null,
     duration_seconds: null,
     error: null,
@@ -172,7 +174,32 @@ describe("enqueueAvatarJob", () => {
       "Hello",
       5,
       3,
+      "mp4",
+      false,
     ]);
+  });
+
+  it("persists native alpha metadata for a transparent standard avatar", async () => {
+    sqlMock.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => ({
+      strings,
+      values,
+    }));
+
+    await enqueueAvatarJob({
+      workspaceId: "ws-1",
+      userId: "user-1",
+      avatarId: "meg-formal",
+      voiceId: "en-PH-RosaNeural",
+      speed: 1,
+      text: "Hello",
+      transparent: true,
+    });
+
+    const queries = transactionMock.mock.calls[0][0] as Array<{
+      strings: TemplateStringsArray;
+      values: unknown[];
+    }>;
+    expect(queries[1].values.slice(-2)).toEqual(["webm", true]);
   });
 
   it("returns a quota error when the conditional usage insert reserves nothing", async () => {

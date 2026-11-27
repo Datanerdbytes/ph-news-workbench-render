@@ -165,9 +165,16 @@ function withTimeout<T>(task: Promise<T>, ms: number, label: string): Promise<T>
 export async function transcodeInBrowser(
   blob: Blob,
   name: string,
-  onProgress?: (ratio: number) => void
+  onProgress?: (ratio: number) => void,
+  options: BrowserTranscodeOptions = {}
 ): Promise<File> {
-  return runFfmpegInBrowser(blob, name, buildBrowserTranscodeArgs, onProgress);
+  return runFfmpegInBrowser(
+    blob,
+    name,
+    (inputName, outputName) =>
+      buildBrowserTranscodeArgs(inputName, outputName, options),
+    onProgress
+  );
 }
 
 /**

@@ -70,7 +70,7 @@ import {
 } from '@/lib/format';
 import { stageUpload } from '@/lib/stage-client';
 import { deleteStagedBlob } from '@/lib/blob-cleanup';
-import { DEFAULT_AVATAR_ID, type AvatarId } from '@/lib/avatar/avatars';
+import { DEFAULT_AVATAR_ID, getAvatar, type AvatarId } from '@/lib/avatar/avatars';
 import {
   ACTIVE_AVATAR_STATUSES,
   avatarMediaUrl,
@@ -80,6 +80,7 @@ import {
 } from '@/lib/avatar/jobs';
 import { useAvatarJobPolling } from '@/lib/avatar/use-avatar-job-polling';
 import { shouldDeleteAvatarCompositeAfterPublishFailure } from '@/lib/avatar/publish-cleanup';
+import { supportsTransparentAvatarPreview } from '@/lib/avatar/output';
 import { normalizeSpeechText } from '@/lib/tts/text';
 import {
   defaultVoiceForLanguage,
@@ -93,6 +94,7 @@ import {
 import { VideoAnimationPicker } from '@/components/videos/video-animation-picker';
 import { VideoAnimationOverlay } from '@/components/videos/video-animation-overlay';
 import { bakeAndFinalizeVideo } from '@/lib/videos/bake';
+import { flattenTransparentAvatar } from '@/lib/videos/avatar-video';
 import { bakeAndFinalizeNarratedSlideshow } from '@/lib/videos/slideshow';
 import {
   DEFAULT_AVATAR_PLACEMENT,
@@ -238,6 +240,8 @@ function ComposeWorkspace() {
   const ttsAbortRef = useRef<AbortController | null>(null);
   const narrationUrlRef = useRef<string | null>(null);
   const [avatarId, setAvatarId] = useState<AvatarId>(DEFAULT_AVATAR_ID);
+  const [avatarTransparent, setAvatarTransparent] = useState(false);
+  const [transparencySupported, setTransparencySupported] = useState(true);
   const [avatarPlacement, setAvatarPlacement] = useState<AvatarPlacement>(
     DEFAULT_AVATAR_PLACEMENT,
   );
@@ -252,6 +256,9 @@ function ComposeWorkspace() {
   useEffect(() => {
     avatarJobRef.current = avatarJob;
   }, [avatarJob]);
+  useEffect(() => {
+    setTransparencySupported(supportsTransparentAvatarPreview());
+  }, []);
 
   // Field values are keyed by slot: the same preset can open and close the
   // video with different text. Attaching seeds the slot with preset defaults.
@@ -482,7 +489,9 @@ function ComposeWorkspace() {
         throw new Error(data?.error ?? 'Avatar jobs could not be loaded.');
       }
       if (requestId !== avatarSequence.current) return;
-      updateAvatarJob(preferredAvatarJob(data as PublicAvatarJob[]));
+      const preferred = preferredAvatarJob(data as PublicAvatarJob[]);
+      updateAvatarJob(preferred);
+      if (preferred) setAvatarTransparent(preferred.hasAlpha);
       setAvatarError('');
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') return;
@@ -494,6 +503,11 @@ function ComposeWorkspace() {
     } finally {
       if (requestId === avatarSequence.current) avatarAbortRef.current = null;
     }
+  }
+
+  function changeAvatar(nextAvatarId: AvatarId) {
+    setAvatarId(nextAvatarId);
+    if (getAvatar(nextAvatarId).kind !== 'video') setAvatarTransparent(false);
   }
 
   async function generateAvatar() {
@@ -536,7 +550,13 @@ function ComposeWorkspace() {
       const response = await fetch('/api/avatar/syntheses', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, avatarId, voiceId, speed: speechSpeed }),
+        body: JSON.stringify({
+          text,
+          avatarId,
+          voiceId,
+          speed: speechSpeed,
+          transparent: avatarTransparent,
+        }),
         signal: controller.signal,
       });
       const job = await readAvatarJobResponse(
@@ -915,7 +935,9 @@ function ComposeWorkspace() {
     if (!avatarReady || !avatarJob?.videoUrl) {
       throw new Error('Generate the avatar video before publishing.');
     }
-    if (!videoFile && !images.length) return avatarJob.videoUrl;
+    if (!videoFile && !images.length && !avatarJob.hasAlpha) {
+      return avatarJob.videoUrl;
+    }
     if (rendersInFlight.current >= MAX_CONCURRENT_BAKES) {
       throw new Error(
         'The previous media render is still finishing — try again in a moment.'
@@ -929,7 +951,14 @@ function ComposeWorkspace() {
       let finalized: File;
       rendersInFlight.current += 1;
       try {
-        if (videoUrl && videoPreviewUrl) {
+        if (!videoFile && !images.length && avatarJob.hasAlpha) {
+          finalized = await flattenTransparentAvatar(
+            avatarMediaUrl(avatarJob.id),
+            (pct) => {
+              if (ownsBake()) setBakePct(pct);
+            },
+          );
+        } else if (videoUrl && videoPreviewUrl) {
           finalized = await bakeAndFinalizeVideo({
             videoUrl: videoPreviewUrl,
             attachments: animations,
@@ -1439,7 +1468,8 @@ function ComposeWorkspace() {
       (avatarJob.text !== speechText ||
         avatarJob.avatarId !== avatarId ||
         avatarJob.voiceId !== voiceId ||
-        avatarJob.speed !== speechSpeed),
+        avatarJob.speed !== speechSpeed ||
+        avatarJob.hasAlpha !== avatarTransparent),
   );
   const avatarReady = Boolean(
     narrationMode === 'avatar' &&
@@ -1705,11 +1735,14 @@ function ComposeWorkspace() {
                       {narrationMode === 'avatar' ? (
                         <TalkingAvatarPanel
                           avatarId={avatarId}
-                          onAvatarChange={setAvatarId}
+                          onAvatarChange={changeAvatar}
                           voiceId={voiceId}
                           onVoiceChange={setVoiceId}
                           speed={speechSpeed}
                           onSpeedChange={setSpeechSpeed}
+                          transparent={avatarTransparent}
+                          onTransparentChange={setAvatarTransparent}
+                          transparencySupported={transparencySupported}
                           job={avatarJob}
                           busy={Boolean(avatarAction)}
                           error={
@@ -1742,6 +1775,7 @@ function ComposeWorkspace() {
                           onPlacementChange={setAvatarPlacement}
                           originalAudioVolume={originalVolume}
                           onOriginalAudioVolumeChange={setOriginalVolume}
+                          transparent={avatarJob.hasAlpha}
                           disabled={
                             editorLocked ||
                             drafting ||

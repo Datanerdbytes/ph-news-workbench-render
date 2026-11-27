@@ -13,6 +13,7 @@ import {
 import type { AvatarId } from "./avatars";
 import { MAX_AVATAR_OUTPUT_BYTES } from "./config";
 import type { AvatarJobRow } from "./jobs";
+import { avatarMediaExtension, avatarMediaType } from "./output";
 import {
   completeAvatarJob,
   failAvatarJob,
@@ -83,7 +84,8 @@ async function stillOwned(job: AvatarJobRow): Promise<AvatarJobRow | null> {
 
 export async function processAvatarJob(job: AvatarJobRow): Promise<void> {
   const workDir = await mkdtemp(path.join(os.tmpdir(), "ph-avatar-"));
-  const filePath = path.join(workDir, "avatar.mp4");
+  const outputFormat = job.output_format === "webm" ? "webm" : "mp4";
+  const filePath = path.join(workDir, `avatar.${avatarMediaExtension(outputFormat)}`);
   let stagedUrl: string | null = null;
   let completionAttempted = false;
   let synthesisId = job.provider_synthesis_id;
@@ -119,6 +121,7 @@ export async function processAvatarJob(job: AvatarJobRow): Promise<void> {
         avatarId: job.avatar_id as AvatarId,
         voiceId: job.voice_id as TtsVoiceId,
         speed: Number(job.speed),
+        transparent: job.has_alpha,
       });
     }
     if (synthesis.id !== job.id) {
@@ -185,6 +188,7 @@ export async function processAvatarJob(job: AvatarJobRow): Promise<void> {
       url: synthesis.resultUrl,
       destination: filePath,
       maxBytes: MAX_AVATAR_OUTPUT_BYTES,
+      outputFormat,
     });
     current = await stillOwned(job);
     if (!current) return;
@@ -198,9 +202,9 @@ export async function processAvatarJob(job: AvatarJobRow): Promise<void> {
 
     await updateAvatarJob(job, "finalizing", 0.9, "Saving the avatar video…");
     const staged = await stageServerFile(
-      `avatars/${job.workspace_id}/${job.id}/avatar.mp4`,
+      `avatars/${job.workspace_id}/${job.id}/avatar.${avatarMediaExtension(outputFormat)}`,
       filePath,
-      "video/mp4",
+      avatarMediaType(outputFormat),
       MAX_AVATAR_OUTPUT_BYTES,
     );
     stagedUrl = staged.url;

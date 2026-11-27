@@ -54,6 +54,8 @@ function row(overrides: Partial<AvatarJobRow> = {}): AvatarJobRow {
     progress: null,
     status_message: "Queued",
     blob_url: null,
+    output_format: "mp4",
+    has_alpha: false,
     file_size: null,
     duration_seconds: null,
     error: null,
@@ -129,6 +131,8 @@ describe("GET /api/avatar/syntheses", () => {
         statusMessage: "Queued",
         progress: 1,
         videoUrl: "https://store.test/avatar.mp4",
+        outputFormat: "mp4",
+        hasAlpha: false,
         durationSeconds: 13.4,
         error: null,
         publishState: "ready",
@@ -152,6 +156,32 @@ describe("GET /api/avatar/syntheses", () => {
 });
 
 describe("POST /api/avatar/syntheses", () => {
+  it("accepts transparency for a standard video avatar", async () => {
+    enqueueAvatarJobMock.mockResolvedValue(
+      row({ output_format: "webm", has_alpha: true }),
+    );
+
+    const response = await post({ ...VALID_BODY, transparent: true });
+    const body = await response.json();
+
+    expect(response.status).toBe(202);
+    expect(enqueueAvatarJobMock).toHaveBeenCalledWith(
+      expect.objectContaining({ transparent: true }),
+    );
+    expect(body).toMatchObject({ outputFormat: "webm", hasAlpha: true });
+  });
+
+  it.each([
+    [{ ...VALID_BODY, avatarId: "anika", transparent: true }, "transparency_unavailable"],
+    [{ ...VALID_BODY, transparent: "yes" }, "invalid_transparency"],
+  ])("rejects unsupported transparency requests", async (body, code) => {
+    const response = await post(body);
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code });
+    expect(enqueueAvatarJobMock).not.toHaveBeenCalled();
+  });
+
   it("requires a workspace session before validation or enqueueing", async () => {
     requireWorkspaceMock.mockResolvedValue(null);
 
@@ -184,6 +214,7 @@ describe("POST /api/avatar/syntheses", () => {
       voiceId: "fil-PH-BlessicaNeural",
       speed: 1,
       text: "Hello world",
+      transparent: false,
     });
     expect(avatarEndpointMock.mock.invocationCallOrder[0]).toBeLessThan(
       enqueueAvatarJobMock.mock.invocationCallOrder[0],

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_AVATAR_PLACEMENT,
@@ -28,6 +28,7 @@ function props(overrides: Record<string, unknown> = {}) {
     onPlacementChange: vi.fn(),
     originalAudioVolume: 0.25,
     onOriginalAudioVolumeChange: vi.fn(),
+    transparent: false,
     disabled: false,
     ...overrides,
   };
@@ -63,6 +64,52 @@ describe("AvatarOverlayEditor", () => {
       screen.getByRole("button", { name: /Avatar overlay\. Use arrow keys/ }),
     ).toBeTruthy();
     expect(screen.getByText(/Overlay edits do not regenerate/)).toBeTruthy();
+  });
+
+  it("keeps the overlay wrapper transparent for alpha avatars", () => {
+    render(<AvatarOverlayEditor {...props({ transparent: true })} />);
+
+    const overlay = screen.getByRole("button", {
+      name: /Avatar overlay\. Use arrow keys/,
+    });
+    expect(overlay.classList.contains("bg-transparent")).toBe(true);
+    expect(overlay.classList.contains("bg-black")).toBe(false);
+  });
+
+  it("plays avatar audio and ducks the attached video until the avatar ends", async () => {
+    const { container } = render(
+      <AvatarOverlayEditor {...props({ baseVideoUrl: "blob:attached-video" })} />,
+    );
+    const avatar = container.querySelector(
+      'video[aria-hidden="true"]',
+    ) as HTMLVideoElement;
+    const base = screen.getByLabelText(
+      "Attached video beneath the avatar",
+    ) as HTMLVideoElement;
+    if (!avatar) throw new Error("Missing avatar preview");
+
+    fireEvent.click(screen.getByRole("button", { name: "Play overlay preview" }));
+
+    await waitFor(() => {
+      expect(avatar.muted).toBe(false);
+      expect(base.muted).toBe(false);
+      expect(base.volume).toBe(0.25);
+    });
+
+    Object.defineProperty(avatar, "ended", { configurable: true, value: true });
+    fireEvent.ended(avatar);
+
+    await waitFor(() => expect(base.volume).toBe(1));
+  });
+
+  it("keeps avatar audio enabled for a photo attachment", () => {
+    const { container } = render(<AvatarOverlayEditor {...props()} />);
+    const avatar = container.querySelector(
+      'video[aria-hidden="true"]',
+    ) as HTMLVideoElement;
+
+    expect(avatar.muted).toBe(false);
+    expect(screen.getByText(/Preview includes the avatar's audio/)).toBeTruthy();
   });
 
   it("disables playback and surfaces an error when avatar validation fails", () => {

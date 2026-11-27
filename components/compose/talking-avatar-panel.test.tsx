@@ -25,6 +25,9 @@ function props(overrides: Record<string, unknown> = {}) {
     onVoiceChange: vi.fn(),
     speed: 1,
     onSpeedChange: vi.fn(),
+    transparent: false,
+    onTransparentChange: vi.fn(),
+    transparencySupported: true,
     job: null,
     busy: false,
     error: "",
@@ -49,6 +52,8 @@ const readyJob: PublicAvatarJob = {
   statusMessage: "",
   progress: 1,
   videoUrl: "https://storage.example/avatar.mp4",
+  outputFormat: "mp4",
+  hasAlpha: false,
   durationSeconds: 12.4,
   error: null,
   publishState: "ready",
@@ -119,6 +124,31 @@ describe("TalkingAvatarPanel", () => {
       "en-US-ChristopherNeural",
     );
     expect(panelProps.onSpeedChange).toHaveBeenCalledWith(1.2);
+  });
+
+  it("offers native transparency for Meg and Max only", () => {
+    const panelProps = props();
+    const { rerender } = render(<TalkingAvatarPanel {...panelProps} />);
+
+    fireEvent.click(screen.getByLabelText("Transparent background"));
+    expect(panelProps.onTransparentChange).toHaveBeenCalledWith(true);
+
+    rerender(<TalkingAvatarPanel {...props({ avatarId: "anika" })} />);
+    expect(screen.queryByLabelText("Transparent background")).toBeNull();
+  });
+
+  it("explains when the browser cannot preserve WebM alpha", () => {
+    render(
+      <TalkingAvatarPanel
+        {...props({ transparencySupported: false, transparent: true })}
+      />,
+    );
+
+    expect(
+      (screen.getByLabelText("Transparent background") as HTMLInputElement)
+        .disabled,
+    ).toBe(true);
+    expect(screen.getByText(/cannot preserve WebM alpha/)).toBeTruthy();
   });
 
   it("shows progress and allows an active job to be canceled", () => {

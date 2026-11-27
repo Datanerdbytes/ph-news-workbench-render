@@ -73,6 +73,8 @@ function job(overrides: Partial<AvatarJobRow> = {}): AvatarJobRow {
     progress: 0.05,
     status_message: "Preparing the avatar…",
     blob_url: null,
+    output_format: "mp4",
+    has_alpha: false,
     file_size: null,
     duration_seconds: null,
     error: null,
@@ -146,6 +148,7 @@ describe("processAvatarJob", () => {
       avatarId: "meg-formal",
       voiceId: "en-PH-RosaNeural",
       speed: 1.1,
+      transparent: false,
     });
     expect(mocks.getAvatarSynthesis).toHaveBeenCalledTimes(1);
     expect(mocks.updateAvatarJob).toHaveBeenNthCalledWith(
@@ -159,6 +162,7 @@ describe("processAvatarJob", () => {
       url: RESULT_URL,
       destination: FILE_PATH,
       maxBytes: MAX_AVATAR_OUTPUT_BYTES,
+      outputFormat: "mp4",
     });
     expect(mocks.updateAvatarJob).toHaveBeenNthCalledWith(
       2,
@@ -192,6 +196,37 @@ describe("processAvatarJob", () => {
       force: true,
     });
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps a transparent job in WebM through submission, download, and staging", async () => {
+    const current = job({ output_format: "webm", has_alpha: true });
+    const stagedUrl = "https://store.test/avatars/ws-1/job-1/avatar.webm";
+    mocks.getAvatarJob.mockResolvedValue(current);
+    mocks.stageServerFile.mockResolvedValue({
+      url: stagedUrl,
+      pathname: "avatars/ws-1/job-1/avatar.webm",
+      contentType: "video/webm",
+    });
+
+    const processing = processAvatarJob(current);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await processing;
+
+    expect(mocks.submitAvatarSynthesis).toHaveBeenCalledWith(
+      expect.objectContaining({ transparent: true }),
+    );
+    expect(mocks.downloadAvatarResult).toHaveBeenCalledWith({
+      url: RESULT_URL,
+      destination: path.join(WORK_DIR, "avatar.webm"),
+      maxBytes: MAX_AVATAR_OUTPUT_BYTES,
+      outputFormat: "webm",
+    });
+    expect(mocks.stageServerFile).toHaveBeenCalledWith(
+      "avatars/ws-1/job-1/avatar.webm",
+      path.join(WORK_DIR, "avatar.webm"),
+      "video/webm",
+      MAX_AVATAR_OUTPUT_BYTES,
+    );
   });
 
   it("reuses a recorded provider id instead of submitting again", async () => {

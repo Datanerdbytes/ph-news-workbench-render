@@ -2,6 +2,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadAvatarVideo } from "./avatar-video";
 
+function webmResponse(): Response {
+  const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0]);
+  return new Response(bytes, {
+    status: 200,
+    headers: { "content-type": "video/webm" },
+  });
+}
+
 function mp4Response(size = 16): Response {
   const bytes = new Uint8Array(size);
   bytes.set([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70], 0);
@@ -123,6 +131,20 @@ describe("loadAvatarVideo", () => {
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:loaded-avatar-1");
   });
 
+  it("downloads an approved WebM with alpha preserved", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(webmResponse()));
+
+    const loaded = await loadAvatarVideo(
+      "https://store.public.blob.vercel-storage.com/avatar/source.webm",
+    );
+
+    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
+    const blob = createObjectURL.mock.calls[0][0] as Blob;
+    expect(blob.type).toBe("video/webm");
+    expect(loaded.video.src).toBe("blob:loaded-avatar-1");
+    loaded.release();
+  });
+
   it("uses same-origin credentials for authenticated avatar media", async () => {
     const fetchMock = vi.fn().mockResolvedValue(mp4Response());
     vi.stubGlobal("fetch", fetchMock);
@@ -216,7 +238,7 @@ describe("loadAvatarVideo", () => {
       loadAvatarVideo(
         "https://store.public.blob.vercel-storage.com/avatar/source.mp4",
       ),
-    ).rejects.toThrow("The avatar source is not a valid MP4 video.");
+    ).rejects.toThrow("The avatar source is not a valid MP4 or WebM video.");
     expect(createObjectURL).not.toHaveBeenCalled();
   });
 
