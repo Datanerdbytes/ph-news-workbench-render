@@ -14,26 +14,18 @@ export type OpenRouterUsage = {
   } | null;
 };
 
-export type AzureCreditLot = {
-  source: string | null;
-  startDate: string | null;
-  expirationDate: string | null;
-  status: string | null;
-  originalAmount: Money | null;
-  closedBalance: Money | null;
-  isEstimatedBalance: boolean | null;
-};
-
+/** The free credit left on an Azure subscription, derived from its usage. */
 export type AzureUsage = {
-  currentBalance: Money | null;
-  estimatedBalance: Money | null;
-  billingCurrency: string | null;
-  creditCurrency: string | null;
-  expiredCredit: Money | null;
-  pendingCreditAdjustments: Money | null;
-  pendingEligibleCharges: Money | null;
-  isEstimatedBalance: boolean | null;
-  lots: AzureCreditLot[];
+  /** The grant total this card is measured against. */
+  granted: Money;
+  /** The grant minus every credit-eligible charge Azure has posted; never below zero. */
+  remaining: Money;
+  /** Credit-eligible charges posted so far. */
+  consumed: Money;
+  /** Latest usage day Azure has posted. Usage lands up to a day late. */
+  reportedThrough: string | null;
+  /** When the grant lapses; null when it is not configured. */
+  expiresAt: string | null;
 };
 
 export type UsageUnavailableCode =

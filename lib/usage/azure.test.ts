@@ -7,38 +7,37 @@ const azureEnv = {
   AZURE_BILLING_TENANT_ID: "tenant/with space",
   AZURE_BILLING_CLIENT_ID: "test-client-id",
   AZURE_BILLING_CLIENT_SECRET: "test-client-secret",
-  AZURE_BILLING_ACCOUNT_ID: "account:one",
-  AZURE_BILLING_PROFILE_ID: "profile/two",
+  AZURE_BILLING_SUBSCRIPTION_ID: "sub one",
+  AZURE_BILLING_CREDIT_TOTAL: "200",
 } as const;
 
-const balanceResponse = {
-  properties: {
-    balanceSummary: {
-      currentBalance: { currency: "USD", value: 200 },
-      estimatedBalance: { currency: "USD", value: 190 },
+const usagePage = "https://management.azure.com/subscriptions/sub%20one/providers/Microsoft.Consumption/usageDetails";
+const nextPageUrl = `${usagePage}?api-version=2023-05-01&$top=1000&$skiptoken=next`;
+
+function usageRecord(overrides: Record<string, unknown> = {}) {
+  return {
+    properties: {
+      date: "2026-11-26T00:00:00Z",
+      costInBillingCurrency: 0.5,
+      billingCurrencyCode: "USD",
+      isAzureCreditEligible: true,
+      ...overrides,
     },
-    billingCurrency: "USD",
-    creditCurrency: "USD",
-    expiredCredit: { currency: "USD", value: 0 },
-    pendingCreditAdjustments: { currency: "USD", value: 5 },
-    pendingEligibleCharges: { currency: "USD", value: 12.5 },
-    isEstimatedBalance: true,
-  },
+  };
+}
+
+const firstPage = {
+  value: [
+    usageRecord(),
+    usageRecord({ date: "2026-11-27T00:00:00Z", costInBillingCurrency: 1.75 }),
+  ],
+  nextLink: nextPageUrl,
 };
 
-const lotsResponse = {
+const lastPage = {
   value: [
-    {
-      properties: {
-        source: "Azure sign-up credit",
-        startDate: "2026-01-01T00:00:00Z",
-        expirationDate: "2026-12-31T00:00:00Z",
-        status: "Active",
-        originalAmount: { currency: "USD", value: 200 },
-        closedBalance: { currency: "USD", value: 10 },
-        isEstimatedBalance: false,
-      },
-    },
+    // A credit-ineligible charge never draws the grant down.
+    usageRecord({ date: "2026-11-27T00:00:00Z", costInBillingCurrency: 3, isAzureCreditEligible: false }),
   ],
 };
 
@@ -49,17 +48,15 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
-function mockAzureSuccess() {
+function mockAzure(pages: unknown[] = [firstPage, lastPage]) {
   fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes("login.microsoftonline.com")) {
       return jsonResponse({ access_token: "test-access-token" });
     }
-    if (url.includes("/credits/balanceSummary")) {
-      return jsonResponse(balanceResponse);
-    }
-    if (url.includes("/providers/Microsoft.Consumption/lots")) {
-      return jsonResponse(lotsResponse);
+    if (url.includes("/Microsoft.Consumption/usageDetails")) {
+      const page = pages.shift();
+      if (page) return jsonResponse(page);
     }
     throw new Error(`Unexpected URL: ${url}`);
   });
@@ -79,31 +76,17 @@ afterEach(() => {
 });
 
 describe("getAzureUsage", () => {
-  it("returns MCA balances and credit lots from the authoritative APIs", async () => {
-    mockAzureSuccess();
+  it("derives the remaining credit from every page of subscription usage", async () => {
+    mockAzure();
 
     await expect(getAzureUsage()).resolves.toEqual({
       status: "available",
       data: {
-        currentBalance: { currency: "USD", value: 200 },
-        estimatedBalance: { currency: "USD", value: 190 },
-        billingCurrency: "USD",
-        creditCurrency: "USD",
-        expiredCredit: { currency: "USD", value: 0 },
-        pendingCreditAdjustments: { currency: "USD", value: 5 },
-        pendingEligibleCharges: { currency: "USD", value: 12.5 },
-        isEstimatedBalance: true,
-        lots: [
-          {
-            source: "Azure sign-up credit",
-            startDate: "2026-01-01T00:00:00Z",
-            expirationDate: "2026-12-31T00:00:00Z",
-            status: "Active",
-            originalAmount: { currency: "USD", value: 200 },
-            closedBalance: { currency: "USD", value: 10 },
-            isEstimatedBalance: false,
-          },
-        ],
+        granted: { currency: "USD", value: 200 },
+        remaining: { currency: "USD", value: 197.75 },
+        consumed: { currency: "USD", value: 2.25 },
+        reportedThrough: "2026-11-27T00:00:00Z",
+        expiresAt: null,
       },
     });
 
@@ -122,12 +105,12 @@ describe("getAzureUsage", () => {
     expect(tokenBody.has("client_id")).toBe(true);
     expect(tokenBody.has("client_secret")).toBe(true);
 
-    const consumptionCalls = fetchMock.mock.calls.slice(1);
-    expect(consumptionCalls.map(([url]) => String(url))).toEqual([
-      "https://management.azure.com/providers/Microsoft.Billing/billingAccounts/account%3Aone/billingProfiles/profile%2Ftwo/providers/Microsoft.Consumption/credits/balanceSummary?api-version=2026-06-01",
-      "https://management.azure.com/providers/Microsoft.Billing/billingAccounts/account%3Aone/billingProfiles/profile%2Ftwo/providers/Microsoft.Consumption/lots?api-version=2026-06-01",
+    const usageCalls = fetchMock.mock.calls.slice(1);
+    expect(usageCalls.map(([url]) => String(url))).toEqual([
+      `${usagePage}?api-version=2023-05-01&$top=1000`,
+      nextPageUrl,
     ]);
-    for (const [, init] of consumptionCalls) {
+    for (const [, init] of usageCalls) {
       expect(init.cache).toBe("no-store");
       expect(new Headers(init.headers).get("authorization")).toMatch(
         /^Bearer \S+$/
@@ -135,8 +118,90 @@ describe("getAzureUsage", () => {
     }
   });
 
+  it("counts only usage since the grant's first day and reports its expiry", async () => {
+    vi.stubEnv("AZURE_BILLING_CREDIT_START", "2026-11-26");
+    vi.stubEnv("AZURE_BILLING_CREDIT_EXPIRES", "2026-12-26T06:20:20Z");
+    mockAzure([
+      {
+        value: [
+          usageRecord({ date: "2026-10-15T00:00:00Z", costInBillingCurrency: 40 }),
+          usageRecord({ date: "2026-11-27T00:00:00Z", costInBillingCurrency: 0.5 }),
+        ],
+      },
+    ]);
+
+    const result = await getAzureUsage();
+
+    expect(result).toMatchObject({
+      status: "available",
+      data: {
+        granted: { currency: "USD", value: 200 },
+        remaining: { currency: "USD", value: 199.5 },
+        consumed: { currency: "USD", value: 0.5 },
+        reportedThrough: "2026-11-27T00:00:00Z",
+        expiresAt: "2026-12-26T06:20:20Z",
+      },
+    });
+  });
+
+  it("never reports a negative remainder", async () => {
+    vi.stubEnv("AZURE_BILLING_CREDIT_TOTAL", "2");
+    mockAzure();
+
+    const result = await getAzureUsage();
+
+    expect(result).toMatchObject({
+      status: "available",
+      data: {
+        granted: { currency: "USD", value: 2 },
+        remaining: { currency: "USD", value: 0 },
+        consumed: { currency: "USD", value: 2.25 },
+      },
+    });
+  });
+
+  it("reports a subscription with no usage yet", async () => {
+    mockAzure([{ value: [] }]);
+
+    await expect(getAzureUsage()).resolves.toEqual({
+      status: "available",
+      data: {
+        granted: { currency: null, value: 200 },
+        remaining: { currency: null, value: 200 },
+        consumed: { currency: null, value: 0 },
+        reportedThrough: null,
+        expiresAt: null,
+      },
+    });
+  });
+
+  it("does not follow a next link off Azure's management endpoint", async () => {
+    mockAzure([{ ...firstPage, nextLink: "https://evil.example/usage?next" }]);
+
+    await expect(getAzureUsage()).resolves.toMatchObject({
+      status: "available",
+      data: { consumed: { currency: "USD", value: 2.25 } },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("reports missing configuration without making a request", async () => {
     vi.stubEnv("AZURE_BILLING_CLIENT_SECRET", "");
+
+    await expect(getAzureUsage()).resolves.toMatchObject({
+      status: "unavailable",
+      code: "not_configured",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a non-numeric credit total", "AZURE_BILLING_CREDIT_TOTAL", "two hundred"],
+    ["a negative credit total", "AZURE_BILLING_CREDIT_TOTAL", "-5"],
+    ["an unparseable credit start", "AZURE_BILLING_CREDIT_START", "yesterday"],
+    ["an unparseable credit expiry", "AZURE_BILLING_CREDIT_EXPIRES", "soon"],
+  ])("reports %s as missing configuration", async (_case, key, value) => {
+    vi.stubEnv(key, value);
 
     await expect(getAzureUsage()).resolves.toMatchObject({
       status: "unavailable",
@@ -166,11 +231,10 @@ describe("getAzureUsage", () => {
     });
   });
 
-  it("maps consumption authorization failure to forbidden", async () => {
+  it("maps usage authorization failure to forbidden", async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse({ access_token: "test-access-token" }))
-      .mockResolvedValueOnce(new Response("upstream details", { status: 403 }))
-      .mockResolvedValueOnce(jsonResponse(lotsResponse));
+      .mockResolvedValueOnce(new Response("upstream details", { status: 403 }));
 
     await expect(getAzureUsage()).resolves.toMatchObject({
       status: "unavailable",
@@ -178,11 +242,10 @@ describe("getAzureUsage", () => {
     });
   });
 
-  it("maps an unsupported agreement or profile 404 to unsupported", async () => {
+  it("maps an unknown subscription 404 to unsupported", async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse({ access_token: "test-access-token" }))
-      .mockResolvedValueOnce(new Response("upstream details", { status: 404 }))
-      .mockResolvedValueOnce(jsonResponse(lotsResponse));
+      .mockResolvedValueOnce(new Response("upstream details", { status: 404 }));
 
     await expect(getAzureUsage()).resolves.toMatchObject({
       status: "unavailable",
@@ -199,11 +262,10 @@ describe("getAzureUsage", () => {
     });
   });
 
-  it("maps malformed balance data to malformed_response", async () => {
+  it("maps a usage page without records to malformed_response", async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse({ access_token: "test-access-token" }))
-      .mockResolvedValueOnce(jsonResponse({ properties: {} }))
-      .mockResolvedValueOnce(jsonResponse(lotsResponse));
+      .mockResolvedValueOnce(jsonResponse({ value: {} }));
 
     await expect(getAzureUsage()).resolves.toMatchObject({
       status: "unavailable",
@@ -211,11 +273,10 @@ describe("getAzureUsage", () => {
     });
   });
 
-  it("maps malformed lots data to malformed_response", async () => {
-    fetchMock
-      .mockResolvedValueOnce(jsonResponse({ access_token: "test-access-token" }))
-      .mockResolvedValueOnce(jsonResponse(balanceResponse))
-      .mockResolvedValueOnce(jsonResponse({ value: {} }));
+  it("maps usage records mixing currencies to malformed_response", async () => {
+    mockAzure([
+      { value: [usageRecord(), usageRecord({ billingCurrencyCode: "PHP" })] },
+    ]);
 
     await expect(getAzureUsage()).resolves.toMatchObject({
       status: "unavailable",
