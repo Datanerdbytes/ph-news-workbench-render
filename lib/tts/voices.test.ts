@@ -12,7 +12,9 @@ describe("voice catalog", () => {
   it("recognizes only catalog ids", () => {
     expect(isTtsVoiceId("en-PH-RosaNeural")).toBe(true);
     expect(isTtsVoiceId("fil-PH-BlessicaNeural")).toBe(true);
-    expect(isTtsVoiceId("en-US-AvaMultilingualNeural")).toBe(false);
+    expect(isTtsVoiceId("en-US-AvaMultilingualNeural")).toBe(true);
+    expect(isTtsVoiceId("en-US-ChristopherNeural")).toBe(true);
+    expect(isTtsVoiceId("en-US-JennyNeural")).toBe(false);
     expect(isTtsVoiceId(undefined)).toBe(false);
   });
 
@@ -23,6 +25,19 @@ describe("voice catalog", () => {
       language: "tl",
     });
     expect(getTtsVoice("en-PH-JamesNeural")).toMatchObject({ gender: "Male" });
+    expect(getTtsVoice("en-US-AvaMultilingualNeural")).toMatchObject({
+      locale: "en-US",
+      language: "en",
+      label: "English (US)",
+      name: "Ava",
+    });
+    expect(getTtsVoice("en-US-ChristopherNeural")).toMatchObject({
+      locale: "en-US",
+      language: "en",
+      label: "English (US)",
+      name: "Christopher",
+      gender: "Male",
+    });
   });
 
   it("picks a default voice per language", () => {

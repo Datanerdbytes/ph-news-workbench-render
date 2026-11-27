@@ -81,12 +81,18 @@ describe("VoiceOverPanel", () => {
     ).toBe(false);
   });
 
-  it("wires voice, speed, and original-volume controls to their callbacks", () => {
+  it("lists U.S. English voices and wires narration controls", () => {
     const panelProps = props({ showOriginalVolume: true });
     render(<VoiceOverPanel {...panelProps} />);
 
+    expect(
+      screen.getByRole("option", { name: "English (US) · Ava (Female)" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("option", { name: "English (US) · Christopher (Male)" }),
+    ).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Voice"), {
-      target: { value: "fil-PH-AngeloNeural" },
+      target: { value: "en-US-ChristopherNeural" },
     });
     fireEvent.change(screen.getByRole("slider", { name: /Speaking speed/ }), {
       target: { value: "1.25" },
@@ -96,7 +102,9 @@ describe("VoiceOverPanel", () => {
       { target: { value: "0.5" } },
     );
 
-    expect(panelProps.onVoiceChange).toHaveBeenCalledWith("fil-PH-AngeloNeural");
+    expect(panelProps.onVoiceChange).toHaveBeenCalledWith(
+      "en-US-ChristopherNeural",
+    );
     expect(panelProps.onSpeedChange).toHaveBeenCalledWith(1.25);
     expect(panelProps.onOriginalVolumeChange).toHaveBeenCalledWith(0.5);
   });
