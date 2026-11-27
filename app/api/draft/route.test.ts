@@ -111,7 +111,18 @@ describe("POST /api/draft", () => {
     expect(fetchArticleTextMock).toHaveBeenCalledWith("https://news.example/story");
     expect(promptSent()).toContain(article);
     expect(promptSent()).toContain("in Tagalog");
+    expect(promptSent()).toContain("Write every number as English words");
     expect(promptSent()).not.toContain("short summary only");
+  });
+
+  it("does not give English-number guidance for English drafts", async () => {
+    sqlMock.mockResolvedValueOnce([story()]);
+    fetchArticleTextMock.mockResolvedValue(article);
+    draftPostMock.mockResolvedValue(reply());
+
+    await draft({ newsItemId: 7, language: "en" });
+    expect(promptSent()).toContain("in English");
+    expect(promptSent()).not.toContain("Write every number as English words");
   });
 
   it("keeps to the lede when the article page cannot be read", async () => {

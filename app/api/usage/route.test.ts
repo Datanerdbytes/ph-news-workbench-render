@@ -37,15 +37,11 @@ const openrouterUsage = {
 const azureUsage = {
   status: "available" as const,
   data: {
-    currentBalance: { currency: "USD", value: 200 },
-    estimatedBalance: { currency: "USD", value: 190 },
-    billingCurrency: "USD",
-    creditCurrency: "USD",
-    expiredCredit: { currency: "USD", value: 0 },
-    pendingCreditAdjustments: null,
-    pendingEligibleCharges: { currency: "USD", value: 12.5 },
-    isEstimatedBalance: true,
-    lots: [],
+    granted: { currency: "USD", value: 200 },
+    remaining: { currency: "USD", value: 197.71 },
+    consumed: { currency: "USD", value: 2.29 },
+    reportedThrough: "2026-11-27T00:00:00Z",
+    expiresAt: "2026-12-26T06:20:20Z",
   },
 };
 

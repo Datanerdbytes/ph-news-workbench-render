@@ -37,9 +37,9 @@ const UNAVAILABLE_MESSAGES: Record<
     unauthorized:
       "Azure rejected the billing credentials. Check the server-side Azure billing configuration.",
     forbidden:
-      "Azure denied access to billing usage. Check the service principal permissions.",
+      "Azure denied access to subscription usage. Give the app Cost Management Reader on the subscription.",
     unsupported:
-      "Azure credit usage is not available for this billing agreement or billing profile.",
+      "Azure cost usage is not available for this subscription. Check AZURE_BILLING_SUBSCRIPTION_ID.",
     timeout: "Azure billing took too long to respond. Try refreshing shortly.",
     malformed_response:
       "Azure returned an unreadable usage response. Try refreshing shortly.",

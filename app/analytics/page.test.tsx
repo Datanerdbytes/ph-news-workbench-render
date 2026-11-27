@@ -76,43 +76,11 @@ const usageSnapshot: UsageResponse = {
   azure: {
     status: "available",
     data: {
-      currentBalance: { currency: "USD", value: 200 },
-      estimatedBalance: { currency: "USD", value: 190 },
-      billingCurrency: "USD",
-      creditCurrency: "USD",
-      expiredCredit: { currency: "USD", value: 0 },
-      pendingCreditAdjustments: { currency: "USD", value: 5 },
-      pendingEligibleCharges: { currency: "USD", value: 12.5 },
-      isEstimatedBalance: true,
-      lots: [
-        {
-          source: "Expired promotional credit",
-          startDate: "2025-01-01T00:00:00Z",
-          expirationDate: "2025-12-31T00:00:00Z",
-          status: "Expired",
-          originalAmount: { currency: "USD", value: 50 },
-          closedBalance: { currency: "USD", value: 0 },
-          isEstimatedBalance: false,
-        },
-        {
-          source: "Azure sign-up credit",
-          startDate: "2026-01-01T00:00:00Z",
-          expirationDate: "2026-12-31T12:00:00Z",
-          status: "Active",
-          originalAmount: { currency: "USD", value: 200 },
-          closedBalance: { currency: "USD", value: 10 },
-          isEstimatedBalance: false,
-        },
-        {
-          source: "Purchased credit",
-          startDate: "2026-11-01T00:00:00Z",
-          expirationDate: "2027-01-31T00:00:00Z",
-          status: "Active",
-          originalAmount: { currency: "USD", value: 100 },
-          closedBalance: { currency: "USD", value: 100 },
-          isEstimatedBalance: false,
-        },
-      ],
+      granted: { currency: "USD", value: 200 },
+      remaining: { currency: "USD", value: 197.71 },
+      consumed: { currency: "USD", value: 2.29 },
+      reportedThrough: "2026-11-26T00:00:00Z",
+      expiresAt: "2026-12-26T06:20:20Z",
     },
   },
 };
@@ -222,27 +190,22 @@ describe("AnalyticsPage provider usage", () => {
     await waitFor(() =>
       expect(screen.getByText("Couldn't load activity")).toBeInTheDocument()
     );
-    expect(
-      screen.getByRole("heading", { name: "OpenRouter" })
-    ).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Azure" })).toBeInTheDocument();
+    expect(screen.getByText("OpenRouter")).toBeInTheDocument();
     expect(screen.getByText("USD 0.173827")).toBeInTheDocument();
-    expect(screen.getByText("7 / 50")).toBeInTheDocument();
-    expect(screen.getByText("USD 200.00")).toBeInTheDocument();
     expect(
-      screen.getByText("Current credit balance (estimated)")
+      screen.getByText("7 / 50 free requests used today")
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Drafts created")).not.toBeInTheDocument();
+    // Azure lives inside its own stat card now: remaining credit as the
+    // headline, the grant total and expiry below, freshness caveat on hover.
+    expect(screen.getByText("Azure free credit")).toBeInTheDocument();
+    expect(screen.getByText("USD 197.71")).toBeInTheDocument();
+    expect(
+      screen.getByText("USD 200.00 granted · expires Dec 26")
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/Azure marks these balance details as estimates/)
+      screen.getByTitle(/posts usage up to a day late/)
     ).toBeInTheDocument();
-    expect(screen.getByText("Azure-estimated balance")).toBeInTheDocument();
-    expect(screen.getByText("USD 190.00")).toBeInTheDocument();
-    expect(screen.getByText("USD 12.50")).toBeInTheDocument();
-    expect(screen.getByText("USD 0.00")).toBeInTheDocument();
-    expect(screen.getByText("Dec 31, 2026")).toBeInTheDocument();
-    expect(screen.getByText(/Azure sign-up credit · Active · 2 lots/)).toBeInTheDocument();
-    expect(screen.queryByText(/Expired promotional credit/)).not.toBeInTheDocument();
-    expect(screen.getByText("Estimated AI spend")).toBeInTheDocument();
 
     expect(usageCalls()).toEqual(["/api/usage"]);
     const usageCall = fetchMock.mock.calls.find(
@@ -289,11 +252,13 @@ describe("AnalyticsPage provider usage", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText("OpenRouter usage is not configured.")
+        screen.getByText("Setup needed — OpenRouter usage is not configured")
       ).toBeInTheDocument()
     );
-    expect(screen.getAllByText("Setup needed")).toHaveLength(2);
-    expect(screen.getByText("USD 200.00")).toBeInTheDocument();
+    expect(screen.getByText("OpenRouter")).toBeInTheDocument();
+    expect(
+      screen.getByText("USD 200.00 granted · expires Dec 26")
+    ).toBeInTheDocument();
   });
 
   it("keeps provider loading independent from workspace activity", async () => {
@@ -337,11 +302,7 @@ describe("AnalyticsPage provider usage", () => {
         )
       ).toBeInTheDocument()
     );
-    expect(screen.getAllByText("Loading provider usage…")).toHaveLength(2);
-    expect(
-      screen.getByRole("heading", { name: "OpenRouter" })
-    ).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Azure" })).toBeInTheDocument();
+    expect(screen.getByText("Checking Azure credit…")).toBeInTheDocument();
 
     await act(async () => {
       resolveUsage({ ok: true, json: async () => usageSnapshot });
