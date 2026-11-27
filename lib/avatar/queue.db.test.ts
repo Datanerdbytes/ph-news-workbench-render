@@ -99,6 +99,19 @@ describe.skipIf(!process.env.DATABASE_URL)("avatar quota accounting", () => {
     expect(rows).toHaveLength(0);
   });
 
+  it("compares a small estimate numerically against a multi-digit daily cap", async () => {
+    const estimated = estimateAvatarSeconds("Hello", 1);
+    vi.stubEnv("AVATAR_DAILY_SECONDS_CAP", "1000");
+
+    const job = await enqueue();
+
+    expect(job.estimated_seconds).toBe(estimated);
+    expect(await usage()).toMatchObject({
+      jobs: 1,
+      seconds_reserved: estimated,
+    });
+  });
+
   it("counts actual seconds when deciding whether another reservation fits", async () => {
     const estimated = estimateAvatarSeconds("Hello", 1);
     const dailySeconds = estimated + 5;
