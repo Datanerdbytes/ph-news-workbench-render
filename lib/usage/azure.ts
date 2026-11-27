@@ -141,20 +141,31 @@ export async function getAzureUsage(): Promise<UsageResult<AzureUsage>> {
   const balanceUrl = `${consumptionBase}/credits/balanceSummary?api-version=${API_VERSION}`;
   const lotsUrl = `${consumptionBase}/lots?api-version=${API_VERSION}`;
 
-  const [balanceResult, lotsResult] = await Promise.all([
-    requestAzureJson(balanceUrl, token.data, signal),
-    requestAzureJson(lotsUrl, token.data, signal),
-  ]);
-
+  const balanceResult = await requestAzureJson(balanceUrl, token.data, signal);
   if (balanceResult.status === "unavailable") return balanceResult;
-  if (lotsResult.status === "unavailable") return lotsResult;
 
   try {
+  // Accumulate all credit-lot pages.
+  const allLots: unknown[] = [];
+  let nextUrl: string | null = lotsUrl;
+  while (nextUrl) {
+    const pageResult = await requestAzureJson(nextUrl, token.data, signal);
+    if (pageResult.status === "unavailable") return pageResult;
+    const pageRoot = parseRecord(pageResult.data);
+    if (!Array.isArray(pageRoot.value)) throw new MalformedUsageResponseError();
+    allLots.push(...pageRoot.value);
+    const nextLink = pageRoot.nextLink;
+    nextUrl =
+      typeof nextLink === "string" &&
+      nextLink.startsWith("https://") &&
+      new URL(nextLink).origin === "https://management.azure.com"
+        ? nextLink
+        : null;
+  }
+
     const balanceRoot = parseRecord(balanceResult.data);
     const properties = parseRecord(balanceRoot.properties);
     const balanceSummary = parseRecord(properties.balanceSummary);
-    const lotsRoot = parseRecord(lotsResult.data);
-    if (!Array.isArray(lotsRoot.value)) throw new MalformedUsageResponseError();
 
     return {
       status: "available",
@@ -169,7 +180,7 @@ export async function getAzureUsage(): Promise<UsageResult<AzureUsage>> {
         ),
         pendingEligibleCharges: parseMoney(properties.pendingEligibleCharges),
         isEstimatedBalance: parseOptionalBoolean(properties.isEstimatedBalance),
-        lots: lotsRoot.value.map(parseLot),
+        lots: allLots.map(parseLot),
       },
     };
   } catch (error) {

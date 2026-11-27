@@ -14,6 +14,22 @@ import type { OpenRouterUsage, UsageResult } from "./types";
 const OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key";
 const TIMEOUT_MS = 10_000;
 
+function parseOptionalCount(value: unknown): number | null {
+  const count = parseOptionalNumber(value);
+  if (count !== null && (!Number.isInteger(count) || count < 0)) {
+    throw new MalformedUsageResponseError();
+  }
+  return count;
+}
+
+function parseOptionalInteger(value: unknown): number | null {
+  const count = parseOptionalNumber(value);
+  if (count !== null && !Number.isInteger(count)) {
+    throw new MalformedUsageResponseError();
+  }
+  return count;
+}
+
 /**
  * Server-only OpenRouter adapter. It returns a sanitized account-usage
  * snapshot; credentials and upstream response bodies never leave this module.
@@ -50,9 +66,9 @@ export async function getOpenRouterUsage(): Promise<
         keyRemainingUsd: parseOptionalNumber(data.limit_remaining),
         dailyFreeRequests: daily
           ? {
-              used: parseOptionalNumber(daily.used),
-              limit: parseOptionalNumber(daily.limit),
-              remaining: parseOptionalNumber(daily.remaining),
+              used: parseOptionalCount(daily.used),
+              limit: parseOptionalCount(daily.limit),
+              remaining: parseOptionalInteger(daily.remaining),
             }
           : null,
       },

@@ -200,7 +200,10 @@ export function TalkingAvatarPanel({
                 type="checkbox"
                 checked={transparent}
                 onChange={(event) => onTransparentChange(event.target.checked)}
-                disabled={controlsDisabled || !transparencySupported}
+                disabled={
+                  controlsDisabled ||
+                  (!transparencySupported && !transparent)
+                }
                 className="h-4 w-4 accent-primary"
               />
               Transparent background

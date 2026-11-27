@@ -32,6 +32,8 @@ export function supportsTransparentAvatarPreview(): boolean {
     .canPlayType('video/webm; codecs="vp9"');
   if (support !== "probably" && support !== "maybe") return false;
   const userAgent = navigator.userAgent;
+  // iOS browsers with these tokens use WebKit, which does not preserve VP9 alpha.
+  if (/crios|fxios|edgios/i.test(userAgent)) return false;
   const chromium = /chrome|crios|edg|opr|android/i.test(userAgent);
   const firefox = /firefox|fxios/i.test(userAgent);
   // Safari can decode VP9 but doesn't preserve its alpha channel on canvas.

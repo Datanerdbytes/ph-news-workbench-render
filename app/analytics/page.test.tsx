@@ -97,7 +97,7 @@ const usageSnapshot: UsageResponse = {
         {
           source: "Azure sign-up credit",
           startDate: "2026-01-01T00:00:00Z",
-          expirationDate: "2026-12-31T00:00:00Z",
+          expirationDate: "2026-12-31T12:00:00Z",
           status: "Active",
           originalAmount: { currency: "USD", value: 200 },
           closedBalance: { currency: "USD", value: 10 },

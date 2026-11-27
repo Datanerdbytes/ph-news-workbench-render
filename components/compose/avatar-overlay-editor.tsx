@@ -119,7 +119,8 @@ export function AvatarOverlayEditor({
       for (const video of videos) video.pause();
       return;
     }
-    void Promise.all(videos.map((video) => video.play())).catch(() => {
+    const toPlay = videos.filter((video) => !video.ended);
+    void Promise.all(toPlay.map((video) => video.play())).catch(() => {
       setPlayingSource(null);
       setDuckOriginal(false);
     });
@@ -221,8 +222,14 @@ export function AvatarOverlayEditor({
   function togglePlayback() {
     if (disabled || !avatarPreviewUrl) return;
     if (!isPlaying) {
-      for (const video of [baseVideoRef.current, avatarVideoRef.current]) {
-        if (video?.ended) video.currentTime = 0;
+      const baseEnded = Boolean(baseVideoRef.current?.ended);
+      const avatarEnded = Boolean(avatarVideoRef.current?.ended);
+      if (baseEnded) {
+        for (const video of [baseVideoRef.current, avatarVideoRef.current]) {
+          if (video) video.currentTime = 0;
+        }
+      } else if (avatarEnded) {
+        // keep avatar at end; do not reset
       }
       setDuckOriginal(Boolean(baseVideoRef.current));
     } else {

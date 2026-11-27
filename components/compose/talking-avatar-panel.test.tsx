@@ -147,7 +147,7 @@ describe("TalkingAvatarPanel", () => {
     expect(
       (screen.getByLabelText("Transparent background") as HTMLInputElement)
         .disabled,
-    ).toBe(true);
+    ).toBe(false);
     expect(screen.getByText(/cannot preserve WebM alpha/)).toBeTruthy();
   });
 
