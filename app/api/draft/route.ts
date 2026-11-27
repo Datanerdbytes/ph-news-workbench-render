@@ -36,6 +36,12 @@ export async function POST(req: Request) {
       ? '- The source is a short summary (or none), so write 2-3 sentences and stay within what it states.'
       : '- Follow with 2-3 short paragraphs. Keep the details that give the story its meaning — names, numbers, places, dates, what happens next — and drop the filler.',
     '- Plain, conversational words; short lines; no jargon. Rebuild every sentence in your own words; never copy a sentence from the source.',
+    // The Tagalog draft doubles as the voice-over script, and the Filipino TTS
+    // voice reads digits and Tagalog number words in Tagalog. Filipino
+    // newsreaders say numbers in English, so the words have to say so.
+    ...(lang === 'Tagalog'
+      ? ['- Write every number as English words (five, thirty percent, two thousand twenty-four), never in Tagalog: the post is read aloud, and the voice reads English numbers most naturally.']
+      : []),
     '- Use only facts stated in the source. Never invent numbers, names, quotes, or outcomes. If the source does not say it, leave it out.',
     '- Tone: informative, neutral.',
     ...(ledeOnly ? [] : ['- Keep the whole post under 120 words (about 700 characters).']),
