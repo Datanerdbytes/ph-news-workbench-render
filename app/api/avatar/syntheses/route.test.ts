@@ -203,6 +203,19 @@ describe("POST /api/avatar/syntheses", () => {
     expect(body).not.toHaveProperty("provider_synthesis_id");
   });
 
+  it("accepts a batch-supported photo avatar", async () => {
+    enqueueAvatarJobMock.mockResolvedValue(
+      row({ avatar_id: "adrian", avatar_kind: "photo", avatar_style: null }),
+    );
+
+    const response = await post({ ...VALID_BODY, avatarId: "adrian" });
+
+    expect(response.status).toBe(202);
+    expect(enqueueAvatarJobMock).toHaveBeenCalledWith(
+      expect.objectContaining({ avatarId: "adrian" }),
+    );
+  });
+
   it("rejects malformed JSON", async () => {
     const response = await POST(
       new Request("http://localhost/api/avatar/syntheses", {
@@ -234,6 +247,7 @@ describe("POST /api/avatar/syntheses", () => {
     [{ ...VALID_BODY, text: 42 }, "invalid_text"],
     [{ ...VALID_BODY, text: " \n\t " }, "empty_text"],
     [{ ...VALID_BODY, avatarId: "unknown" }, "invalid_avatar"],
+    [{ ...VALID_BODY, avatarId: "leonie" }, "avatar_unavailable"],
     [{ ...VALID_BODY, voiceId: "unknown" }, "invalid_voice"],
     [{ ...VALID_BODY, speed: "1" }, "invalid_speed"],
     [{ ...VALID_BODY, speed: null }, "invalid_speed"],

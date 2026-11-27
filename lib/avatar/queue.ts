@@ -61,7 +61,7 @@ export async function enqueueAvatarJob(input: EnqueueInput): Promise<AvatarJobRo
           FROM active
           WHERE (SELECT count FROM active) < ${limits.maxActive}
             AND ${limits.dailyJobs} > 0
-            AND ${estimatedSeconds} <= ${limits.dailySeconds}
+            AND ${estimatedSeconds}::int <= ${limits.dailySeconds}::int
           ON CONFLICT (day, workspace_id) DO UPDATE
           SET jobs = avatar_usage_daily.jobs + 1,
               characters = avatar_usage_daily.characters + ${input.text.length},

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PublicAvatarJob } from "@/lib/avatar/jobs";
 import { TalkingAvatarPanel } from "./talking-avatar-panel";
@@ -75,6 +75,23 @@ describe("TalkingAvatarPanel", () => {
       (screen.getByRole("button", { name: "Generate avatar" }) as HTMLButtonElement)
         .disabled,
     ).toBe(false);
+  });
+
+  it("lists every photo avatar and disables real-time-only previews", () => {
+    render(<TalkingAvatarPanel {...props()} />);
+
+    const select = screen.getByLabelText("Avatar") as HTMLSelectElement;
+    expect(within(select).getAllByRole("option")).toHaveLength(36);
+    expect(
+      (within(select).getByRole("option", { name: "Adrian" }) as HTMLOptionElement)
+        .disabled,
+    ).toBe(false);
+    expect(
+      (within(select).getByRole("option", { name: "Leonie · preview (real-time only)" }) as HTMLOptionElement)
+        .disabled,
+    ).toBe(true);
+    expect(select.querySelectorAll("option:disabled")).toHaveLength(4);
+    expect(screen.getByText(/Preview photo avatars are listed for reference/)).toBeTruthy();
   });
 
   it("wires avatar, voice, and speed controls to their callbacks", () => {
