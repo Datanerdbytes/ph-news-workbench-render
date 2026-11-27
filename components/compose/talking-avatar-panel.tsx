@@ -153,8 +153,9 @@ export function TalkingAvatarPanel({
               </optgroup>
               <optgroup label="Photo">
                 {AVATARS.filter((avatar) => avatar.kind === "photo").map((avatar) => (
-                  <option key={avatar.id} value={avatar.id}>
+                  <option key={avatar.id} value={avatar.id} disabled={avatar.preview}>
                     {avatar.name}
+                    {avatar.preview ? " · preview (real-time only)" : ""}
                   </option>
                 ))}
               </optgroup>
@@ -178,6 +179,11 @@ export function TalkingAvatarPanel({
             </select>
           </label>
         </div>
+
+        <p className="-mt-1 text-xs leading-5 text-muted-foreground">
+          Preview photo avatars are listed for reference, but currently require Azure
+          real-time synthesis and can&apos;t be used for generated videos.
+        </p>
 
         <label className="block space-y-1.5 text-xs font-medium">
           <span className="flex items-center justify-between gap-2">

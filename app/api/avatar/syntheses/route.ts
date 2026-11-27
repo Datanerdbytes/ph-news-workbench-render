@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { isAvatarId } from "@/lib/avatar/avatars";
+import { getAvatar, isAvatarId } from "@/lib/avatar/avatars";
 import { avatarLimits, estimateAvatarSeconds } from "@/lib/avatar/config";
 import {
   ACTIVE_AVATAR_STATUSES,
@@ -76,6 +76,15 @@ export async function POST(request: Request) {
   }
   if (!isAvatarId(payload.avatarId)) {
     return failure(400, "invalid_avatar", "Choose a supported avatar.", correlationId);
+  }
+  const avatar = getAvatar(payload.avatarId);
+  if (avatar.kind === "photo" && avatar.baseModel !== "vasa-1") {
+    return failure(
+      400,
+      "avatar_unavailable",
+      "This preview avatar requires Azure real-time synthesis. Choose another photo avatar.",
+      correlationId,
+    );
   }
   if (!isTtsVoiceId(payload.voiceId)) {
     return failure(400, "invalid_voice", "Choose a supported voice.", correlationId);

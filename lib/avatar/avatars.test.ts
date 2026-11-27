@@ -6,7 +6,66 @@ import {
   isAvatarId,
 } from "./avatars";
 
+const PHOTO_AVATAR_IDS = [
+  "leonie",
+  "leonie-professional",
+  "george",
+  "marcel",
+  "adrian",
+  "amara",
+  "amira",
+  "anika",
+  "bianca",
+  "camila",
+  "carlos",
+  "clara",
+  "darius",
+  "diego",
+  "elise",
+  "farhan",
+  "faris",
+  "gabrielle",
+  "hyejin",
+  "imran",
+  "isabella",
+  "layla",
+  "liwei",
+  "ling",
+  "marcus",
+  "matteo",
+  "rahul",
+  "rana",
+  "ren",
+  "riya",
+  "sakura",
+  "simone",
+  "zayd",
+  "zoe",
+] as const;
+
 describe("avatar catalog", () => {
+  it("includes every documented photo avatar", () => {
+    expect(
+      AVATARS.filter((avatar) => avatar.kind === "photo").map((avatar) => avatar.id),
+    ).toEqual(PHOTO_AVATAR_IDS);
+  });
+
+  it("marks only vasa-2 avatars as real-time previews", () => {
+    const photoAvatars = AVATARS.filter((avatar) => avatar.kind === "photo");
+    expect(
+      photoAvatars.filter((avatar) => avatar.preview).map((avatar) => avatar.id),
+    ).toEqual(["leonie", "leonie-professional", "george", "marcel"]);
+    expect(
+      photoAvatars.filter((avatar) => avatar.baseModel === "vasa-1"),
+    ).toHaveLength(30);
+  });
+
+  it("keeps avatar ids and provider characters unique", () => {
+    expect(new Set(AVATARS.map((avatar) => avatar.id)).size).toBe(AVATARS.length);
+    expect(new Set(AVATARS.map((avatar) => avatar.character)).size).toBe(
+      AVATARS.length,
+    );
+  });
   it("recognizes only catalog ids", () => {
     expect(isAvatarId("meg-formal")).toBe(true);
     expect(isAvatarId("anika")).toBe(true);
@@ -21,7 +80,17 @@ describe("avatar catalog", () => {
       kind: "video",
       style: "business",
     });
-    expect(getAvatar("anika")).toMatchObject({ id: "anika", kind: "photo" });
+    expect(getAvatar("anika")).toMatchObject({
+      id: "anika",
+      kind: "photo",
+      baseModel: "vasa-1",
+    });
+    expect(getAvatar("leonie-professional")).toMatchObject({
+      id: "leonie-professional",
+      kind: "photo",
+      baseModel: "vasa-2",
+      preview: true,
+    });
   });
 
   it("falls back to the first catalog entry for an unknown id", () => {

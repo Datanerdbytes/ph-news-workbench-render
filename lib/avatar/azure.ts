@@ -189,14 +189,22 @@ export async function submitAvatarSynthesis(input: {
   voiceId: TtsVoiceId;
   speed: number;
 }): Promise<AvatarSynthesis> {
+  const avatar = getAvatar(input.avatarId);
+  if (avatar.kind === "photo" && avatar.baseModel !== "vasa-1") {
+    throw new AvatarError(
+      400,
+      "avatar_unavailable",
+      "This preview avatar requires Azure real-time synthesis. Choose another photo avatar.",
+      false,
+    );
+  }
   const endpoint = avatarEndpoint();
   const key = avatarSpeechKey();
-  const avatar = getAvatar(input.avatarId);
   const avatarConfig = {
     talkingAvatarCharacter: avatar.character,
     ...(avatar.kind === "video"
       ? { talkingAvatarStyle: avatar.style, customized: false }
-      : { photoAvatarBaseModel: "vasa-1" }),
+      : { photoAvatarBaseModel: avatar.baseModel }),
     videoFormat: "mp4",
     videoCodec: "h264",
     subtitleType: "none",

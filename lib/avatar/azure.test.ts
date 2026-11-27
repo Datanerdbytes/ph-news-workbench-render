@@ -149,6 +149,17 @@ describe("submitAvatarSynthesis", () => {
       },
     },
     {
+      avatarId: "adrian" as const,
+      avatarConfig: {
+        talkingAvatarCharacter: "adrian",
+        photoAvatarBaseModel: "vasa-1",
+        videoFormat: "mp4",
+        videoCodec: "h264",
+        subtitleType: "none",
+        bitrateKbps: 2000,
+      },
+    },
+    {
       avatarId: "anika" as const,
       avatarConfig: {
         talkingAvatarCharacter: "anika",
@@ -200,6 +211,21 @@ describe("submitAvatarSynthesis", () => {
       }),
     });
     expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("rejects real-time-only preview avatars before contacting Azure", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      submitAvatarSynthesis({ ...INPUT, avatarId: "leonie" }),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: "avatar_unavailable",
+      retryable: false,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(waitForAvatarRequest).not.toHaveBeenCalled();
   });
 
   it("falls back to the S0 Speech credentials", async () => {
