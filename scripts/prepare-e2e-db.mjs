@@ -180,6 +180,8 @@ const requiredColumns = [
   ["drafts", "workspace_id"],
   ["scheduled_posts", "avatar_job_id"],
   ["scheduled_posts", "publish_started_at"],
+  ["avatar_jobs", "output_format"],
+  ["avatar_jobs", "has_alpha"],
   ["feeds", "workspace_id"],
   ["news_items", "workspace_id"],
   ["facebook_connections", "workspace_id"],

@@ -177,7 +177,10 @@ CREATE TABLE IF NOT EXISTS avatar_jobs (
   publish_state TEXT NOT NULL DEFAULT 'ready'
     CHECK (publish_state IN ('ready', 'publishing', 'scheduled', 'published')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  output_format TEXT NOT NULL DEFAULT 'mp4'
+    CHECK (output_format IN ('mp4', 'webm')),
+  has_alpha BOOLEAN NOT NULL DEFAULT false
 );
 
 CREATE INDEX IF NOT EXISTS avatar_jobs_workspace_idx

@@ -8,6 +8,13 @@ export async function register() {
   const mediaSandbox = await import("./lib/live/media-sandbox");
   await mediaSandbox.ensureMediaSandbox();
 
+  try {
+    const { ensureAvatarJobColumns } = await import("./lib/avatar/queue");
+    await ensureAvatarJobColumns();
+  } catch (error) {
+    console.error("[avatar-schema] failed to ensure avatar job columns", error);
+  }
+
   const onVercel = Boolean(process.env.VERCEL);
   const production = process.env.NODE_ENV === "production";
 

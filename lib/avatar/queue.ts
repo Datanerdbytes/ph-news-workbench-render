@@ -12,6 +12,16 @@ import {
 const MAX_ATTEMPTS = 3;
 const STALE_MINUTES = 20;
 
+export async function ensureAvatarJobColumns(): Promise<void> {
+  await sql`
+    ALTER TABLE avatar_jobs
+    ADD COLUMN IF NOT EXISTS output_format TEXT NOT NULL DEFAULT 'mp4'
+      CHECK (output_format IN ('mp4', 'webm'))`;
+  await sql`
+    ALTER TABLE avatar_jobs
+    ADD COLUMN IF NOT EXISTS has_alpha BOOLEAN NOT NULL DEFAULT false`;
+}
+
 export class AvatarQueueError extends Error {
   constructor(
     public readonly status: number,
