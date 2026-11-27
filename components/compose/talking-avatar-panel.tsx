@@ -172,8 +172,7 @@ export function TalkingAvatarPanel({
             >
               {TTS_VOICES.map((voice) => (
                 <option key={voice.id} value={voice.id}>
-                  {voice.locale === "fil-PH" ? "Filipino" : "English (PH)"} · {voice.name}{" "}
-                  ({voice.gender})
+                  {voice.label} · {voice.name} ({voice.gender})
                 </option>
               ))}
             </select>
