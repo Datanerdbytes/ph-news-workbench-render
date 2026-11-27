@@ -63,6 +63,43 @@ describe("avatar composition geometry", () => {
     expect(pixels.y + pixels.height).toBeLessThanOrEqual(1080);
   });
 
+  it("derives the avatar box from the canvas it is drawn on", () => {
+    // A portrait 1080x1920 canvas must not assume the fixed 1920x1080
+    // composition: a half-width 16:9 avatar is 540x304 pixels there.
+    const pixels = avatarPlacementPixels(
+      { x: 0, y: 0, width: 0.5 },
+      16 / 9,
+      1080,
+      1920,
+    );
+    expect(pixels).toEqual({ x: 2, y: 2, width: 540, height: 304 });
+  });
+
+  it("keeps the 16:9 geometry unchanged for the default canvas", () => {
+    expect(
+      avatarPlacementPixels({ x: 0, y: 0, width: 0.5 }, 16 / 9),
+    ).toEqual(
+      avatarPlacementPixels({ x: 0, y: 0, width: 0.5 }, 16 / 9, 1920, 1080),
+    );
+    expect(
+      avatarPlacementPixels({ x: 0, y: 0, width: 0.5 }, 16 / 9),
+    ).toEqual({ x: 2, y: 2, width: 960, height: 540 });
+  });
+
+  it("clamps the avatar height against the real canvas height", () => {
+    // On a portrait canvas a tall avatar may fill the height, so the
+    // placement clamps against 1920 rather than 1080.
+    const placement = clampAvatarPlacement(
+      { x: 0, y: 0.5, width: 0.3 },
+      0.5,
+      1080,
+      1920,
+    );
+    const height = avatarPlacementHeight(placement, 0.5, 1080, 1920);
+    expect(placement.y + height).toBeLessThanOrEqual(1);
+    expect(placement.width).toBeCloseTo(0.3);
+  });
+
   it("provides bounded position presets", () => {
     for (const preset of ["lower-right", "lower-left", "center", "full-width"] as const) {
       const placement = avatarPlacementPreset(preset, 16 / 9);

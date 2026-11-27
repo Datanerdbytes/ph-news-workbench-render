@@ -828,11 +828,18 @@ export async function graphPostForm<T>(
     | (T & GraphErrorBody)
     | null;
 
-  if (body?.error) {
-    throw new FacebookApiError(
-      body.error.message ?? `Facebook request failed (${response.status}).`,
-      body.error.code
-    );
+  // Only a Graph error object with a message proves Graph rejected the
+  // request. A non-OK response with any other body (e.g. a gateway's 503
+  // page or {"error":"upstream unavailable"}) may have been accepted by
+  // Graph — keep the caller's ambiguity so the scheduler never treats a
+  // possibly-live publish as a definite failure and repost it.
+  const error = body?.error;
+  if (
+    error &&
+    typeof error === "object" &&
+    typeof error.message === "string"
+  ) {
+    throw new FacebookApiError(error.message, error.code);
   }
   if (!response.ok) {
     throw new FacebookApiError(

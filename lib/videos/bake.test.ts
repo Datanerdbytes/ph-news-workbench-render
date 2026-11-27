@@ -1,12 +1,23 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  bakeAndFinalizeVideo,
   bakeVideoAnimation,
   composeVideoFrame,
   outputSize,
   widescreenSize,
 } from "./bake";
 import { getVideoPreset, type PlannedVideoEffect } from "./presets";
+
+const { finalizeBakedVideoMock } = vi.hoisted(() => ({
+  finalizeBakedVideoMock: vi.fn(),
+}));
+
+// The finalizer runs a real ffmpeg transcode; the bake only owns the options
+// it hands over, so the transcode itself is stubbed here.
+vi.mock("@/lib/reels/browser-normalize", () => ({
+  finalizeBakedVideo: finalizeBakedVideoMock,
+}));
 
 function stubCtx() {
   const calls: string[] = [];
@@ -172,6 +183,7 @@ describe("bakeVideoAnimation playback lifecycle", () => {
   }>;
   let audioDuration = 2;
   let avatarDuration = 2;
+  let gainEvents: string[];
   let originalCreateElement: typeof document.createElement;
   let originalGetContext: typeof HTMLCanvasElement.prototype.getContext;
   let originalCaptureStream: unknown;
@@ -229,7 +241,9 @@ describe("bakeVideoAnimation playback lifecycle", () => {
         gain: {
           value: 0,
           cancelScheduledValues: vi.fn(),
-          setValueAtTime: vi.fn(),
+          setValueAtTime: vi.fn(() => {
+            gainEvents.push("duck");
+          }),
           linearRampToValueAtTime: vi.fn(),
         },
         connect: () => {},
@@ -315,8 +329,13 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     gains = [];
     mediaSources = [];
     narrationSources = [];
+    finalizeBakedVideoMock.mockReset();
+    finalizeBakedVideoMock.mockResolvedValue(
+      new File(["mp4"], "baked.mp4", { type: "video/mp4" }),
+    );
     audioDuration = 2;
     avatarDuration = 2;
+    gainEvents = [];
     video = makeVideo();
     avatar = makeVideo(avatarDuration);
     let createdVideos = 0;
@@ -494,6 +513,105 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     await expect(bake).resolves.toBeInstanceOf(Blob);
     expect(avatar.pause).toHaveBeenCalled();
     expect(avatar.src).toBe("");
+  });
+
+  it("starts the recorder before either element plays and ducks with the avatar", async () => {
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const playOrder: string[] = [];
+    video.play = vi.fn(() => {
+      playOrder.push(`video:${recorders[0]?.state ?? "no-recorder"}`);
+      return Promise.resolve();
+    });
+    avatar.play = vi.fn(() => {
+      playOrder.push(`avatar:${recorders[0]?.state ?? "no-recorder"}`);
+      return Promise.resolve();
+    });
+
+    const bake = bakeVideoAnimation({
+      videoUrl: "blob:test",
+      attachments: [],
+      values: {},
+      avatarUrl: "blob:avatar",
+    });
+    await vi.waitFor(() => expect(recorders).toHaveLength(1));
+    await vi.waitFor(() => expect(playOrder).toHaveLength(2));
+
+    // The recorder is already running when each element is asked to play, so
+    // no part of the opening narration falls outside the recording.
+    expect(playOrder).toEqual(["video:recording", "avatar:recording"]);
+
+    // The ducking schedule is anchored to the avatar's play, before the first
+    // frame is composited.
+    const firstFrame = frames[0];
+    frames[0] = (time: number) => {
+      gainEvents.push("frame");
+      firstFrame(time);
+    };
+    now = 40;
+    frames.shift()?.(40);
+    expect(gainEvents.indexOf("duck")).toBeLessThan(gainEvents.indexOf("frame"));
+
+    recorders[0].onerror?.();
+    await expect(bake).rejects.toThrow("Recording failed.");
+  });
+
+  it("preserves the source aspect when finalizing an avatar composite", async () => {
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const bake = bakeAndFinalizeVideo({
+      videoUrl: "blob:test",
+      attachments: [],
+      values: {},
+      avatarUrl: "blob:avatar",
+    });
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+
+    video.currentTime = 1;
+    avatar.currentTime = 2;
+    now = 2_100;
+    frames.shift()?.(2_100);
+    avatar.onended?.();
+
+    await expect(bake).resolves.toBeInstanceOf(File);
+    expect(finalizeBakedVideoMock).toHaveBeenCalledWith(
+      expect.any(Blob),
+      undefined,
+      expect.objectContaining({
+        preserveAspect: true,
+        aspectRatio: undefined,
+        name: "avatar-composite.mp4",
+      }),
+    );
+  });
+
+  it("leaves an explicit 16:9 avatar bake cropped as requested", async () => {
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const bake = bakeAndFinalizeVideo({
+      videoUrl: "blob:test",
+      attachments: [],
+      values: {},
+      avatarUrl: "blob:avatar",
+      aspectRatio: "16:9",
+    });
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+
+    video.currentTime = 1;
+    avatar.currentTime = 2;
+    now = 2_100;
+    frames.shift()?.(2_100);
+    avatar.onended?.();
+
+    await expect(bake).resolves.toBeInstanceOf(File);
+    expect(finalizeBakedVideoMock).toHaveBeenCalledWith(
+      expect.any(Blob),
+      undefined,
+      expect.objectContaining({
+        preserveAspect: false,
+        aspectRatio: "16:9",
+      }),
+    );
   });
 
   it("removes the overlay after a shorter avatar ends", async () => {

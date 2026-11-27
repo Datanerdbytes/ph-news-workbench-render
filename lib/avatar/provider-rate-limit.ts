@@ -22,9 +22,13 @@ export async function waitForAvatarRequest(): Promise<void> {
 
   await previous;
   try {
-    const delay = nextRequestAt - Date.now();
-    if (delay > 0) {
+    // Recheck the deadline after every sleep: a 429 that lands while this
+    // waiter sleeps extends nextRequestAt, and one long sleep would resume
+    // before the provider's backoff has ended.
+    let delay = nextRequestAt - Date.now();
+    while (delay > 0) {
       await new Promise<void>((resolve) => setTimeout(resolve, delay));
+      delay = nextRequestAt - Date.now();
     }
     nextRequestAt = Date.now() + requestIntervalMs();
   } finally {

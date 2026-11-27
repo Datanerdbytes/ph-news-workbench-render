@@ -28,23 +28,32 @@ function finiteOr(value: number, fallback: number): number {
 export function avatarPlacementHeight(
   placement: AvatarPlacement,
   avatarAspect: number,
+  canvasWidth: number = COMPOSITION_WIDTH,
+  canvasHeight: number = COMPOSITION_HEIGHT,
 ): number {
   const aspect = finiteOr(avatarAspect, 16 / 9);
   if (aspect <= 0) return placement.width;
-  return (placement.width * COMPOSITION_WIDTH) / aspect / COMPOSITION_HEIGHT;
+  return (placement.width * canvasWidth) / aspect / canvasHeight;
 }
 
 export function clampAvatarPlacement(
   placement: AvatarPlacement,
   avatarAspect: number,
+  canvasWidth: number = COMPOSITION_WIDTH,
+  canvasHeight: number = COMPOSITION_HEIGHT,
 ): AvatarPlacement {
   const aspect = Math.max(0.01, finiteOr(avatarAspect, 16 / 9));
-  const maxWidth = Math.min(1, (aspect * COMPOSITION_HEIGHT) / COMPOSITION_WIDTH);
+  const maxWidth = Math.min(1, (aspect * canvasHeight) / canvasWidth);
   const width = Math.max(
     Math.min(MIN_AVATAR_WIDTH, maxWidth),
     Math.min(maxWidth, finiteOr(placement.width, DEFAULT_AVATAR_PLACEMENT.width)),
   );
-  const height = avatarPlacementHeight({ ...placement, width }, aspect);
+  const height = avatarPlacementHeight(
+    { ...placement, width },
+    aspect,
+    canvasWidth,
+    canvasHeight,
+  );
   return {
     x: Math.max(0, Math.min(1 - width, finiteOr(placement.x, 0))),
     y: Math.max(0, Math.min(1 - height, finiteOr(placement.y, 0))),
@@ -82,8 +91,20 @@ export function avatarPlacementPixels(
   canvasWidth = COMPOSITION_WIDTH,
   canvasHeight = COMPOSITION_HEIGHT,
 ): { x: number; y: number; width: number; height: number } {
-  const safe = clampAvatarPlacement(placement, avatarAspect);
-  const height = avatarPlacementHeight(safe, avatarAspect);
+  // Geometry derives from the canvas actually being drawn — source-aspect
+  // portrait bakes must not assume the fixed 1920x1080 composition.
+  const safe = clampAvatarPlacement(
+    placement,
+    avatarAspect,
+    canvasWidth,
+    canvasHeight,
+  );
+  const height = avatarPlacementHeight(
+    safe,
+    avatarAspect,
+    canvasWidth,
+    canvasHeight,
+  );
   const even = (value: number) => Math.max(2, Math.round(value / 2) * 2);
   return {
     x: even(safe.x * canvasWidth),

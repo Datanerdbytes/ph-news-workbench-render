@@ -313,7 +313,10 @@ export function AvatarOverlayEditor({
             onPointerDown={(event) => beginDrag(event, "move")}
             onKeyDown={handleOverlayKeyDown}
             className={cn(
-              "group relative h-full w-full touch-none select-none border-2 border-white bg-black shadow-lg outline-none transition-[box-shadow]",
+              // The preview wrapper disables pointer events so the footage
+              // beneath stays non-interactive; the movable overlay must
+              // opt back in or drag and keyboard focus stop working.
+              "pointer-events-auto group relative h-full w-full touch-none select-none border-2 border-white bg-black shadow-lg outline-none transition-[box-shadow]",
               disabled
                 ? "cursor-not-allowed"
                 : "cursor-move focus-visible:ring-4 focus-visible:ring-primary/70",
@@ -351,7 +354,7 @@ export function AvatarOverlayEditor({
             onPointerDown={(event) => beginDrag(event, "resize")}
             disabled={disabled}
             aria-label="Resize avatar overlay"
-            className="absolute -bottom-2 -right-2 grid size-11 touch-none place-items-center rounded-full border-2 border-white bg-primary text-primary-foreground shadow-md outline-none transition-transform hover:scale-105 focus-visible:ring-4 focus-visible:ring-primary/60 disabled:cursor-not-allowed disabled:opacity-50"
+            className="pointer-events-auto absolute -bottom-2 -right-2 grid size-11 touch-none place-items-center rounded-full border-2 border-white bg-primary text-primary-foreground shadow-md outline-none transition-transform hover:scale-105 focus-visible:ring-4 focus-visible:ring-primary/60 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Maximize2 className="size-4" aria-hidden="true" />
           </button>

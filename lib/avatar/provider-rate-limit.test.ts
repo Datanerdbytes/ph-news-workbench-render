@@ -68,4 +68,32 @@ describe("avatar provider rate limit", () => {
     await vi.advanceTimersByTimeAsync(1);
     await expect(afterMissingHeader).resolves.toBe(180_000);
   });
+
+  it("rechecks the deadline after sleeping so a later 429 is respected", async () => {
+    const { deferAvatarRequests, waitForAvatarRequest } = await import(
+      "./provider-rate-limit"
+    );
+    await waitForAvatarRequest();
+
+    // The second waiter sleeps until the interval deadline. A 429 lands while
+    // it sleeps and pushes the deadline far out; the waiter must not resume
+    // on the stale deadline it computed before sleeping.
+    const started: number[] = [];
+    const waiter = waitForAvatarRequest().then(() =>
+      started.push(Date.now() - START),
+    );
+    // Let the waiter reach its sleep before the refusal extends the deadline.
+    await vi.advanceTimersByTimeAsync(0);
+
+    deferAvatarRequests(
+      new Response(null, { status: 429, headers: { "retry-after": "120" } }),
+    );
+
+    await vi.advanceTimersByTimeAsync(30_249);
+    expect(started).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(89_751);
+    expect(started).toEqual([120_000]);
+    await waiter;
+  });
 });

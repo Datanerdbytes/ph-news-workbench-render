@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { deleteScheduledPostWithAvatarRelease } from "@/lib/schedule-cancellation";
 
 describe.skipIf(!process.env.DATABASE_URL)("schedule cancellation", () => {
@@ -141,5 +141,76 @@ describe.skipIf(!process.env.DATABASE_URL)("schedule cancellation", () => {
     const rows = await sql`
       SELECT publish_state FROM avatar_jobs WHERE id = ${avatar.id}`;
     expect(rows[0].publish_state).toBe("ready");
+  });
+
+  it("takes the avatar lock before the release decision runs", async () => {
+    const avatar = await createAvatar();
+    const scheduleId = await createSchedule(avatar.id, avatar.blobUrl);
+    const statements: string[] = [];
+    const original = sql.transaction;
+    const spy = vi
+      .spyOn(sql, "transaction")
+      .mockImplementation(((queries: unknown[], options?: unknown) => {
+        for (const query of queries) {
+          const prepared = query as {
+            queryData?: { strings?: readonly string[] };
+          };
+          statements.push(
+            (prepared.queryData?.strings ?? []).join("?") || String(query),
+          );
+        }
+        return original(queries as never, options as never);
+      }) as typeof sql.transaction);
+
+    try {
+      await deleteScheduledPostWithAvatarRelease({
+        id: scheduleId,
+        workspaceId,
+        status: "scheduled",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The lock is taken in an earlier statement of the same transaction, so
+    // the delete and its NOT EXISTS check run afterwards on a fresh
+    // snapshot that already sees the competing cancellation.
+    expect(statements).toHaveLength(2);
+    expect(statements[0]).toContain("FROM avatar_jobs");
+    expect(statements[0]).toContain("FOR UPDATE");
+    expect(statements[1]).toContain("DELETE FROM scheduled_posts");
+    expect(statements[1]).toContain("NOT EXISTS");
+  });
+
+  it("releases a shared avatar when two schedules are cancelled together", async () => {
+    const avatar = await createAvatar();
+    const firstId = await createSchedule(avatar.id, avatar.blobUrl);
+    const secondId = await createSchedule(
+      avatar.id,
+      `https://media.example.test/compose/avatars/${avatar.id}/composite.mp4`,
+    );
+
+    const results = await Promise.all([
+      deleteScheduledPostWithAvatarRelease({
+        id: firstId,
+        workspaceId,
+        status: "scheduled",
+      }),
+      deleteScheduledPostWithAvatarRelease({
+        id: secondId,
+        workspaceId,
+        status: "scheduled",
+      }),
+    ]);
+
+    expect(results.filter((result) => result !== null)).toHaveLength(2);
+    const scheduleRows = await sql`
+      SELECT id FROM scheduled_posts WHERE avatar_job_id = ${avatar.id}`;
+    expect(scheduleRows).toHaveLength(0);
+    const avatarRows = await sql`
+      SELECT publish_state FROM avatar_jobs WHERE id = ${avatar.id}`;
+    // Both cancellations see the other schedule, so neither may skip the
+    // release: the lock makes the second one run after the first committed.
+    expect(avatarRows[0].publish_state).toBe("ready");
   });
 });

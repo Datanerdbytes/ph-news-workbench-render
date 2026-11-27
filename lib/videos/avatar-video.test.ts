@@ -115,7 +115,7 @@ describe("loadAvatarVideo", () => {
     );
     expect(fetchMock).toHaveBeenCalledWith(
       new URL("https://store.public.blob.vercel-storage.com/avatar/source.mp4"),
-      expect.objectContaining({ credentials: "omit", redirect: "manual" }),
+      expect.objectContaining({ credentials: "omit", redirect: "error" }),
     );
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(loaded.video.src).toBe("blob:loaded-avatar-1");
@@ -135,7 +135,7 @@ describe("loadAvatarVideo", () => {
       new URL("/api/avatar/syntheses/job-1/video", window.location.href),
       expect.objectContaining({
         credentials: "same-origin",
-        redirect: "manual",
+        redirect: "error",
       }),
     );
     loaded.release();
@@ -150,7 +150,7 @@ describe("loadAvatarVideo", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("rejects a redirect to an unapproved host", async () => {
+  it("fails closed on a redirect instead of following it in the browser", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(null, {
         status: 302,
@@ -162,8 +162,37 @@ describe("loadAvatarVideo", () => {
       loadAvatarVideo(
         "https://store.public.blob.vercel-storage.com/avatar/source.mp4",
       ),
-    ).rejects.toThrow("The avatar video redirect is not allowed.");
+    ).rejects.toThrow("The avatar video redirect could not be verified.");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to follow an approved redirect instead of chasing hops in the browser", async () => {
+    // The hop points at another approved host, but the browser never chases
+    // it: redirect resolution happens server-side, where every hop is
+    // validated before the media reaches the client.
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: {
+          location: "https://store.public.blob.vercel-storage.com/other.mp4",
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      loadAvatarVideo(
+        "https://store.public.blob.vercel-storage.com/avatar/source.mp4",
+      ),
+    ).rejects.toThrow("The avatar video redirect could not be verified.");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      new URL("https://store.public.blob.vercel-storage.com/avatar/source.mp4"),
+      expect.objectContaining({ redirect: "error", signal: expect.any(AbortSignal) }),
+    );
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(revokeObjectURL).not.toHaveBeenCalled();
   });
 
   it("rejects an oversized response before reading its body", async () => {
@@ -279,7 +308,7 @@ describe("loadAvatarVideo", () => {
 
     await expect(
       loadAvatarVideo("https://media.example.com/source.mp4"),
-    ).rejects.toThrow("The avatar video redirect is not allowed.");
+    ).rejects.toThrow("The avatar video redirect could not be verified.");
   });
 
   it("coalesces concurrent managed loads without sharing owned object URLs", async () => {

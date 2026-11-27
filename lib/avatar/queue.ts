@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "@/lib/db";
 import type { TtsVoiceId } from "@/lib/tts/voices";
 import { getAvatar, type AvatarId } from "./avatars";
-import { avatarLimits, estimateAvatarSeconds, utcDay } from "./config";
+import { avatarLimits, estimateAvatarSeconds } from "./config";
 import {
   ACTIVE_AVATAR_STATUSES,
   type AvatarJobRow,
@@ -53,7 +53,11 @@ export async function enqueueAvatarJob(input: EnqueueInput): Promise<AvatarJobRo
         ), reserved AS (
           INSERT INTO avatar_usage_daily
             (day, workspace_id, jobs, characters, seconds_reserved)
-          SELECT ${utcDay()}, ${input.workspaceId}, 1, ${input.text.length}, ${estimatedSeconds}
+          -- Derive the accounting day from the database clock, not the app
+          -- clock: completion and release settle against created_at::date,
+          -- so a request that crosses UTC midnight between here and the
+          -- transaction must still reserve and settle on the same day.
+          SELECT (now() AT TIME ZONE 'utc')::date, ${input.workspaceId}, 1, ${input.text.length}, ${estimatedSeconds}
           FROM active
           WHERE (SELECT count FROM active) < ${limits.maxActive}
             AND ${limits.dailyJobs} > 0

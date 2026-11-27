@@ -579,6 +579,29 @@ export async function requeueInterruptedPost(row: {
 }
 
 /**
+ * Push an unconfirmable recovery candidate to the back of the sweep's
+ * oldest-first ordering. Rows with a platform id but no confirmed publication
+ * must never be requeued, so without this marker a block of them would be
+ * re-selected on every pass and starve the recovery slots (LIMIT without an
+ * ordering policy is not fair selection). Best-effort: a failed marker must
+ * not break the sweep.
+ */
+async function deferReconciliationProbe(row: {
+  id: number;
+  workspace_id: string;
+}): Promise<void> {
+  try {
+    await sql`
+      UPDATE scheduled_posts
+      SET updated_at = now()
+      WHERE id = ${row.id} AND workspace_id = ${row.workspace_id}
+        AND status = 'publishing'`;
+  } catch {
+    // The marker only delays the next probe; never fail the sweep for it.
+  }
+}
+
+/**
  * Recover posts the executor claimed but never finished — a crash or a
  * restart between the claim and the publish leaves them stuck in
  * 'publishing' forever, because only 'scheduled' rows are claimed.
@@ -586,11 +609,12 @@ export async function requeueInterruptedPost(row: {
 async function requeueStuckPosts(): Promise<void> {
   const rows = (await sql`
     SELECT id, workspace_id, news_item_id, attempts, facebook_post_id,
-           publish_started_at, kind, avatar_job_id
+           publish_started_at, kind, avatar_job_id, page_id
     FROM scheduled_posts
     WHERE status = 'publishing'
       AND updated_at < now() - (${STUCK_PUBLISHING_MINUTES} * interval '1 minute')
       AND (facebook_post_id IS NOT NULL OR publish_started_at IS NULL)
+    ORDER BY updated_at ASC
     LIMIT 10
     FOR UPDATE SKIP LOCKED`) as unknown as {
     id: number;
@@ -601,12 +625,15 @@ async function requeueStuckPosts(): Promise<void> {
     publish_started_at: string | null;
     kind: string;
     avatar_job_id: string | null;
+    page_id: string | null;
   }[];
 
   for (const row of rows) {
     // First check if Facebook actually published it
     if (row.facebook_post_id) {
-      const token = await resolvePageToken(row.workspace_id, null);
+      // Probe with the same Page the publish used — the primary Page's token
+      // cannot confirm a video that went out on a secondary Page.
+      const token = await resolvePageToken(row.workspace_id, row.page_id);
       if (token) {
         const published = await detectPublished(row.kind, row.facebook_post_id, token);
         if (published === true) {
@@ -657,7 +684,9 @@ async function requeueStuckPosts(): Promise<void> {
         }
       }
       // A platform id exists but publication could not be confirmed. Keep the
-      // row for reconciliation; republishing could duplicate live content.
+      // row for reconciliation — republishing could duplicate live content —
+      // and defer it so it cannot occupy a recovery slot on every sweep.
+      await deferReconciliationProbe(row);
       continue;
     }
 

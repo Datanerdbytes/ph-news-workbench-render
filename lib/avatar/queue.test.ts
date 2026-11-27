@@ -138,11 +138,13 @@ describe("enqueueAvatarJob", () => {
     expect(quotaQuery).toContain("(SELECT count FROM active) < ?");
     expect(quotaQuery).toContain("INSERT INTO avatar_jobs");
     expect(quotaQuery).toContain("FROM reserved");
+    // The reservation day comes from the database clock, not the app clock,
+    // so the reservation and the settlement (created_at::date) agree.
+    expect(quotaQuery).toContain("(now() AT TIME ZONE 'utc')::date");
 
     const values = queries[1].values;
     expect(values.slice(0, 2)).toEqual(["ws-1", ACTIVE_AVATAR_STATUSES]);
-    expect(values.slice(2, 16)).toEqual([
-      "2026-11-17",
+    expect(values.slice(2, 15)).toEqual([
       "ws-1",
       5,
       3,
@@ -157,7 +159,7 @@ describe("enqueueAvatarJob", () => {
       900,
       3,
     ]);
-    expect(values.slice(16)).toEqual([
+    expect(values.slice(15)).toEqual([
       expect.any(String),
       "ws-1",
       "user-1",
@@ -281,6 +283,9 @@ describe("completion and failure accounting", () => {
     expect(text).toContain("worker_id = ?");
     expect(text).toContain("attempts = ?");
     expect(text).toContain("cancel_requested = false");
+    // Settlement uses the job's own creation day, which is the same
+    // database clock that produced the reservation day.
+    expect(text).toContain("created_at::date AS day");
     expect(text).toContain(
       "seconds_reserved = GREATEST(0, usage.seconds_reserved - finished.estimated_seconds)",
     );

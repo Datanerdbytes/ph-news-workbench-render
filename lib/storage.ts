@@ -589,8 +589,10 @@ export async function stageServerFile(
         Body: createReadStream(filePath),
         ContentType: contentType,
         ContentLength: info.size,
-        ...(abortSignal ? { abortSignal } : {}),
       }),
+      // The SDK only honors the signal from the handler options — inside the
+      // command input it is ignored and a cancelled upload keeps streaming.
+      abortSignal ? { abortSignal } : undefined,
     );
     return { url: `${s3PublicBase()}/${key}`, pathname: key, contentType };
   }

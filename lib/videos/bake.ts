@@ -264,12 +264,19 @@ export async function bakeVideoAnimation(
 
     video.currentTime = 0;
     if (avatar) avatar.currentTime = 0;
+    // Start the recorder before either element can play: play() promises
+    // resolve independently, so an avatar that wins the race would speak
+    // its opening before recording caught up. The ducking schedule rides
+    // with the avatar's play() call — startAvatar anchors it to the
+    // AudioContext's current time.
+    recorder.start(250);
     try {
       await Promise.all([
         video.play(),
-        ...(avatar ? [avatar.play()] : []),
+        ...(avatar ? [avatar.play(), audioMix.startAvatar()] : []),
       ]);
     } catch {
+      if (recorder.state !== 'inactive') recorder.stop();
       video.pause();
       avatar?.pause();
       // Never retry muted: the audio is captured through the AudioContext from
@@ -282,9 +289,7 @@ export async function bakeVideoAnimation(
             : 'Playback was blocked, so the animation bake was skipped. Try posting again — the video still publishes without it.'
       );
     }
-    recorder.start(250);
-    if (hasAvatar) audioMix.startAvatar();
-    else audioMix.startNarration();
+    if (!hasAvatar) audioMix.startNarration();
 
     const effects = planVideoEffects(attachments, videoDuration, values);
     const holdForAudio = audioMix.duration > videoDuration;
@@ -458,7 +463,11 @@ export async function bakeAndFinalizeVideo(
   const baked = await bakeVideoAnimation(options);
   const aspectRatio = options.aspectRatio ?? 'source';
   return finalizeBakedVideo(baked, options.onProgress, {
-    preserveAspect: aspectRatio === 'source' && Boolean(options.narration),
+    // Avatar composites need the same lossless source-aspect handling as
+    // narration — the scale-and-crop fallback would cut the overlay away.
+    preserveAspect:
+      aspectRatio === 'source' &&
+      (Boolean(options.narration) || Boolean(options.avatarUrl)),
     aspectRatio: aspectRatio === '16:9' ? '16:9' : undefined,
     name: options.avatarUrl
       ? 'avatar-composite.mp4'

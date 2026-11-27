@@ -219,6 +219,24 @@ export async function processAvatarJob(job: AvatarJobRow): Promise<void> {
         }
         return;
       }
+      // Completion refused while the row is still active and owned by this
+      // attempt means a cancellation arrived during staging. Record the
+      // terminal state here instead of waiting for the stale sweep —
+      // failAvatarJob is fenced on worker_id and attempts, so it can never
+      // touch a replacement attempt. A provider id exists at this point, so
+      // no reserved seconds are released.
+      if (
+        current &&
+        current.worker_id === job.worker_id &&
+        current.attempts === job.attempts &&
+        current.cancel_requested
+      ) {
+        await failAndCleanupProvider(job, synthesisId, {
+          message: "Avatar generation cancelled.",
+          retryable: false,
+        });
+        return;
+      }
       stagedUrl = null;
       return;
     }

@@ -132,6 +132,13 @@ describe.skipIf(!process.env.DATABASE_URL)("scheduled post claims", () => {
     await expect(
       requeueInterruptedPost({ ...post, attempts: 1 }),
     ).resolves.toBe("scheduled");
+    // A reclaimed row waits out the retry backoff before it can be claimed
+    // again, so the fixture is aged past it. The production predicate is
+    // unchanged.
+    await sql`
+      UPDATE scheduled_posts
+      SET updated_at = now() - interval '3 minutes'
+      WHERE id = ${post.id}`;
     await expect(claimScheduledPost(post)).resolves.toMatchObject({ attempts: 2 });
 
     await expect(

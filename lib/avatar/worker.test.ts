@@ -371,6 +371,50 @@ describe("fenced ownership", () => {
     expect(mocks.rm).toHaveBeenCalledTimes(1);
   });
 
+  it("records a cancelled terminal state when completion is refused by a cancellation", async () => {
+    const current = job({ provider_synthesis_id: "job-1" });
+    // The cancellation lands while the attempt is still the owner, so the
+    // refused completion must be turned into a terminal 'cancelled' row
+    // instead of waiting for the stale sweep.
+    mocks.getAvatarJob
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce({ ...current, cancel_requested: true });
+    mocks.completeAvatarJob.mockResolvedValue(false);
+    mocks.failAvatarJob.mockResolvedValue("cancelled");
+
+    await processAvatarJob(current);
+
+    expect(mocks.failAvatarJob).toHaveBeenCalledWith(current, {
+      message: "Avatar generation cancelled.",
+      retryable: false,
+    });
+    expect(mocks.deleteAvatarSynthesis).toHaveBeenCalledWith("job-1");
+    // The cancelled attempt owns the staged upload, so the orphaned object
+    // is removed with it.
+    expect(mocks.deleteStagedBlobs).toHaveBeenCalledWith([STAGED_URL]);
+    expect(mocks.rm).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a replacement attempt untouched when completion is refused", async () => {
+    const current = job({ provider_synthesis_id: "job-1" });
+    // Another attempt owns the row now, so this attempt's completion write
+    // loses its fence and must not write a terminal state for the new owner.
+    mocks.getAvatarJob
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce(job({ worker_id: "worker-2", attempts: 2 }));
+    mocks.completeAvatarJob.mockResolvedValue(false);
+
+    await processAvatarJob(current);
+
+    expect(mocks.failAvatarJob).not.toHaveBeenCalled();
+    expect(mocks.deleteAvatarSynthesis).not.toHaveBeenCalled();
+    expect(mocks.deleteStagedBlobs).not.toHaveBeenCalled();
+  });
+
   it("deletes a staged output only after a terminal state confirms it is unused", async () => {
     const current = job({ provider_synthesis_id: "job-1" });
     mocks.getAvatarJob

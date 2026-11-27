@@ -330,6 +330,47 @@ describe("stageServerFile", () => {
     });
   });
 
+  it("hands the abort signal to the s3 client instead of the command input", async () => {
+    vi.stubEnv("STORAGE_DRIVER", "s3");
+    vi.stubEnv("S3_BUCKET", "workbench");
+    vi.stubEnv("S3_ACCESS_KEY_ID", "test-key");
+    vi.stubEnv("S3_SECRET_ACCESS_KEY", "test-secret");
+    vi.stubEnv("S3_PUBLIC_BASE", "https://media.example.com");
+    const file = await tempFile();
+    const controller = new AbortController();
+
+    const result = await stageServerFile(
+      "avatars/ws-1/job-1/avatar.mp4",
+      file,
+      "video/mp4",
+      1024,
+      controller.signal,
+    );
+
+    const [command, options] = s3SendMock.mock.calls[0];
+    // The SDK ignores a signal inside the command input, so a cancelled
+    // upload would keep streaming the whole file.
+    expect(command.input).not.toHaveProperty("abortSignal");
+    expect(options).toEqual({ abortSignal: controller.signal });
+    expect(result.url).toMatch(
+      /^https:\/\/media\.example\.com\/avatars\/ws-1\/job-1\/avatar-[0-9a-f]{8}\.mp4$/,
+    );
+  });
+
+  it("stages an s3 upload without an abort signal when none is given", async () => {
+    vi.stubEnv("STORAGE_DRIVER", "s3");
+    vi.stubEnv("S3_BUCKET", "workbench");
+    vi.stubEnv("S3_ACCESS_KEY_ID", "test-key");
+    vi.stubEnv("S3_SECRET_ACCESS_KEY", "test-secret");
+    vi.stubEnv("S3_PUBLIC_BASE", "https://media.example.com");
+    const file = await tempFile();
+
+    await stageServerFile("avatars/ws-1/job-1/avatar.mp4", file, "video/mp4");
+
+    const [, options] = s3SendMock.mock.calls[0];
+    expect(options).toBeUndefined();
+  });
+
   it.each([
     "../avatar.mp4",
     "/avatar.mp4",

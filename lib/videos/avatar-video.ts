@@ -7,7 +7,6 @@ import {
 
 const MAX_AVATAR_BYTES = 256 * 1024 * 1024;
 const AVATAR_LOAD_TIMEOUT_MS = 60_000;
-const MAX_AVATAR_REDIRECTS = 5;
 
 export type LoadedAvatarVideo = {
   video: HTMLVideoElement;
@@ -148,34 +147,21 @@ async function fetchAvatarBlob(
       AVATAR_LOAD_TIMEOUT_MS,
     );
     try {
-      let current = new URL(source.href);
-      let response!: Response;
-      for (
-        let redirects = 0;
-        redirects <= MAX_AVATAR_REDIRECTS;
-        redirects += 1
-      ) {
-        response = await fetch(current, {
-          credentials:
-            current.origin === window.location.origin ? "same-origin" : "omit",
-          redirect: "manual",
-          signal: controller.signal,
-        });
-        if (response.type === "opaqueredirect") {
-          throw new Error("The avatar video redirect could not be verified.");
-        }
-        if (response.status < 300 || response.status >= 400) break;
-        const location = response.headers.get("location");
-        if (!location) {
-          throw new Error("The avatar video redirect is invalid.");
-        }
-        current = new URL(location, current);
-        if (!allowedAvatarUrl(current, s3Origin)) {
-          throw new Error("The avatar video redirect is not allowed.");
-        }
-        if (redirects === MAX_AVATAR_REDIRECTS) {
-          throw new Error("The avatar video redirected too many times.");
-        }
+      // Redirects are resolved server-side: avatar media is served by the
+      // workspace-authenticated syntheses route, which validates every hop
+      // against storage before streaming. A browser-side hop can neither be
+      // inspected (`redirect: "manual"` yields opaque responses) nor safely
+      // followed (`redirect: "follow"` would chase any host), so any 3xx
+      // fails closed here.
+      const current = new URL(source.href);
+      const response = await fetch(current, {
+        credentials:
+          current.origin === window.location.origin ? "same-origin" : "omit",
+        redirect: "error",
+        signal: controller.signal,
+      });
+      if (response.status >= 300 && response.status < 400) {
+        throw new Error("The avatar video redirect could not be verified.");
       }
       if (!response.ok) {
         throw new Error("The avatar video could not be loaded for compositing.");

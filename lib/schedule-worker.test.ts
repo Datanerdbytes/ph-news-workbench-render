@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
-vi.mock("@/lib/db", () => ({ sql: vi.fn() }));
+vi.mock("@/lib/db", () => ({
+  // The avatar-release cancellation runs its lock + delete through
+  // sql.transaction([...]); resolve the statement results in order.
+  sql: Object.assign(vi.fn(), {
+    transaction: vi.fn(async (queries: unknown[]) => Promise.all(queries)),
+  }),
+}));
 vi.mock("@/lib/schedule-events", () => ({ recordScheduleEvent: vi.fn() }));
 vi.mock("@/lib/facebook-page-token", () => ({
   getPrimaryPage: vi.fn(),
@@ -469,8 +475,15 @@ describe("publishDuePosts", () => {
 
     it("marks the video publish workflow at the uploader's publish boundary", async () => {
       useDb({ claim: [avatarRow()] });
+      // The marker must be written while the upload is still running, so a
+      // crash between the marker and the publish request can never be
+      // mistaken for a publish that never started.
+      let markerIndexWhenUploadResolved: number | undefined;
       vi.mocked(publishPageVideo).mockImplementation(async ({ beforePublish }) => {
         await beforePublish?.("fb_avatar");
+        markerIndexWhenUploadResolved = sqlMock.mock.calls.findIndex((call) =>
+          (call[0] as TemplateStringsArray).join(" ").includes("publish_started_at = now()")
+        );
         return { id: "fb_avatar", permalink: null };
       });
 
@@ -480,7 +493,10 @@ describe("publishDuePosts", () => {
         (call[0] as TemplateStringsArray).join(" ").includes("publish_started_at = now()")
       );
       expect(markerIndex).toBeGreaterThanOrEqual(0);
+      expect(markerIndexWhenUploadResolved).toBe(markerIndex);
       expect(vi.mocked(publishPageVideo).mock.calls[0][0].beforePublish).toBeTypeOf("function");
+      // Local preparation stays retryable: the marker is written after the
+      // download, not before it.
       expect(vi.mocked(downloadVideoFromUrl).mock.invocationCallOrder[0]).toBeLessThan(
         sqlMock.mock.invocationCallOrder[markerIndex]
       );
@@ -684,6 +700,93 @@ describe("publishDuePosts", () => {
       expect(recoveryQuery).toBeDefined();
       const text = (recoveryQuery![0] as TemplateStringsArray).join(" ");
       expect(text).toContain("facebook_post_id IS NOT NULL OR publish_started_at IS NULL");
+    });
+
+    it("selects recovery candidates oldest first so the slots rotate", async () => {
+      useDb({});
+
+      await publishDuePosts({ source: "scheduler" });
+
+      const recoveryQuery = sqlMock.mock.calls.find((call) => {
+        const text = (call[0] as TemplateStringsArray).join(" ");
+        return text.includes("status = 'publishing'") && text.includes("FOR UPDATE SKIP LOCKED");
+      });
+      expect(recoveryQuery).toBeDefined();
+      const text = (recoveryQuery![0] as TemplateStringsArray).join(" ");
+      // Without an ordering policy the same rows can be returned on every
+      // sweep and starve the rows behind them.
+      expect(text).toContain("ORDER BY updated_at ASC");
+      expect(text).toContain("LIMIT 10");
+    });
+
+    it("defers a row whose publication cannot be confirmed", async () => {
+      useDb({
+        stuck: [
+          {
+            id: 1,
+            workspace_id: "ws1",
+            news_item_id: null,
+            attempts: 1,
+            facebook_post_id: "fb_avatar",
+            publish_started_at: null,
+            kind: "video",
+            avatar_job_id: "avatar-1",
+            page_id: null,
+          },
+        ],
+      });
+      vi.mocked(resolvePageToken).mockResolvedValue("tok");
+      vi.mocked(isFacebookVideoPublished).mockResolvedValue(false);
+      vi.mocked(isFacebookPostPublished).mockResolvedValue(false);
+
+      await publishDuePosts({ source: "scheduler" });
+
+      const defer = sqlMock.mock.calls.find((call) => {
+        const text = (call[0] as TemplateStringsArray).join(" ");
+        return (
+          text.includes("UPDATE scheduled_posts") &&
+          text.includes("SET updated_at = now()") &&
+          text.includes("status = 'publishing'")
+        );
+      });
+      expect(defer).toBeDefined();
+      expect(defer!.slice(1)).toContain(1);
+      // The outcome is unknown, so the row is never republished and never
+      // reported as a failure.
+      expect(events().map((event) => event.event)).toEqual([]);
+      expect(
+        sqlMock.mock.calls.some((call) =>
+          (call[0] as TemplateStringsArray).join(" ").includes("status = 'failed'")
+        ),
+      ).toBe(false);
+    });
+
+    it("probes a stuck row with the page that published it", async () => {
+      useDb({
+        stuck: [
+          {
+            id: 1,
+            workspace_id: "ws1",
+            news_item_id: null,
+            attempts: 1,
+            facebook_post_id: "fb_avatar",
+            publish_started_at: null,
+            kind: "video",
+            avatar_job_id: "avatar-1",
+            page_id: "pg-secondary",
+          },
+        ],
+        completion: [{ id: 1, media_url: avatarUrl, avatar_blob_url: avatarUrl }],
+      });
+      vi.mocked(resolvePageToken).mockResolvedValue("tok");
+      vi.mocked(isFacebookVideoPublished).mockResolvedValue(true);
+
+      await publishDuePosts({ source: "scheduler" });
+
+      // The primary Page's token cannot confirm a video that went out on a
+      // secondary Page.
+      expect(resolvePageToken).toHaveBeenCalledWith("ws1", "pg-secondary");
+      expect(isFacebookVideoPublished).toHaveBeenCalledWith("fb_avatar", "tok");
     });
 
     it("marks a recovered publishing row and its avatar published when Facebook confirms it", async () => {

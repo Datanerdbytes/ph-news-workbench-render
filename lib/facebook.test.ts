@@ -268,6 +268,33 @@ describe("graphPostForm", () => {
       graphPostForm("pg/feed", {}, "tok", [], undefined, true)
     ).rejects.toMatchObject({ ambiguous: true });
   });
+
+  it("preserves ambiguity for a JSON error body that is not a Graph error object", async () => {
+    // An intermediary can answer 503 with {"error":"upstream unavailable"}.
+    // That string is not a Graph refusal, so the publish may still have been
+    // accepted upstream and the scheduler must not treat it as a failure.
+    fetchMock().mockResolvedValue(
+      jsonResponse({ error: "upstream unavailable" }, 503),
+    );
+
+    await expect(
+      graphPostForm("pg/feed", {}, "tok", [], undefined, true)
+    ).rejects.toMatchObject({ ambiguous: true });
+  });
+
+  it("keeps a definite refusal when the error body carries a Graph error object", async () => {
+    fetchMock().mockResolvedValue(
+      jsonResponse({ error: { message: "Invalid OAuth token", code: 190 } }, 400),
+    );
+
+    await expect(
+      graphPostForm("pg/feed", {}, "tok", [], undefined, true)
+    ).rejects.toMatchObject({
+      message: "Invalid OAuth token",
+      code: 190,
+      ambiguous: false,
+    });
+  });
 });
 
 describe("publishPagePost", () => {

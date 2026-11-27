@@ -9,7 +9,11 @@ const {
   heldMock,
   cancelMock,
 } = vi.hoisted(() => ({
-  sqlMock: vi.fn(),
+  // The avatar-release cancellation runs its lock + delete through
+  // sql.transaction([...]); resolve the statement results in order.
+  sqlMock: Object.assign(vi.fn(), {
+    transaction: vi.fn(async (queries: unknown[]) => Promise.all(queries)),
+  }),
   requireWorkspaceMock: vi.fn(),
   recordEventMock: vi.fn(),
   resolvePageTokenMock: vi.fn(),
@@ -438,6 +442,7 @@ describe("DELETE /api/schedule/[id]", () => {
     sqlMock
       .mockResolvedValueOnce([localRow])
       .mockResolvedValueOnce([{ id: 51 }])
+      .mockResolvedValueOnce([]) // the avatar lock matches no avatar
       .mockResolvedValueOnce([
         { id: 51, news_item_id: null, scheduled_for: localRow.scheduled_for },
       ]);
@@ -456,7 +461,10 @@ describe("DELETE /api/schedule/[id]", () => {
 
     const claimText = (sqlMock.mock.calls[1][0] as string[]).join("?");
     expect(claimText).toContain("status = 'rescheduling'");
-    const deleteText = (sqlMock.mock.calls[2][0] as string[]).join("?");
+    const lockText = (sqlMock.mock.calls[2][0] as string[]).join("?");
+    expect(lockText).toContain("FROM avatar_jobs");
+    expect(lockText).toContain("FOR UPDATE");
+    const deleteText = (sqlMock.mock.calls[3][0] as string[]).join("?");
     expect(deleteText).toContain("DELETE FROM scheduled_posts");
     expect(deleteText).toContain("status = 'rescheduling'");
   });
@@ -468,6 +476,7 @@ describe("DELETE /api/schedule/[id]", () => {
         { ...localRow, avatar_job_id: "avatar-1", image_url: avatarUrl },
       ])
       .mockResolvedValueOnce([{ id: 51 }])
+      .mockResolvedValueOnce([{ id: "avatar-1" }])
       .mockResolvedValueOnce([
         {
           id: 51,
@@ -483,15 +492,15 @@ describe("DELETE /api/schedule/[id]", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(sqlMock).toHaveBeenCalledTimes(3);
-    const deleteText = (sqlMock.mock.calls[2][0] as string[]).join("?");
+    expect(sqlMock).toHaveBeenCalledTimes(4);
+    const deleteText = (sqlMock.mock.calls[3][0] as string[]).join("?");
     expect(deleteText).toContain("WITH deleted AS");
     expect(deleteText).toContain("DELETE FROM scheduled_posts");
     expect(deleteText).toContain("UPDATE avatar_jobs");
     expect(deleteText).toContain("publish_state = 'scheduled'");
     expect(deleteText).toContain("NOT EXISTS");
     expect(deleteText).toContain("RETURNING id, workspace_id, news_item_id, scheduled_for, avatar_job_id");
-    expect(sqlMock.mock.calls[2]).toContain("ws1");
+    expect(sqlMock.mock.calls[3]).toContain("ws1");
   });
 
   it("retains a reusable avatar composite when its schedule is deleted", async () => {
@@ -502,6 +511,7 @@ describe("DELETE /api/schedule/[id]", () => {
         { ...localRow, avatar_job_id: "avatar-1", image_url: compositeUrl },
       ])
       .mockResolvedValueOnce([{ id: 51 }])
+      .mockResolvedValueOnce([{ id: "avatar-1" }])
       .mockResolvedValueOnce([
         {
           id: 51,
@@ -517,8 +527,8 @@ describe("DELETE /api/schedule/[id]", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(sqlMock).toHaveBeenCalledTimes(3);
-    expect(sqlMock.mock.calls[2]).toContain("ws1");
+    expect(sqlMock).toHaveBeenCalledTimes(4);
+    expect(sqlMock.mock.calls[3]).toContain("ws1");
   });
 
   it("interleaving 1: refuses when reschedule claims row between DELETE read and claim", async () => {
@@ -541,6 +551,7 @@ describe("DELETE /api/schedule/[id]", () => {
     sqlMock
       .mockResolvedValueOnce([facebookRow])
       .mockResolvedValueOnce([{ id: 51 }])
+      .mockResolvedValueOnce([]) // the avatar lock matches no avatar
       .mockResolvedValueOnce([
         { id: 51, news_item_id: null, scheduled_for: facebookRow.scheduled_for },
       ]);
