@@ -6,6 +6,7 @@ export type AudioMix = {
   duration: number;
   startNarration: () => void;
   startAvatar: () => void;
+  restoreOriginalAudio: () => void;
   stop: () => void;
 };
 
@@ -114,13 +115,22 @@ export async function createAudioMix(
     },
     startAvatar: () => {
       if (avatarStarted) return;
-      avatarStarted = true;
       if (!originalGain || !avatarDuration) return;
+      avatarStarted = true;
+      // Duck now that the avatar is actually playing. The restore is driven
+      // by the avatar's ended event, not by a duration-based deadline, so a
+      // late or stalled start cannot move the speech outside the ducked
+      // window.
       const now = context.currentTime;
       originalGain.gain.cancelScheduledValues(now);
       originalGain.gain.setValueAtTime(originalVolume, now);
-      originalGain.gain.setValueAtTime(originalVolume, now + avatarDuration);
-      originalGain.gain.linearRampToValueAtTime(1, now + avatarDuration + 0.2);
+    },
+    restoreOriginalAudio: () => {
+      if (!originalGain || !avatarStarted) return;
+      const now = context.currentTime;
+      originalGain.gain.cancelScheduledValues(now);
+      originalGain.gain.setValueAtTime(originalVolume, now);
+      originalGain.gain.linearRampToValueAtTime(1, now + 0.2);
     },
     stop: () => {
       if (narrationStarted) narrationSource?.stop();

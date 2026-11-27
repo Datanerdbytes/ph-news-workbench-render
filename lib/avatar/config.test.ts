@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MAX_TTS_CHARACTERS } from "@/lib/tts/text";
 import {
   MAX_AVATAR_JOB_SECONDS,
@@ -7,11 +7,26 @@ import {
   utcDay,
 } from "./config";
 
+const LIMIT_ENV_VARS = [
+  "AVATAR_DAILY_JOB_CAP",
+  "AVATAR_DAILY_SECONDS_CAP",
+  "AVATAR_MAX_ACTIVE_JOBS",
+  "AVATAR_API_REQUESTS_PER_MINUTE",
+  "AVATAR_MAX_CHARACTERS",
+  "AVATAR_MAX_JOB_SECONDS",
+];
+
 afterEach(() => {
   vi.unstubAllEnvs();
 });
 
 describe("avatarLimits", () => {
+  beforeEach(() => {
+    // The host shell may export any of these; the default-cap test must not
+    // depend on the environment that runs the suite.
+    for (const name of LIMIT_ENV_VARS) vi.stubEnv(name, undefined);
+  });
+
   it("falls back to the built-in caps", () => {
     expect(avatarLimits()).toEqual({
       dailyJobs: 5,

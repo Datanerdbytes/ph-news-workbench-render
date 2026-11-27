@@ -289,6 +289,7 @@ describe("bakeVideoAnimation playback lifecycle", () => {
       src: "",
       currentTime: 0,
       duration,
+      ended: false,
       videoWidth: 1920,
       videoHeight: 1080,
       readyState: 2,
@@ -494,8 +495,8 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     expect(avatar.play).toHaveBeenCalledTimes(1);
     expect(gains[0].gain.value).toBe(0.25);
     expect(gains[0].gain.setValueAtTime).toHaveBeenCalledWith(0.25, 0);
-    expect(gains[0].gain.setValueAtTime).toHaveBeenCalledWith(0.25, 2);
-    expect(gains[0].gain.linearRampToValueAtTime).toHaveBeenCalledWith(1, 2.2);
+    // The restore follows the avatar's ended event, not a fixed deadline.
+    expect(gains[0].gain.linearRampToValueAtTime).not.toHaveBeenCalled();
 
     video.currentTime = 0.5;
     avatar.currentTime = 0.5;
@@ -511,6 +512,7 @@ describe("bakeVideoAnimation playback lifecycle", () => {
     frames.shift()?.(2_100);
     avatar.onended?.();
     await expect(bake).resolves.toBeInstanceOf(Blob);
+    expect(gains[0].gain.linearRampToValueAtTime).toHaveBeenCalledWith(1, 0.2);
     expect(avatar.pause).toHaveBeenCalled();
     expect(avatar.src).toBe("");
   });
@@ -554,6 +556,100 @@ describe("bakeVideoAnimation playback lifecycle", () => {
 
     recorders[0].onerror?.();
     await expect(bake).rejects.toThrow("Recording failed.");
+  });
+
+  it("draws frames while playback is still starting", async () => {
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    let resolveVideo!: () => void;
+    video.play = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveVideo = resolve;
+        }),
+    );
+
+    const bake = bakeVideoAnimation({
+      videoUrl: "blob:test",
+      attachments: [],
+      values: {},
+      avatarUrl: "blob:avatar",
+    });
+    await vi.waitFor(() => expect(recorders).toHaveLength(1));
+    // The render loop is already running even though video.play() has not
+    // settled, so the avatar's opening cannot advance uncaptured.
+    expect(frames.length).toBeGreaterThan(0);
+    now = 40;
+    frames.shift()?.(40);
+    expect(drawImageCalls.length).toBeGreaterThanOrEqual(1);
+
+    resolveVideo();
+    await Promise.resolve();
+    await Promise.resolve();
+    now = 2_100;
+    frames.shift()?.(2_100);
+    avatar.onended?.();
+    await expect(bake).resolves.toBeInstanceOf(Blob);
+  });
+
+  it("ducks only once the avatar reports it is playing", async () => {
+    let resolveAvatar!: () => void;
+    avatar.play = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveAvatar = resolve;
+        }),
+    );
+
+    const bake = bakeVideoAnimation({
+      videoUrl: "blob:test",
+      attachments: [],
+      values: {},
+      avatarUrl: "blob:avatar",
+    });
+    await vi.waitFor(() => expect(recorders).toHaveLength(1));
+    await Promise.resolve();
+    await Promise.resolve();
+    // video.play() resolved, but the avatar has not started, so the footage
+    // must not be ducked yet.
+    expect(gainEvents).not.toContain("duck");
+
+    resolveAvatar();
+    await vi.waitFor(() => expect(gainEvents).toContain("duck"));
+
+    recorders[0].onerror?.();
+    await expect(bake).rejects.toThrow("Recording failed.");
+  });
+
+  it("recognizes an avatar that ended before its listener was installed", async () => {
+    avatar.ended = true;
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    let resolveVideo!: () => void;
+    video.play = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveVideo = resolve;
+        }),
+    );
+
+    const bake = bakeVideoAnimation({
+      videoUrl: "blob:test",
+      attachments: [],
+      values: {},
+      avatarUrl: "blob:avatar",
+    });
+    await vi.waitFor(() => expect(recorders).toHaveLength(1));
+    resolveVideo();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The avatar already finished, so the take must complete with the
+    // footage/audio timeline instead of waiting for an ended event that
+    // will never fire again.
+    now = 2_100;
+    frames.shift()?.(2_100);
+    await expect(bake).resolves.toBeInstanceOf(Blob);
   });
 
   it("preserves the source aspect when finalizing an avatar composite", async () => {

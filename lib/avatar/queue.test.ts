@@ -139,7 +139,8 @@ describe("enqueueAvatarJob", () => {
     expect(quotaQuery).toContain("INSERT INTO avatar_jobs");
     expect(quotaQuery).toContain("FROM reserved");
     // The reservation day comes from the database clock, not the app clock,
-    // so the reservation and the settlement (created_at::date) agree.
+    // so the reservation and the settlement (the job's UTC creation day)
+    // agree.
     expect(quotaQuery).toContain("(now() AT TIME ZONE 'utc')::date");
 
     const values = queries[1].values;
@@ -283,9 +284,10 @@ describe("completion and failure accounting", () => {
     expect(text).toContain("worker_id = ?");
     expect(text).toContain("attempts = ?");
     expect(text).toContain("cancel_requested = false");
-    // Settlement uses the job's own creation day, which is the same
-    // database clock that produced the reservation day.
-    expect(text).toContain("created_at::date AS day");
+    // Settlement uses the job's own creation day converted to UTC, matching
+    // the UTC day the reservation was written under regardless of the
+    // database session timezone.
+    expect(text).toContain("(created_at AT TIME ZONE 'utc')::date AS day");
     expect(text).toContain(
       "seconds_reserved = GREATEST(0, usage.seconds_reserved - finished.estimated_seconds)",
     );

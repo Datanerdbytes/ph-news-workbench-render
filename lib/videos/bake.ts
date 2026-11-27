@@ -264,163 +264,221 @@ export async function bakeVideoAnimation(
 
     video.currentTime = 0;
     if (avatar) avatar.currentTime = 0;
-    // Start the recorder before either element can play: play() promises
-    // resolve independently, so an avatar that wins the race would speak
-    // its opening before recording caught up. The ducking schedule rides
-    // with the avatar's play() call — startAvatar anchors it to the
-    // AudioContext's current time.
+    // Check before attaching playback handlers: the tab can already be hidden
+    // when the take starts, and no visibilitychange event will fire for it.
+    if (document.hidden) {
+      throw new Error(
+        hasAvatar
+          ? 'The tab was hidden, so the avatar composite bake was stopped.'
+          : hasNarration
+            ? 'The tab was hidden, so the voice-over bake was stopped.'
+            : 'The tab was hidden, so the animation bake was stopped.'
+      );
+    }
+
+    const effects = planVideoEffects(attachments, videoDuration, values);
+    const holdForAudio = audioMix.duration > videoDuration;
+    // The timeline is anchored to the first play() that reports playback has
+    // started. Starting the render loop before either promise settles keeps
+    // the canvas fed while the two elements race to begin.
+    let playbackStartedAt: number | null = null;
+    const renderControl: { stop: ((error: Error) => void) | null } = {
+      stop: null,
+    };
+
     recorder.start(250);
+
+    // Draw while the play() promises settle. They resolve independently, and
+    // an avatar that starts first would otherwise advance before the first
+    // frame is captured, dropping its opening seconds from the composite.
+    const rendered = new Promise<void>((resolve, reject) => {
+      const fps = 30;
+      const minFrameMs = 1000 / fps;
+      const loopStartedAt = performance.now();
+      let lastFrameTime = loopStartedAt;
+      let lastProgressAt = loopStartedAt;
+      let lastAvatarProgressAt = loopStartedAt;
+      let lastPlayhead = 0;
+      let lastAvatarPlayhead = 0;
+      let videoEnded = false;
+      // The avatar can finish before its listener is installed when the
+      // footage's play() resolves later.
+      let avatarEnded = avatar?.ended ?? false;
+      let raf = 0;
+      let settled = false;
+      function finish(error?: Error) {
+        if (settled) return;
+        settled = true;
+        cancelAnimationFrame(raf);
+        document.removeEventListener('visibilitychange', onVisibility);
+        if (error) reject(error);
+        else resolve();
+      }
+      renderControl.stop = finish;
+      function finishIfReady() {
+        const elapsed =
+          playbackStartedAt === null
+            ? 0
+            : (performance.now() - playbackStartedAt) / 1000;
+        const timelineDone = holdForAudio
+          ? elapsed >= audioMix.duration - 0.02
+          : videoEnded;
+        if (timelineDone && (!avatar || avatarEnded)) finish();
+      }
+      function onVisibility() {
+        if (document.hidden) {
+          finish(
+            new Error(
+              hasAvatar
+                ? 'The tab was hidden, so the avatar composite bake was stopped.'
+                : hasNarration
+                  ? 'The tab was hidden, so the voice-over bake was stopped.'
+                  : 'The tab was hidden, so the animation bake was stopped.'
+            )
+          );
+        }
+      }
+      const tick = () => {
+        const now = performance.now();
+        const playhead = videoEnded
+          ? videoDuration
+          : Math.min(video.currentTime, videoDuration || video.currentTime);
+        const avatarPlayhead =
+          avatar && !avatarEnded
+            ? Math.min(avatar.currentTime, avatarDuration || avatar.currentTime)
+            : avatarDuration;
+        const elapsed =
+          playbackStartedAt === null
+            ? 0
+            : (now - playbackStartedAt) / 1000;
+        const timeline = holdForAudio ? elapsed : playhead;
+        if (now - lastFrameTime >= minFrameMs) {
+          do {
+            lastFrameTime += minFrameMs;
+          } while (now - lastFrameTime >= minFrameMs);
+          ctx.clearRect(0, 0, box.w, box.h);
+          composeVideoFrame(
+            ctx,
+            effects,
+            timeline,
+            (zoom) => drawFootage(ctx, video, box, zoom),
+            box
+          );
+          if (avatar && !avatarEnded) {
+            drawAvatarVideo(ctx, avatar, avatarPlacement, box.w, box.h);
+          }
+          if (renderDuration) {
+            onProgress?.(Math.min(1, timeline / renderDuration));
+          }
+        }
+        if (!videoEnded && videoDuration && playhead >= videoDuration - 0.05) {
+          videoEnded = true;
+        }
+        finishIfReady();
+        if (settled) return;
+        // Stall guards only count time after playback starts; a slow play()
+        // must not be mistaken for stopped media.
+        const progressStart = playbackStartedAt ?? loopStartedAt;
+        if (!videoEnded && playhead > lastPlayhead + 0.01) {
+          lastPlayhead = playhead;
+          lastProgressAt = now;
+        } else if (
+          !videoEnded &&
+          playbackStartedAt !== null &&
+          now - Math.max(lastProgressAt, progressStart) > 15_000
+        ) {
+          finish(new Error('The attached video stopped playing during the bake.'));
+          return;
+        }
+        if (avatar && !avatarEnded && avatarPlayhead > lastAvatarPlayhead + 0.01) {
+          lastAvatarPlayhead = avatarPlayhead;
+          lastAvatarProgressAt = now;
+        } else if (
+          avatar &&
+          !avatarEnded &&
+          playbackStartedAt !== null &&
+          now - Math.max(lastAvatarProgressAt, progressStart) > 15_000
+        ) {
+          finish(new Error('The avatar stopped playing during the bake.'));
+          return;
+        }
+        raf = requestAnimationFrame(tick);
+      };
+      raf = requestAnimationFrame(tick);
+      document.addEventListener('visibilitychange', onVisibility);
+      // The tab can already be hidden by the time the listener lands (the
+      // user switched away while playback was starting); no event fires in
+      // that case, so reject up front.
+      if (document.hidden) {
+        onVisibility();
+        return;
+      }
+      // A recorder failure has to end the take too — otherwise the fallback
+      // waits for the rest of a long clip before it can run.
+      finished.catch((error: unknown) => {
+        finish(error instanceof Error ? error : new Error('Recording failed.'));
+      });
+      video.onended = () => {
+        videoEnded = true;
+        finishIfReady();
+      };
+      video.onerror = () =>
+        finish(new Error('The attached video stopped playing during the bake.'));
+      if (avatar) {
+        avatar.onended = () => {
+          avatarEnded = true;
+          // Restore the footage volume when the avatar actually ends rather
+          // than at a wall-clock estimate from when play() was requested.
+          audioMix.restoreOriginalAudio();
+          finishIfReady();
+        };
+        avatar.onerror = () =>
+          finish(new Error('The avatar stopped playing during the bake.'));
+      }
+    });
+
+    let playbackError: Error | null = null;
     try {
-      await Promise.all([
-        video.play(),
-        ...(avatar ? [avatar.play(), audioMix.startAvatar()] : []),
-      ]);
+      const plays: Promise<void>[] = [
+        video.play().then(() => {
+          playbackStartedAt ??= performance.now();
+        }),
+      ];
+      if (avatar) {
+        // Duck once the avatar reports it is playing; play() can resolve well
+        // after the request, and the ramp is anchored to the AudioContext
+        // clock.
+        plays.push(
+          avatar.play().then(() => {
+            playbackStartedAt ??= performance.now();
+            audioMix.startAvatar();
+          })
+        );
+      }
+      await Promise.all(plays);
     } catch {
-      if (recorder.state !== 'inactive') recorder.stop();
-      video.pause();
-      avatar?.pause();
       // Never retry muted: the audio is captured through the AudioContext from
       // these elements, so muted playback would bake silent video.
-      throw new Error(
+      const blocked = new Error(
         hasAvatar
           ? 'Playback was blocked, so the avatar composite bake was skipped. Try posting again.'
           : hasNarration
             ? 'Playback was blocked, so the voice-over bake was skipped. Try posting again.'
             : 'Playback was blocked, so the animation bake was skipped. Try posting again — the video still publishes without it.'
       );
+      renderControl.stop?.(blocked);
+      await rendered.catch(() => {});
+      playbackError = blocked;
     }
-    if (!hasAvatar) audioMix.startNarration();
-
-    const effects = planVideoEffects(attachments, videoDuration, values);
-    const holdForAudio = audioMix.duration > videoDuration;
-    const renderStartedAt = performance.now();
-
-    let playbackError: Error | null = null;
-    try {
-      await new Promise<void>((resolve, reject) => {
-        const fps = 30;
-        const minFrameMs = 1000 / fps;
-        const start = renderStartedAt;
-        let lastFrameTime = start;
-        let lastProgressAt = start;
-        let lastAvatarProgressAt = start;
-        let lastPlayhead = 0;
-        let lastAvatarPlayhead = 0;
-        let videoEnded = false;
-        let avatarEnded = false;
-        let raf = 0;
-        let settled = false;
-        function finish(error?: Error) {
-          if (settled) return;
-          settled = true;
-          cancelAnimationFrame(raf);
-          document.removeEventListener('visibilitychange', onVisibility);
-          if (error) reject(error);
-          else resolve();
-        }
-        function finishIfReady() {
-          const elapsed = (performance.now() - renderStartedAt) / 1000;
-          const timelineDone = holdForAudio
-            ? elapsed >= audioMix.duration - 0.02
-            : videoEnded;
-          if (timelineDone && (!avatar || avatarEnded)) finish();
-        }
-        function onVisibility() {
-          if (document.hidden) {
-            finish(
-              new Error(
-                hasAvatar
-                  ? 'The tab was hidden, so the avatar composite bake was stopped.'
-                  : hasNarration
-                    ? 'The tab was hidden, so the voice-over bake was stopped.'
-                    : 'The tab was hidden, so the animation bake was stopped.'
-              )
-            );
-          }
-        }
-        const tick = () => {
-          const now = performance.now();
-          const playhead = videoEnded
-            ? videoDuration
-            : Math.min(video.currentTime, videoDuration || video.currentTime);
-          const avatarPlayhead =
-            avatar && !avatarEnded
-              ? Math.min(avatar.currentTime, avatarDuration || avatar.currentTime)
-              : avatarDuration;
-          const elapsed = (now - renderStartedAt) / 1000;
-          const timeline = holdForAudio ? elapsed : playhead;
-          if (now - lastFrameTime >= minFrameMs) {
-            do {
-              lastFrameTime += minFrameMs;
-            } while (now - lastFrameTime >= minFrameMs);
-            ctx.clearRect(0, 0, box.w, box.h);
-            composeVideoFrame(
-              ctx,
-              effects,
-              timeline,
-              (zoom) => drawFootage(ctx, video, box, zoom),
-              box
-            );
-            if (avatar && !avatarEnded) {
-              drawAvatarVideo(ctx, avatar, avatarPlacement, box.w, box.h);
-            }
-            if (renderDuration) {
-              onProgress?.(Math.min(1, timeline / renderDuration));
-            }
-          }
-          if (!videoEnded && videoDuration && playhead >= videoDuration - 0.05) {
-            videoEnded = true;
-          }
-          finishIfReady();
-          if (settled) return;
-          if (!videoEnded && playhead > lastPlayhead + 0.01) {
-            lastPlayhead = playhead;
-            lastProgressAt = now;
-          } else if (!videoEnded && now - lastProgressAt > 15_000) {
-            finish(new Error('The attached video stopped playing during the bake.'));
-            return;
-          }
-          if (avatar && !avatarEnded && avatarPlayhead > lastAvatarPlayhead + 0.01) {
-            lastAvatarPlayhead = avatarPlayhead;
-            lastAvatarProgressAt = now;
-          } else if (avatar && !avatarEnded && now - lastAvatarProgressAt > 15_000) {
-            finish(new Error('The avatar stopped playing during the bake.'));
-            return;
-          }
-          raf = requestAnimationFrame(tick);
-        };
-        raf = requestAnimationFrame(tick);
-        document.addEventListener('visibilitychange', onVisibility);
-        // The tab can already be hidden by the time the listener lands (the
-        // user switched away while playback was starting); no event fires in
-        // that case, so reject up front.
-        if (document.hidden) {
-          onVisibility();
-          return;
-        }
-        // A recorder failure has to end the take too — otherwise the fallback
-        // waits for the rest of a long clip before it can run.
-        finished.catch((error: unknown) => {
-          finish(error instanceof Error ? error : new Error('Recording failed.'));
-        });
-        video.onended = () => {
-          videoEnded = true;
-          finishIfReady();
-        };
-        video.onerror = () =>
-          finish(new Error('The attached video stopped playing during the bake.'));
-        if (avatar) {
-          avatar.onended = () => {
-            avatarEnded = true;
-            finishIfReady();
-          };
-          avatar.onerror = () =>
-            finish(new Error('The avatar stopped playing during the bake.'));
-        }
-      });
-    } catch (error) {
-      playbackError =
-        error instanceof Error ? error : new Error('The bake was interrupted.');
+    if (!playbackError) {
+      playbackStartedAt ??= performance.now();
+      if (!hasAvatar) audioMix.startNarration();
+      try {
+        await rendered;
+      } catch (error) {
+        playbackError =
+          error instanceof Error ? error : new Error('The bake was interrupted.');
+      }
     }
 
     video.pause();

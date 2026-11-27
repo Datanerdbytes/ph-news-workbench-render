@@ -187,7 +187,7 @@ export async function bakeNarratedSlideshow(
         let lastFrameAt = startedAt;
         let lastAvatarProgressAt = startedAt;
         let lastAvatarPlayhead = 0;
-        let avatarEnded = false;
+        let avatarEnded = avatar?.ended ?? false;
         let raf = 0;
         let settled = false;
         const finish = (error?: Error) => {
@@ -266,6 +266,7 @@ export async function bakeNarratedSlideshow(
         if (avatar) {
           avatar.onended = () => {
             avatarEnded = true;
+            audioMix.restoreOriginalAudio();
             finishIfReady();
           };
           avatar.onerror = () =>

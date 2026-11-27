@@ -54,9 +54,9 @@ export async function enqueueAvatarJob(input: EnqueueInput): Promise<AvatarJobRo
           INSERT INTO avatar_usage_daily
             (day, workspace_id, jobs, characters, seconds_reserved)
           -- Derive the accounting day from the database clock, not the app
-          -- clock: completion and release settle against created_at::date,
-          -- so a request that crosses UTC midnight between here and the
-          -- transaction must still reserve and settle on the same day.
+          -- clock: completion and release settle against the job's
+          -- created_at (also converted to UTC), so a request that crosses
+          -- UTC midnight must still reserve and settle on the same day.
           SELECT (now() AT TIME ZONE 'utc')::date, ${input.workspaceId}, 1, ${input.text.length}, ${estimatedSeconds}
           FROM active
           WHERE (SELECT count FROM active) < ${limits.maxActive}
@@ -176,7 +176,7 @@ export async function completeAvatarJob(
         AND worker_id = ${job.worker_id} AND attempts = ${job.attempts}
         AND status = ANY(${ACTIVE_AVATAR_STATUSES}::text[])
         AND cancel_requested = false
-      RETURNING workspace_id, created_at::date AS day, estimated_seconds
+      RETURNING workspace_id, (created_at AT TIME ZONE 'utc')::date AS day, estimated_seconds
     ), accounted AS (
       UPDATE avatar_usage_daily usage
       SET seconds_reserved = GREATEST(0, usage.seconds_reserved - finished.estimated_seconds),
@@ -213,7 +213,7 @@ export async function failAvatarJob(
       WHERE id = ${job.id} AND worker_id = ${job.worker_id}
         AND attempts = ${job.attempts}
         AND status = ANY(${ACTIVE_AVATAR_STATUSES}::text[])
-      RETURNING *, created_at::date AS day
+      RETURNING *, (created_at AT TIME ZONE 'utc')::date AS day
     ), released AS (
       UPDATE avatar_usage_daily usage
       SET seconds_reserved = GREATEST(0, usage.seconds_reserved - finished.estimated_seconds)
@@ -242,7 +242,7 @@ export async function requestAvatarCancellation(
       WHERE id = ${id} AND workspace_id = ${workspaceId}
         AND status = ANY(${ACTIVE_AVATAR_STATUSES}::text[])
         AND publish_state = 'ready'
-      RETURNING *, created_at::date AS day
+      RETURNING *, (created_at AT TIME ZONE 'utc')::date AS day
     ), released AS (
       UPDATE avatar_usage_daily usage
       SET seconds_reserved = GREATEST(0, usage.seconds_reserved - cancelled.estimated_seconds)
@@ -299,7 +299,7 @@ export async function recoverStaleAvatarJobs(): Promise<
           worker_id = NULL, updated_at = now()
       WHERE status IN ('submitting', 'running', 'downloading', 'finalizing')
         AND updated_at < now() - ${STALE_MINUTES} * interval '1 minute'
-      RETURNING *, created_at::date AS day
+      RETURNING *, (created_at AT TIME ZONE 'utc')::date AS day
     ), releasable AS (
       SELECT workspace_id, day, SUM(estimated_seconds)::int AS seconds
       FROM recovered
