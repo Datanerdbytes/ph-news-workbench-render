@@ -89,6 +89,26 @@ jobs:
     name: Unit & integration tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: phnews_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d phnews_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      wsproxy:
+        image: ghcr.io/neondatabase/wsproxy
+        env:
+          ALLOW_ADDR_REGEX: ".*"
+        ports:
+          - 5434:80
     steps:
       - uses: actions/checkout@v4
         with:
@@ -114,6 +134,20 @@ jobs:
       # The exclude list keeps the .next/standalone build copy out of the glob.
       - name: Unit and integration tests
         run: npx vitest run
+
+      - name: Prepare the database regression schema
+        run: node scripts/prepare-e2e-db.mjs
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@postgres:5432/phnews_test
+          OWNER_EMAIL: owner@example.test
+          OWNER_PASSWORD: database-test-password
+          BETTER_AUTH_SECRET: database-test-secret
+          NODE_OPTIONS: --import ./scripts/neon-local.mjs
+
+      - name: Database regression tests
+        run: npm run test:db
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@postgres:5432/phnews_test
 
       # The retry math is written in local time; this TZ swings two hours
       # across its DST shift (UTC+0 <-> UTC+2), so a floor or window computed
