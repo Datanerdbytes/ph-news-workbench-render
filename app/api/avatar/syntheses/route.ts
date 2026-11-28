@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { getAvatar, isAvatarId } from "@/lib/avatar/avatars";
+import {
+  getAvatar,
+  isAvatarId,
+  supportsAvatarTransparency,
+} from "@/lib/avatar/avatars";
 import { avatarLimits, estimateAvatarSeconds } from "@/lib/avatar/config";
 import {
   ACTIVE_AVATAR_STATUSES,
@@ -90,7 +94,7 @@ export async function POST(request: Request) {
     return failure(400, "invalid_transparency", "Choose a valid background setting.", correlationId);
   }
   const transparent = payload.transparent === true;
-  if (transparent && avatar.kind !== "video") {
+  if (transparent && !supportsAvatarTransparency(avatar)) {
     return failure(
       400,
       "transparency_unavailable",

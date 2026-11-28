@@ -70,7 +70,12 @@ import {
 } from '@/lib/format';
 import { stageUpload } from '@/lib/stage-client';
 import { deleteStagedBlob } from '@/lib/blob-cleanup';
-import { DEFAULT_AVATAR_ID, getAvatar, type AvatarId } from '@/lib/avatar/avatars';
+import {
+  DEFAULT_AVATAR_ID,
+  getAvatar,
+  supportsAvatarTransparency,
+  type AvatarId,
+} from '@/lib/avatar/avatars';
 import {
   ACTIVE_AVATAR_STATUSES,
   avatarMediaUrl,
@@ -507,7 +512,9 @@ function ComposeWorkspace() {
 
   function changeAvatar(nextAvatarId: AvatarId) {
     setAvatarId(nextAvatarId);
-    if (getAvatar(nextAvatarId).kind !== 'video') setAvatarTransparent(false);
+    if (!supportsAvatarTransparency(getAvatar(nextAvatarId))) {
+      setAvatarTransparent(false);
+    }
   }
 
   async function generateAvatar() {

@@ -4,7 +4,11 @@ import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { buildTtsSsml } from "@/lib/tts/azure";
 import type { TtsVoiceId } from "@/lib/tts/voices";
-import { getAvatar, type AvatarId } from "./avatars";
+import {
+  getAvatar,
+  supportsAvatarTransparency,
+  type AvatarId,
+} from "./avatars";
 import { hasAvatarHeader } from "./output";
 import type { AvatarOutputFormat } from "./jobs";
 import {
@@ -201,7 +205,7 @@ export async function submitAvatarSynthesis(input: {
       false,
     );
   }
-  if (input.transparent && avatar.kind !== "video") {
+  if (input.transparent && !supportsAvatarTransparency(avatar)) {
     throw new AvatarError(
       400,
       "transparency_unavailable",
@@ -214,7 +218,12 @@ export async function submitAvatarSynthesis(input: {
   const avatarConfig = {
     talkingAvatarCharacter: avatar.character,
     ...(avatar.kind === "video"
-      ? { talkingAvatarStyle: avatar.style, customized: false }
+      ? {
+          ...(avatar.style === null
+            ? {}
+            : { talkingAvatarStyle: avatar.style }),
+          customized: false,
+        }
       : { photoAvatarBaseModel: avatar.baseModel }),
     videoFormat: input.transparent ? "webm" : "mp4",
     videoCodec: input.transparent ? "vp9" : "h264",

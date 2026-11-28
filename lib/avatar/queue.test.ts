@@ -202,6 +202,31 @@ describe("enqueueAvatarJob", () => {
     expect(queries[1].values.slice(-2)).toEqual(["webm", true]);
   });
 
+  it("persists style-less full-body avatars without unsupported alpha", async () => {
+    sqlMock.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => ({
+      strings,
+      values,
+    }));
+
+    await enqueueAvatarJob({
+      workspaceId: "ws-1",
+      userId: "user-1",
+      avatarId: "rowan",
+      voiceId: "en-PH-RosaNeural",
+      speed: 1,
+      text: "Hello",
+      transparent: true,
+    });
+
+    const queries = transactionMock.mock.calls[0][0] as Array<{
+      strings: TemplateStringsArray;
+      values: unknown[];
+    }>;
+    expect(queries[1].values).toContain("rowan");
+    expect(queries[1].values).toContain(null);
+    expect(queries[1].values.slice(-2)).toEqual(["mp4", false]);
+  });
+
   it("returns a quota error when the conditional usage insert reserves nothing", async () => {
     transactionMock.mockResolvedValue([[], []]);
 

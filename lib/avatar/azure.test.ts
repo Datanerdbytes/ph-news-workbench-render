@@ -149,6 +149,29 @@ describe("submitAvatarSynthesis", () => {
       },
     },
     {
+      avatarId: "rowan" as const,
+      avatarConfig: {
+        talkingAvatarCharacter: "rowan",
+        customized: false,
+        videoFormat: "mp4",
+        videoCodec: "h264",
+        subtitleType: "none",
+        bitrateKbps: 2000,
+      },
+    },
+    {
+      avatarId: "lisa-business-sitting" as const,
+      avatarConfig: {
+        talkingAvatarCharacter: "lisa",
+        talkingAvatarStyle: "business-sitting",
+        customized: false,
+        videoFormat: "mp4",
+        videoCodec: "h264",
+        subtitleType: "none",
+        bitrateKbps: 2000,
+      },
+    },
+    {
       avatarId: "adrian" as const,
       avatarConfig: {
         talkingAvatarCharacter: "adrian",
@@ -227,15 +250,18 @@ describe("submitAvatarSynthesis", () => {
     });
   });
 
-  it("rejects transparency for a photo avatar before contacting Azure", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
+  it.each(["anika", "rowan", "harry-business"] as const)(
+    "rejects transparency for %s before contacting Azure",
+    async (avatarId) => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
 
-    await expect(
-      submitAvatarSynthesis({ ...INPUT, avatarId: "anika", transparent: true }),
-    ).rejects.toMatchObject({ code: "transparency_unavailable" });
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
+      await expect(
+        submitAvatarSynthesis({ ...INPUT, avatarId, transparent: true }),
+      ).rejects.toMatchObject({ code: "transparency_unavailable" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("rejects real-time-only preview avatars before contacting Azure", async () => {
     const fetchMock = vi.fn();
