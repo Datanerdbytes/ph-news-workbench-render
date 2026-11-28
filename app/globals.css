@@ -7,6 +7,7 @@
 @theme inline {
   --font-sans: var(--font-manrope), ui-sans-serif, system-ui, sans-serif;
   --font-heading: var(--font-manrope), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-bricolage), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, monospace;
 
   --color-background: var(--background);
@@ -367,6 +368,479 @@ html[data-theme="forest-amber"] {
 
   .text-pretty {
     text-wrap: pretty;
+  }
+
+  .compose-page {
+    --compose-desk: #eef1f5;
+    --compose-paper: #ffffff;
+    --compose-ink: #151b26;
+    --compose-accent: #2356d8;
+    --compose-accent-soft: #eaf0ff;
+    --compose-mark: #f2d16b;
+    --compose-line: #d7dde6;
+    --compose-muted: #596477;
+    background: var(--compose-desk);
+    color: var(--compose-ink);
+  }
+
+  .compose-page button {
+    min-height: 2.75rem;
+  }
+
+  .compose-page button[aria-label] {
+    min-width: 2.75rem;
+  }
+
+  .compose-page button:disabled {
+    cursor: not-allowed;
+  }
+
+  .compose-page button:focus-visible,
+  .compose-page a:focus-visible,
+  .compose-page input:focus-visible,
+  .compose-page select:focus-visible,
+  .compose-page summary:focus-visible {
+    outline: 2px solid var(--compose-accent);
+    outline-offset: 3px;
+  }
+
+  .compose-header {
+    background: var(--compose-paper);
+    border-bottom: 1px solid var(--compose-line);
+  }
+
+  .compose-back {
+    display: inline-flex;
+    min-height: 2.75rem;
+    align-items: center;
+    gap: 0.5rem;
+    border: 1px solid var(--compose-line);
+    border-radius: 0.625rem;
+    padding: 0 0.75rem;
+    color: var(--compose-muted);
+    font-size: 0.75rem;
+    font-weight: 700;
+    transition:
+      border-color 160ms ease,
+      color 160ms ease,
+      background-color 160ms ease;
+  }
+
+  .compose-back:hover {
+    border-color: var(--compose-accent);
+    background: var(--compose-accent-soft);
+    color: var(--compose-accent);
+  }
+
+  .compose-title {
+    font-family: var(--font-display);
+    font-size: clamp(1.25rem, 2vw, 1.6rem);
+    font-weight: 650;
+    line-height: 1.05;
+    letter-spacing: -0.035em;
+  }
+
+  .compose-subtitle {
+    max-width: 48rem;
+    overflow: hidden;
+    color: var(--compose-muted);
+    font-size: 0.75rem;
+    line-height: 1.4;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .compose-scroll {
+    scroll-padding-top: 1.5rem;
+    scroll-padding-bottom: 2rem;
+  }
+
+  .compose-source {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid #263146;
+    border-radius: 1.125rem;
+    background: var(--compose-ink);
+    box-shadow: 0 1.25rem 2.5rem -1.75rem rgb(21 27 38 / 55%);
+    color: #ffffff;
+  }
+
+  .compose-source::before {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 0.375rem;
+    background: var(--compose-accent);
+    content: "";
+  }
+
+  .compose-source :focus-visible {
+    outline-color: #91b2ff;
+  }
+
+  .compose-source__top {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.875rem clamp(1rem, 3vw, 1.75rem);
+    border-bottom: 1px solid rgb(255 255 255 / 12%);
+  }
+
+  .compose-source__label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #dce5f5;
+    font-size: 0.75rem;
+    font-weight: 700;
+  }
+
+  .compose-source__link {
+    display: inline-flex;
+    min-height: 2.75rem;
+    align-items: center;
+    gap: 0.375rem;
+    margin-left: auto;
+    border-radius: 0.5rem;
+    color: #dce5f5;
+    font-size: 0.75rem;
+    font-weight: 650;
+    transition: color 160ms ease;
+  }
+
+  .compose-source__link:hover {
+    color: #ffffff;
+  }
+
+  .compose-source__body {
+    padding: clamp(1.25rem, 4vw, 2.25rem) clamp(1rem, 4vw, 2.5rem);
+  }
+
+  .compose-source__title {
+    max-width: 24ch;
+    font-family: var(--font-display);
+    font-size: clamp(1.8rem, 4vw, 2.85rem);
+    font-weight: 620;
+    line-height: 1.02;
+    letter-spacing: -0.045em;
+    text-wrap: balance;
+  }
+
+  .compose-source__summary {
+    max-width: 68ch;
+    margin-top: 1rem;
+    color: #c8d2e2;
+    font-size: 0.9375rem;
+    line-height: 1.7;
+  }
+
+  .compose-source__meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.875rem;
+    margin-top: 1.25rem;
+    color: #aebad0;
+    font-size: 0.75rem;
+    line-height: 1.5;
+  }
+
+  .compose-source__source {
+    color: #e8edf6;
+    font-weight: 700;
+  }
+
+  .compose-source__meta > span + span {
+    padding-left: 0.875rem;
+    border-left: 1px solid rgb(255 255 255 / 18%);
+  }
+
+  .compose-header .uppercase {
+    letter-spacing: 0;
+    text-transform: none;
+  }
+
+  .compose-proof {
+    overflow: hidden;
+    border: 1px solid var(--compose-line);
+    border-radius: 1.125rem;
+    background: var(--compose-paper);
+    box-shadow:
+      0 1px 2px rgb(21 27 38 / 4%),
+      0 1.5rem 3rem -2rem rgb(21 27 38 / 24%);
+  }
+
+  .compose-proof__header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem 1rem;
+    padding: 1rem clamp(1rem, 3vw, 1.5rem);
+    border-bottom: 1px solid var(--compose-line);
+  }
+
+  .compose-proof__heading {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    font-family: var(--font-display);
+    font-size: 1.125rem;
+    font-weight: 650;
+    letter-spacing: -0.025em;
+  }
+
+  .compose-proof__mark {
+    display: grid;
+    width: 2rem;
+    height: 2rem;
+    place-items: center;
+    border-radius: 0.5rem;
+    background: var(--compose-accent-soft);
+    color: var(--compose-accent);
+  }
+
+  .compose-language {
+    display: inline-flex;
+    gap: 0.25rem;
+    margin-left: auto;
+    padding: 0.25rem;
+    border: 1px solid var(--compose-line);
+    border-radius: 999px;
+    background: var(--compose-desk);
+  }
+
+  .compose-language button {
+    min-height: 2.75rem;
+    padding: 0 0.875rem;
+    border-radius: 999px;
+    color: var(--compose-muted);
+    font-size: 0.75rem;
+    font-weight: 700;
+    transition:
+      background-color 160ms ease,
+      color 160ms ease,
+      box-shadow 160ms ease;
+  }
+
+  .compose-language button:hover {
+    color: var(--compose-ink);
+  }
+
+  .compose-language button:disabled {
+    opacity: 0.5;
+  }
+
+  .compose-language button[aria-pressed="true"] {
+    background: var(--compose-mark);
+    box-shadow: 0 1px 2px rgb(21 27 38 / 14%);
+    color: var(--compose-ink);
+  }
+
+  .compose-counts {
+    color: var(--compose-muted);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .compose-proof__progress {
+    height: 0.1875rem;
+    overflow: hidden;
+    background: var(--compose-accent-soft);
+  }
+
+  .compose-proof__progress span {
+    display: block;
+    width: 33%;
+    height: 100%;
+    background: var(--compose-accent);
+    animation: compose-drafting 1.2s ease-in-out infinite;
+  }
+
+  .compose-proof__body {
+    padding: clamp(1rem, 3vw, 1.5rem);
+  }
+
+  .compose-proof__writing {
+    padding: clamp(1rem, 3vw, 1.5rem);
+    border: 1px solid var(--compose-line);
+    border-radius: 0.875rem;
+    background: #fbfcfe;
+    transition:
+      border-color 160ms ease,
+      box-shadow 160ms ease;
+  }
+
+  .compose-proof__writing:focus-within {
+    border-color: var(--compose-accent);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--compose-accent) 16%, transparent);
+  }
+
+  .compose-proof textarea:focus-visible {
+    outline: none;
+  }
+
+  .compose-production {
+    margin-top: 1.25rem;
+    padding: 1rem;
+    border: 1px solid var(--compose-line);
+    border-radius: 0.875rem;
+    background: var(--compose-desk);
+  }
+
+  .compose-production__label {
+    margin-bottom: 0.75rem;
+    color: var(--compose-muted);
+    font-size: 0.75rem;
+    font-weight: 700;
+  }
+
+  .compose-production summary,
+  .compose-production input[type="range"] {
+    min-height: 2.75rem;
+  }
+
+  .compose-media {
+    padding: 1rem clamp(1rem, 3vw, 1.5rem);
+    border-top: 1px solid var(--compose-line);
+    background: #fbfcfe;
+  }
+
+  .compose-media__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.75rem;
+    color: var(--compose-muted);
+    font-size: 0.75rem;
+    font-weight: 700;
+  }
+
+  .compose-remove {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+
+  .compose-actions {
+    padding: 1rem clamp(1rem, 3vw, 1.5rem);
+    border-top: 1px solid var(--compose-line);
+    background: var(--compose-paper);
+  }
+
+  .compose-actions__buttons {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.5rem;
+  }
+
+  .compose-actions__buttons > button {
+    min-height: 2.75rem;
+  }
+
+  .compose-schedule {
+    width: 100%;
+    margin-top: 0.75rem;
+    padding: 0.875rem;
+    border: 1px solid color-mix(in oklab, var(--compose-accent) 35%, var(--compose-line));
+    border-radius: 0.875rem;
+    background: var(--compose-accent-soft);
+  }
+
+  .compose-schedule input {
+    min-height: 2.75rem;
+  }
+
+  .compose-hint {
+    color: var(--compose-muted);
+    font-size: 0.75rem;
+    line-height: 1.5;
+  }
+
+  .compose-preview {
+    min-width: 0;
+  }
+
+  .compose-preview__heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.75rem;
+    padding: 0 0.25rem;
+    color: var(--compose-muted);
+    font-size: 0.75rem;
+    font-weight: 700;
+  }
+
+  .compose-preview__heading span:last-child {
+    color: var(--compose-accent);
+  }
+
+  .compose-preview > section,
+  .compose-preview > div {
+    border-color: var(--compose-line);
+    border-radius: 1rem;
+    box-shadow:
+      0 1px 2px rgb(21 27 38 / 4%),
+      0 1.25rem 2.5rem -2rem rgb(21 27 38 / 28%);
+  }
+
+  .compose-preview .eyebrow,
+  .compose-preview .uppercase {
+    font-size: 0.6875rem;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+
+  .compose-empty {
+    display: grid;
+    min-height: 55vh;
+    place-items: center;
+    border: 1px solid var(--compose-line);
+    border-radius: 1.125rem;
+    background: var(--compose-paper);
+    box-shadow: 0 1.25rem 3rem -2rem rgb(21 27 38 / 24%);
+  }
+
+  @keyframes compose-drafting {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(400%);
+    }
+  }
+
+  @media (min-width: 1280px) {
+    .compose-preview {
+      position: sticky;
+      top: 1.5rem;
+    }
+  }
+
+  @media (max-width: 639px) {
+    .compose-source__body {
+      padding-right: 1.25rem;
+      padding-left: 1.5rem;
+    }
+
+    .compose-language {
+      width: 100%;
+      margin-left: 0;
+    }
+
+    .compose-language button {
+      flex: 1;
+    }
+
+    .compose-counts {
+      width: 100%;
+    }
+
+    .compose-actions__buttons > button {
+      flex: 1 1 calc(50% - 0.5rem);
+    }
   }
 }
 

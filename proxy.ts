@@ -36,6 +36,6 @@ export const config = {
   matcher: [
     // tiktok1evuq…txt: TikTok's site-verification signature file must be
     // publicly fetchable or URL-prefix verification fails.
-    "/((?!_next/static|_next/image|favicon.ico|api/reels/prepare|api/videos|api/stories|api/stage|tiktok1evuqUunyZ47vScjZKHVD3zQksvJdTCA\\.txt).*)",
+    "/((?!_next/static|_next/image|_next/hmr|_next/webpack-hmr|favicon.ico|api/reels/prepare|api/videos|api/stories|api/stage|tiktok1evuqUunyZ47vScjZKHVD3zQksvJdTCA\\.txt).*)",
   ],
 };
