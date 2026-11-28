@@ -12,7 +12,6 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   ArrowLeft,
-  ArrowUpRight,
   CalendarClock,
   Copy,
   ImagePlus,
@@ -59,10 +58,8 @@ import { Button } from '@/components/ui/button';
 import { ErrorState } from '@/components/ui/error-state';
 import {
   formatCost,
-  formatDomain,
   imageSrc,
   stripMarkdown,
-  timeAgo,
   wordCount,
 } from '@/lib/format';
 import { stageUpload } from '@/lib/stage-client';
@@ -1718,46 +1715,7 @@ function ComposeWorkspace() {
             ) : (
               <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px] xl:items-start">
                 <section
-                  className="compose-source xl:col-start-1 xl:row-start-1"
-                  aria-labelledby="source-story-title"
-                >
-                  <div className="compose-source__top">
-                    <span className="compose-source__label">
-                      <Newspaper className="size-4" aria-hidden />
-                      Source story
-                    </span>
-                    <a
-                      href={selected.link}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="compose-source__link"
-                    >
-                      Read original
-                      <ArrowUpRight className="size-4" aria-hidden />
-                    </a>
-                  </div>
-                  <div className="compose-source__body">
-                    <h2 id="source-story-title" className="compose-source__title">
-                      {selected.title}
-                    </h2>
-                    {selected.summary && (
-                      <p className="compose-source__summary">{selected.summary}</p>
-                    )}
-                    <div className="compose-source__meta">
-                      <span className="compose-source__source">
-                        {selected.feed_title?.trim() || formatDomain(selected.link)}
-                      </span>
-                      <span>
-                        {selected.created_at
-                          ? `Ingested ${timeAgo(selected.created_at)}`
-                          : 'Latest ingest'}
-                      </span>
-                    </div>
-                  </div>
-                </section>
-
-                <section
-                  className="compose-proof xl:col-start-1 xl:row-start-2"
+                  className="compose-proof xl:col-start-1 xl:row-start-1"
                   aria-labelledby="draft-heading"
                 >
                   <div className="compose-proof__header">
@@ -2365,7 +2323,7 @@ function ComposeWorkspace() {
                 </section>
 
                 <aside
-                  className="compose-preview xl:col-start-2 xl:row-span-2"
+                  className="compose-preview xl:col-start-2"
                   aria-label="Publication preview"
                 >
                   <div className="compose-preview__heading">

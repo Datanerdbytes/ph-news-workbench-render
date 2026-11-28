@@ -263,9 +263,9 @@ function deferredResponse() {
 
 async function openComposer() {
   render(<ComposePage />);
-  // The header h1 is always "Compose"; the selected story title renders as
-  // the level-2 source-story heading.
-  await screen.findByRole("heading", { name: "Test story", level: 2 });
+  // The selected story renders straight into the draft card; the draft
+  // heading is the marker that a story is loaded.
+  await screen.findByRole("heading", { name: "Draft" });
 }
 
 beforeEach(() => {
