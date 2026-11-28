@@ -41,7 +41,10 @@ export function FacebookPreview({
   connected = false,
 }: FacebookPreviewProps) {
   return (
-    <section className="overflow-hidden rounded-xl border border-border/80 bg-card paper-shadow-sm">
+    <section
+      aria-label="Facebook post preview"
+      className="overflow-hidden rounded-xl border border-border/80 bg-card paper-shadow-sm"
+    >
       <div className="flex items-center justify-between gap-3 border-b border-border/70 px-4 py-3">
         <span className="eyebrow text-muted-foreground">Facebook preview</span>
         <span

@@ -360,7 +360,7 @@ export function FilePicker({
       <FieldLabel htmlFor={id} hint={hint}>
         File
       </FieldLabel>
-      <div className="mt-1.5 flex items-center gap-2 rounded-lg border border-dashed border-border bg-background/60 px-2 py-1.5">
+      <div className="mt-1.5 flex items-center gap-2 rounded-lg border border-dashed border-border bg-background/60 px-2 py-1.5 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30">
         <label
           htmlFor={id}
           className={cn(
@@ -379,6 +379,7 @@ export function FilePicker({
           accept={accept}
           disabled={disabled}
           className="sr-only"
+          aria-label={file ? file.name : label}
           aria-invalid={Boolean(pickError)}
           aria-describedby={pickError ? `${id}-error` : undefined}
           onChange={(event) => {
