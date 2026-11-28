@@ -228,6 +228,12 @@ jobs:
           # Layer cache shared with every other job and run on this branch.
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # The runner stage must never come from the cache: its apt layer
+          # carries the OS security updates, and a layer cached before a CVE
+          # was published would ship the vulnerable library forever — exactly
+          # what happened with libzstd1/CVE-2026-124851. deps/builder stay
+          # cached; re-running apt here costs under a minute.
+          no-cache-filters: runner
           build-args: |
             NEXT_PUBLIC_STORAGE_DRIVER=${{ vars.NEXT_PUBLIC_STORAGE_DRIVER || 'blob' }}
             NEXT_PUBLIC_BLOB_ROOT=${{ vars.NEXT_PUBLIC_BLOB_ROOT || '' }}
@@ -242,6 +248,9 @@ jobs:
           load: true
           tags: ${{ env.IMAGE }}:${{ env.IMAGE_SHA }}
           cache-from: type=gha
+          # Same reasoning as the publish build above: the runner's apt layer
+          # must be rebuilt fresh so OS security updates are always applied.
+          no-cache-filters: runner
           build-args: |
             NEXT_PUBLIC_STORAGE_DRIVER=${{ vars.NEXT_PUBLIC_STORAGE_DRIVER || 'blob' }}
             NEXT_PUBLIC_BLOB_ROOT=${{ vars.NEXT_PUBLIC_BLOB_ROOT || '' }}

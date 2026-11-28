@@ -4,6 +4,10 @@ import {
   type TtsSynthesisResult,
 } from "./shared";
 import {
+  ANGELO_NEWS_VOICE_ID,
+  buildAngeloNewsSSML,
+} from "./angelo";
+import {
   getTtsVoice,
   MAX_TTS_SPEED,
   MIN_TTS_SPEED,
@@ -14,7 +18,10 @@ export { TtsError } from "./shared";
 export type { TtsSynthesisResult } from "./shared";
 
 const TIMEOUT_MS = 60_000;
-const OUTPUT_FORMAT = "audio-48khz-192kbitrate-mono-mp3";
+// The news-anchor voice gets the broadcast bitrate; every other voice keeps
+// the original high-fidelity format.
+const BROADCAST_OUTPUT_FORMAT = "audio-24khz-96kbitrate-mono-mp3";
+const DEFAULT_OUTPUT_FORMAT = "audio-48khz-192kbitrate-mono-mp3";
 
 function speechEndpoint(): { key: string; url: string } {
   const key = process.env.AZURE_SPEECH_KEY?.trim();
@@ -113,7 +120,15 @@ export async function synthesizeSpeech(input: {
   }
 
   const { key, url } = speechEndpoint();
-  const ssml = buildTtsSsml(input.text, input.voiceId, input.speed);
+  // Only the news-anchor voice gets the broadcast SSML treatment; every other
+  // voice keeps the generic per-voice markup.
+  const isNewsAnchor = input.voiceId === ANGELO_NEWS_VOICE_ID;
+  const ssml = isNewsAnchor
+    ? buildAngeloNewsSSML(input.text, { speed: input.speed })
+    : buildTtsSsml(input.text, input.voiceId, input.speed);
+  const outputFormat = isNewsAnchor
+    ? BROADCAST_OUTPUT_FORMAT
+    : DEFAULT_OUTPUT_FORMAT;
   await reserveTtsQuota(input.workspaceId, input.text.length);
 
   let response: Response;
@@ -123,7 +138,7 @@ export async function synthesizeSpeech(input: {
       headers: {
         "Content-Type": "application/ssml+xml",
         "Ocp-Apim-Subscription-Key": key,
-        "X-Microsoft-OutputFormat": OUTPUT_FORMAT,
+        "X-Microsoft-OutputFormat": outputFormat,
         "User-Agent": "PH-News-Workbench/1.0",
       },
       body: ssml,

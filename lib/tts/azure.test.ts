@@ -63,17 +63,57 @@ describe("synthesizeSpeech", () => {
         method: "POST",
         headers: expect.objectContaining({
           "Ocp-Apim-Subscription-Key": "key-123",
+          "Content-Type": "application/ssml+xml",
           "X-Microsoft-OutputFormat": "audio-48khz-192kbitrate-mono-mp3",
         }),
         body: expect.stringContaining("Hello there."),
       }),
     );
+    const body = fetchMock.mock.calls[0][1].body as string;
+    expect(body).toContain('<voice name="en-PH-RosaNeural">');
+    expect(body).not.toContain("fil-PH-AngeloNeural");
+    expect(body).not.toContain("<break");
     const quotaCall = sqlMock.mock.calls[0];
     expect(quotaCall[0].join("?")).toContain("tts_usage_daily");
     expect(quotaCall[0].join("?")).toContain("VALUES (?, ?, 1, ?)");
     expect(quotaCall[1]).toEqual(expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
     expect(quotaCall[2]).toBe("ws1");
     expect(quotaCall.slice(1)).toContain(12);
+  });
+
+  it("applies the news-anchor SSML and broadcast format to fil-PH-AngeloNeural", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(new Uint8Array([1, 2, 3]), {
+        status: 200,
+        headers: { "content-type": "audio/mpeg" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await synthesizeSpeech({
+      text: "Ulat ni Ana:\n\nNagsalita ang MMDA.",
+      voiceId: "fil-PH-AngeloNeural",
+      speed: 1,
+      workspaceId: "ws1",
+      correlationId: "corr-6",
+    });
+
+    expect(result.voiceId).toBe("fil-PH-AngeloNeural");
+    const body = fetchMock.mock.calls[0][1].body as string;
+    expect(body).toContain('<voice name="fil-PH-AngeloNeural">');
+    expect(body).toContain('rate="+8%" pitch="-3%" volume="+10%"');
+    expect(body).toContain("M-M-D-A");
+    expect(body).toContain('<break time="450ms"/>');
+    expect(body).toContain('Ulat ni Ana: <break time="250ms"/>');
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://speech.test/cognitiveservices/v1",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "X-Microsoft-OutputFormat": "audio-24khz-96kbitrate-mono-mp3",
+        }),
+      }),
+    );
+    expect(sqlMock.mock.calls[0][0].join("?")).toContain("tts_usage_daily");
   });
 
   it("does not call the provider when the daily quota is full", async () => {

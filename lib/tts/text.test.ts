@@ -11,8 +11,14 @@ describe("normalizeSpeechText", () => {
   });
 
   it("collapses whitespace and trims the narration", () => {
+    expect(normalizeSpeechText("  First   line.\n  Second   line.  ")).toBe(
+      "First line.\nSecond line.",
+    );
+  });
+
+  it("keeps paragraph breaks for the broadcast pauses", () => {
     expect(normalizeSpeechText("  First line.\n\n  Second   line.  ")).toBe(
-      "First line. Second line.",
+      "First line.\n\nSecond line.",
     );
   });
 });
