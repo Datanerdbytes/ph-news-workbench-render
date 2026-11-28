@@ -11,6 +11,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TtsProviderId } from "@/lib/tts/providers";
 import type { TtsVoiceId } from "@/lib/tts/voices";
+import { bakeAndFinalizeNarratedSlideshow } from "@/lib/videos/slideshow";
 
 vi.mock("next/link", () => ({
   default: ({
@@ -83,6 +84,32 @@ vi.mock("@/components/videos/video-animation-picker", () => ({
 }));
 vi.mock("@/components/videos/video-animation-overlay", () => ({
   VideoAnimationOverlay: () => null,
+}));
+vi.mock("@/components/compose/slideshow-style-picker", () => ({
+  SlideshowStylePicker: ({
+    presetId,
+    onSelect,
+  }: {
+    presetId: string;
+    onSelect: (presetId: string) => void;
+  }) => (
+    <section aria-label="Slideshow animation">
+      <button
+        type="button"
+        aria-pressed={presetId === "straight"}
+        onClick={() => onSelect("straight")}
+      >
+        Straight cuts
+      </button>
+      <button
+        type="button"
+        aria-pressed={presetId === "carousel"}
+        onClick={() => onSelect("carousel")}
+      >
+        Carousel
+      </button>
+    </section>
+  ),
 }));
 vi.mock("@/lib/avatar/use-avatar-job-polling", () => ({
   useAvatarJobPolling: vi.fn(),
@@ -230,18 +257,22 @@ function audioResponse() {
   });
 }
 
-async function attachImage() {
+async function attachImage(count = 1) {
   const input = document.querySelector<HTMLInputElement>(
     'input[type="file"][accept="image/jpeg,image/png,image/webp"]',
   );
   expect(input).not.toBeNull();
   Object.defineProperty(input, "files", {
     configurable: true,
-    value: [new File(["image"], "story.png", { type: "image/png" })],
+    value: Array.from(
+      { length: count },
+      (_, index) =>
+        new File(["image"], `story-${index + 1}.png`, { type: "image/png" }),
+    ),
   });
   fireEvent.change(input!);
   await waitFor(() =>
-    expect(screen.getByAltText("Attachment 1")).toBeInTheDocument(),
+    expect(screen.getByAltText(`Attachment ${count}`)).toBeInTheDocument(),
   );
 }
 
@@ -263,9 +294,9 @@ function deferredResponse() {
 
 async function openComposer() {
   render(<ComposePage />);
-  // The header h1 is always "Compose"; the selected story title renders as
-  // the level-2 source-story heading.
-  await screen.findByRole("heading", { name: "Test story", level: 2 });
+  // The selected story renders straight into the draft card; the draft
+  // heading is the marker that a story is loaded.
+  await screen.findByRole("heading", { name: "Draft" });
 }
 
 beforeEach(() => {
@@ -746,5 +777,44 @@ describe("ComposePage voice-over settings", () => {
     );
     expect(toastMock.error).not.toHaveBeenCalled();
     expect(revokeObjectURLMock).not.toHaveBeenCalledWith("blob:narration");
+  });
+});
+
+describe("ComposePage slideshow animation preset", () => {
+  it("publishes multiple photos with the selected carousel preset", async () => {
+    await openComposer();
+    fireEvent.change(screen.getByRole("textbox", { name: "Draft" }), {
+      target: { value: "A draft for the carousel." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Voice-over" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("voice-over-loading")).toHaveTextContent("false"),
+    );
+
+    // The picker is gated to several photos plus an active narration mode.
+    expect(
+      screen.queryByRole("region", { name: "Slideshow animation" }),
+    ).toBeNull();
+    await attachImage(2);
+    expect(
+      screen.getByRole("region", { name: "Slideshow animation" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Carousel" }));
+
+    const generate = screen.getByRole("button", { name: "Generate voice-over" });
+    await waitFor(() => expect(generate).toBeEnabled());
+    fireEvent.click(generate);
+    await waitFor(() =>
+      expect(screen.getByTestId("voice-over-ready")).toHaveTextContent("true"),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Publish" }));
+    await waitFor(() =>
+      expect(bakeAndFinalizeNarratedSlideshow).toHaveBeenCalled(),
+    );
+    expect(bakeAndFinalizeNarratedSlideshow).toHaveBeenCalledWith(
+      expect.objectContaining({ presetId: "carousel" }),
+    );
   });
 });

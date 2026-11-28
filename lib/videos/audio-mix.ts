@@ -4,6 +4,8 @@ const AUDIO_START_TIMEOUT_MS = 3000;
 export type AudioMix = {
   destination: MediaStreamAudioDestinationNode;
   duration: number;
+  /** Decoded narration samples — overlays (e.g. the waveform) derive peaks from it. */
+  narrationBuffer: AudioBuffer | null;
   startNarration: () => void;
   startAvatar: () => void;
   restoreOriginalAudio: () => void;
@@ -108,6 +110,7 @@ export async function createAudioMix(
   return {
     destination,
     duration: narrationBuffer?.duration ?? avatarDuration,
+    narrationBuffer: narrationBuffer ?? null,
     startNarration: () => {
       if (narrationStarted) return;
       narrationSource?.start();

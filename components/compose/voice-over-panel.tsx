@@ -1,5 +1,6 @@
 "use client";
 
+import gsap from "gsap";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -8,6 +9,7 @@ import {
   RefreshCw,
   Trash2,
 } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   providerSupportsLanguage,
@@ -17,6 +19,7 @@ import {
   type TtsProviderId,
 } from "@/lib/tts/providers";
 import { MAX_TTS_SPEED, MIN_TTS_SPEED } from "@/lib/tts/voices";
+import { computeNarrationPeaks } from "@/lib/videos/waveform";
 import { cn } from "@/lib/utils";
 
 export type VoiceOverAudio = {
@@ -54,6 +57,9 @@ type VoiceOverPanelProps = {
   stale: boolean;
   hasMedia: boolean;
   hasText: boolean;
+  hasPhotos?: boolean;
+  showWaveform?: boolean;
+  onShowWaveformChange?: (show: boolean) => void;
   disabled: boolean;
   onGenerate: () => void;
   onRemove: () => void;
@@ -84,6 +90,9 @@ export function VoiceOverPanel({
   stale,
   hasMedia,
   hasText,
+  hasPhotos = false,
+  showWaveform = false,
+  onShowWaveformChange = () => {},
   disabled,
   onGenerate,
   onRemove,
@@ -328,6 +337,45 @@ export function VoiceOverPanel({
             />
           ) : null}
 
+          {hasPhotos ? (
+            <div className="space-y-2">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={showWaveform}
+                onClick={() => onShowWaveformChange(!showWaveform)}
+                disabled={disabled}
+                className="flex min-h-11 w-full items-center justify-between gap-2 rounded-md text-left text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              >
+                <span className="flex items-center gap-2">
+                  <AudioLines
+                    className="h-3.5 w-3.5 text-primary"
+                    aria-hidden="true"
+                  />
+                  Show waveform on photos
+                </span>
+                <span
+                  className={cn(
+                    "rounded-full px-2 py-0.5 text-[11px] font-medium",
+                    showWaveform
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-muted-foreground",
+                  )}
+                >
+                  {showWaveform ? "On" : "Off"}
+                </span>
+              </button>
+              <p className="text-[11px] leading-4 text-muted-foreground">
+                {showWaveform
+                  ? "Bakes an animated waveform over the photos so viewers can tell the still image has narration."
+                  : "The photos bake without the waveform indicator."}
+              </p>
+              {showWaveform && audio ? (
+                <WaveformPanelPreview blob={audio.blob} duration={audio.duration} />
+              ) : null}
+            </div>
+          ) : null}
+
           <p
             role="status"
             aria-live="polite"
@@ -348,6 +396,98 @@ export function VoiceOverPanel({
           </p>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+const WAVEFORM_PREVIEW_BARS = 28;
+
+/**
+ * Live GSAP preview of the waveform pill the photo bake draws. Peaks come
+ * from the real TTS audio; the timeline loops the same pop-in + dance the
+ * deterministic bake draw renders per frame (see lib/videos/waveform.ts).
+ */
+function WaveformPanelPreview({
+  blob,
+  duration,
+}: {
+  blob: Blob;
+  duration: number;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [peaks, setPeaks] = useState<number[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let context: AudioContext | undefined;
+    setPeaks(null);
+    const decode = async () => {
+      try {
+        context = new AudioContext();
+        const buffer = await context.decodeAudioData(await blob.arrayBuffer());
+        if (cancelled) return;
+        setPeaks(computeNarrationPeaks(buffer, WAVEFORM_PREVIEW_BARS));
+      } catch {
+        if (!cancelled) setPeaks(null);
+      } finally {
+        await context?.close().catch(() => {});
+      }
+    };
+    void decode();
+    return () => {
+      cancelled = true;
+    };
+  }, [blob]);
+
+  useLayoutEffect(() => {
+    if (!peaks || !containerRef.current) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const bars =
+      containerRef.current.querySelectorAll<HTMLElement>("[data-bar]");
+    const scope = gsap.context(() => {
+      gsap.from(bars, {
+        scaleY: 0.12,
+        opacity: 0.25,
+        transformOrigin: "50% 50%",
+        duration: 0.45,
+        ease: "power2.out",
+        stagger: 0.015,
+      });
+      bars.forEach((bar, index) => {
+        const peak = Math.max(0.2, peaks[index] ?? 0.4);
+        gsap.to(bar, {
+          scaleY: Math.max(0.15, peak * 0.55),
+          duration: 0.5 + (index % 5) * 0.18,
+          ease: "sine.inOut",
+          yoyo: true,
+          repeat: -1,
+          delay: 0.9,
+        });
+      });
+    }, containerRef);
+    return () => scope.revert();
+  }, [peaks]);
+
+  return (
+    <div
+      ref={containerRef}
+      className="flex h-12 items-end gap-[3px] rounded-full bg-[rgba(23,27,38,0.72)] px-4 py-2.5"
+      role="img"
+      aria-label="Preview of the waveform that will be baked over the photos"
+    >
+      {(peaks ?? new Array(WAVEFORM_PREVIEW_BARS).fill(0.5)).map(
+        (peak, index) => (
+          <span
+            key={index}
+            data-bar
+            className="w-[3px] shrink-0 rounded-full bg-white"
+            style={{ height: `${Math.max(3, Math.round(6 + peak * 26))}px` }}
+          />
+        ),
+      )}
+      <span className="ml-2 shrink-0 text-[10px] font-medium leading-none text-white/70">
+        {duration > 0 ? `${duration.toFixed(1)}s audio` : "audio"}
+      </span>
     </div>
   );
 }

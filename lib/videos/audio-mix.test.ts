@@ -152,6 +152,26 @@ describe("createAudioMix", () => {
     mix.stop();
   });
 
+  it("exposes the decoded narration buffer for overlays", async () => {
+    const { context, decodeAudioData } = makeContext();
+    const buffer = { duration: 12.5 } as AudioBuffer;
+    decodeAudioData.mockResolvedValueOnce(buffer);
+
+    const withNarration = await createAudioMix(context, {
+      narration: new Blob(["speech"]),
+    });
+
+    expect(withNarration.narrationBuffer).toBe(buffer);
+    withNarration.stop();
+
+    const withoutNarration = await createAudioMix(context, {
+      avatar: makeVideo(8.5),
+    });
+
+    expect(withoutNarration.narrationBuffer).toBeNull();
+    withoutNarration.stop();
+  });
+
   it("uses a valid avatar duration", async () => {
     const { context } = makeContext();
 

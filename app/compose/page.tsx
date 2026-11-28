@@ -12,7 +12,6 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   ArrowLeft,
-  ArrowUpRight,
   CalendarClock,
   Copy,
   ImagePlus,
@@ -40,6 +39,7 @@ import {
 } from '@/components/compose/narration-mode-selector';
 import { TalkingAvatarPanel } from '@/components/compose/talking-avatar-panel';
 import { AvatarOverlayEditor } from '@/components/compose/avatar-overlay-editor';
+import { SlideshowStylePicker } from '@/components/compose/slideshow-style-picker';
 import { FacebookMark } from '@/components/facebook-mark';
 import { useFacebookConnection } from '@/components/facebook-connection';
 import { FacebookPreview } from '@/components/facebook-preview';
@@ -59,10 +59,8 @@ import { Button } from '@/components/ui/button';
 import { ErrorState } from '@/components/ui/error-state';
 import {
   formatCost,
-  formatDomain,
   imageSrc,
   stripMarkdown,
-  timeAgo,
   wordCount,
 } from '@/lib/format';
 import { stageUpload } from '@/lib/stage-client';
@@ -108,6 +106,7 @@ import { VideoAnimationOverlay } from '@/components/videos/video-animation-overl
 import { bakeAndFinalizeVideo } from '@/lib/videos/bake';
 import { flattenTransparentAvatar } from '@/lib/videos/avatar-video';
 import { bakeAndFinalizeNarratedSlideshow } from '@/lib/videos/slideshow';
+import { DEFAULT_SLIDESHOW_PRESET_ID } from '@/lib/videos/slideshow-presets';
 import {
   DEFAULT_AVATAR_PLACEMENT,
   type AvatarPlacement,
@@ -241,6 +240,11 @@ function ComposeWorkspace() {
   const animations = attachmentsFromSlots(animSlots, animLoops);
   const [narrationMode, setNarrationMode] = useState<NarrationMode>('off');
   const voiceOverEnabled = narrationMode === 'voice';
+  const [showWaveform, setShowWaveform] = useState(true);
+  // Photo-motion preset for the narrated slideshow (straight cuts by default).
+  const [slideshowPresetId, setSlideshowPresetId] = useState<string>(
+    DEFAULT_SLIDESHOW_PRESET_ID
+  );
   const [ttsProvider, setTtsProvider] = useState<TtsProviderId>(DEFAULT_TTS_PROVIDER);
   const [ttsConfigured, setTtsConfigured] = useState(false);
   const [ttsSettingsLoading, setTtsSettingsLoading] = useState(true);
@@ -993,6 +997,8 @@ function ComposeWorkspace() {
           finalized = await bakeAndFinalizeNarratedSlideshow({
             images,
             narration: narration.blob,
+            showWaveform,
+            presetId: slideshowPresetId,
             onProgress: (pct) => {
               if (ownsBake()) setBakePct(pct);
             },
@@ -1073,6 +1079,7 @@ function ComposeWorkspace() {
             images,
             avatarUrl: avatarMediaUrl(avatarJob.id),
             avatarPlacement,
+            presetId: slideshowPresetId,
             onProgress: (pct) => {
               if (ownsBake()) setBakePct(pct);
             },
@@ -1716,46 +1723,7 @@ function ComposeWorkspace() {
             ) : (
               <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px] xl:items-start">
                 <section
-                  className="compose-source xl:col-start-1 xl:row-start-1"
-                  aria-labelledby="source-story-title"
-                >
-                  <div className="compose-source__top">
-                    <span className="compose-source__label">
-                      <Newspaper className="size-4" aria-hidden />
-                      Source story
-                    </span>
-                    <a
-                      href={selected.link}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="compose-source__link"
-                    >
-                      Read original
-                      <ArrowUpRight className="size-4" aria-hidden />
-                    </a>
-                  </div>
-                  <div className="compose-source__body">
-                    <h2 id="source-story-title" className="compose-source__title">
-                      {selected.title}
-                    </h2>
-                    {selected.summary && (
-                      <p className="compose-source__summary">{selected.summary}</p>
-                    )}
-                    <div className="compose-source__meta">
-                      <span className="compose-source__source">
-                        {selected.feed_title?.trim() || formatDomain(selected.link)}
-                      </span>
-                      <span>
-                        {selected.created_at
-                          ? `Ingested ${timeAgo(selected.created_at)}`
-                          : 'Latest ingest'}
-                      </span>
-                    </div>
-                  </div>
-                </section>
-
-                <section
-                  className="compose-proof xl:col-start-1 xl:row-start-2"
+                  className="compose-proof xl:col-start-1 xl:row-start-1"
                   aria-labelledby="draft-heading"
                 >
                   <div className="compose-proof__header">
@@ -1866,6 +1834,9 @@ function ComposeWorkspace() {
                           stale={narrationStale}
                           hasMedia={hasMedia}
                           hasText={Boolean(speechText)}
+                          hasPhotos={images.length > 0}
+                          showWaveform={showWaveform}
+                          onShowWaveformChange={setShowWaveform}
                           disabled={
                             editorLocked ||
                             drafting ||
@@ -2082,6 +2053,15 @@ function ComposeWorkspace() {
                           }
                         />
                       </div>
+                    )}
+                    {!videoFile && images.length >= 2 && narrationMode !== 'off' && (
+                      <SlideshowStylePicker
+                        className="mt-3"
+                        presetId={slideshowPresetId}
+                        images={images}
+                        disabled={imagesBusy || baking || editorLocked}
+                        onSelect={setSlideshowPresetId}
+                      />
                     )}
                     {videoFile && videoPreviewUrl && !videoPreviewFailed && (
                       <VideoAnimationPicker
@@ -2360,7 +2340,7 @@ function ComposeWorkspace() {
                 </section>
 
                 <aside
-                  className="compose-preview xl:col-start-2 xl:row-span-2"
+                  className="compose-preview xl:col-start-2"
                   aria-label="Publication preview"
                 >
                   <div className="compose-preview__heading">

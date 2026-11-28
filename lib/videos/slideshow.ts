@@ -14,9 +14,15 @@ import {
   DEFAULT_AVATAR_PLACEMENT,
   type AvatarPlacement,
 } from './composition';
+import { computeNarrationPeaks, drawNarrationWaveform } from './waveform';
+import {
+  drawSlideshowFrame,
+  SLIDESHOW_HEIGHT,
+  SLIDESHOW_WIDTH,
+} from './slideshow-presets';
 
-const WIDTH = 1920;
-const HEIGHT = 1080;
+const WIDTH = SLIDESHOW_WIDTH;
+const HEIGHT = SLIDESHOW_HEIGHT;
 const FPS = 30;
 
 export type NarratedSlideshowOptions = {
@@ -24,28 +30,14 @@ export type NarratedSlideshowOptions = {
   narration?: Blob;
   avatarUrl?: string;
   avatarPlacement?: AvatarPlacement;
+  /** Draw the narration waveform pill over the photos (voice-over path only). */
+  showWaveform?: boolean;
+  /** Photo-motion preset id from slideshow-presets.ts (missing = straight cuts). */
+  presetId?: string;
   onProgress?: (fraction: number) => void;
 };
 
-export function drawSlideshowImage(
-  context: CanvasRenderingContext2D,
-  image: HTMLImageElement,
-  width = WIDTH,
-  height = HEIGHT,
-): void {
-  const sourceWidth = image.naturalWidth || width;
-  const sourceHeight = image.naturalHeight || height;
-  const scale = Math.max(width / sourceWidth, height / sourceHeight);
-  const drawWidth = sourceWidth * scale;
-  const drawHeight = sourceHeight * scale;
-  context.drawImage(
-    image,
-    (width - drawWidth) / 2,
-    (height - drawHeight) / 2,
-    drawWidth,
-    drawHeight,
-  );
-}
+export { drawSlideshowImage } from './slideshow-presets';
 
 function loadImage(source: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -121,6 +113,12 @@ export async function bakeNarratedSlideshow(
   }
 
   const avatar = loadedAvatar?.video;
+  // The waveform rides the narration path only (narration and avatar are
+  // mutually exclusive), and bars come from the real decoded TTS audio.
+  const waveformPeaks =
+    options.showWaveform && hasNarration && audioMix.narrationBuffer
+      ? computeNarrationPeaks(audioMix.narrationBuffer)
+      : null;
   let stream: MediaStream;
   try {
     stream = canvas.captureStream(FPS);
@@ -165,7 +163,7 @@ export async function bakeNarratedSlideshow(
       }
     }
     context.clearRect(0, 0, WIDTH, HEIGHT);
-    drawSlideshowImage(context, images[0]);
+    drawSlideshowFrame(context, images, 0, audioMix.duration, { w: WIDTH, h: HEIGHT }, options.presetId);
     if (avatar) {
       drawAvatarVideo(
         context,
@@ -174,6 +172,14 @@ export async function bakeNarratedSlideshow(
         WIDTH,
         HEIGHT,
       );
+    }
+    if (waveformPeaks) {
+      drawNarrationWaveform(context, {
+        box: { w: WIDTH, h: HEIGHT },
+        peaks: waveformPeaks,
+        elapsed: 0,
+        duration: audioMix.duration,
+      });
     }
     recorder.start(250);
     if (hasAvatar) audioMix.startAvatar();
@@ -226,12 +232,15 @@ export async function bakeNarratedSlideshow(
             do {
               lastFrameAt += minFrameMs;
             } while (now - lastFrameAt >= minFrameMs);
-            const index = Math.min(
-              images.length - 1,
-              Math.floor((elapsed / audioMix.duration) * images.length),
-            );
             context.clearRect(0, 0, WIDTH, HEIGHT);
-            drawSlideshowImage(context, images[index]);
+            drawSlideshowFrame(
+              context,
+              images,
+              elapsed,
+              audioMix.duration,
+              { w: WIDTH, h: HEIGHT },
+              options.presetId,
+            );
             if (avatar) {
               drawAvatarVideo(
                 context,
@@ -240,6 +249,14 @@ export async function bakeNarratedSlideshow(
                 WIDTH,
                 HEIGHT,
               );
+            }
+            if (waveformPeaks) {
+              drawNarrationWaveform(context, {
+                box: { w: WIDTH, h: HEIGHT },
+                peaks: waveformPeaks,
+                elapsed,
+                duration: audioMix.duration,
+              });
             }
             options.onProgress?.(Math.min(1, elapsed / audioMix.duration));
           }

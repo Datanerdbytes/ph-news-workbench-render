@@ -455,106 +455,6 @@ html[data-theme="forest-amber"] {
     scroll-padding-bottom: 2rem;
   }
 
-  .compose-source {
-    position: relative;
-    overflow: hidden;
-    border: 1px solid #263146;
-    border-radius: 1.125rem;
-    background: var(--compose-ink);
-    box-shadow: 0 1.25rem 2.5rem -1.75rem rgb(21 27 38 / 55%);
-    color: #ffffff;
-  }
-
-  .compose-source::before {
-    position: absolute;
-    inset: 0 auto 0 0;
-    width: 0.375rem;
-    background: var(--compose-accent);
-    content: "";
-  }
-
-  .compose-source :focus-visible {
-    outline-color: #91b2ff;
-  }
-
-  .compose-source__top {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.875rem clamp(1rem, 3vw, 1.75rem);
-    border-bottom: 1px solid rgb(255 255 255 / 12%);
-  }
-
-  .compose-source__label {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    color: #dce5f5;
-    font-size: 0.75rem;
-    font-weight: 700;
-  }
-
-  .compose-source__link {
-    display: inline-flex;
-    min-height: 2.75rem;
-    align-items: center;
-    gap: 0.375rem;
-    margin-left: auto;
-    border-radius: 0.5rem;
-    color: #dce5f5;
-    font-size: 0.75rem;
-    font-weight: 650;
-    transition: color 160ms ease;
-  }
-
-  .compose-source__link:hover {
-    color: #ffffff;
-  }
-
-  .compose-source__body {
-    padding: clamp(1.25rem, 4vw, 2.25rem) clamp(1rem, 4vw, 2.5rem);
-  }
-
-  .compose-source__title {
-    max-width: 24ch;
-    font-family: var(--font-display);
-    font-size: clamp(1.8rem, 4vw, 2.85rem);
-    font-weight: 620;
-    line-height: 1.02;
-    letter-spacing: -0.045em;
-    text-wrap: balance;
-  }
-
-  .compose-source__summary {
-    max-width: 68ch;
-    margin-top: 1rem;
-    color: #c8d2e2;
-    font-size: 0.9375rem;
-    line-height: 1.7;
-  }
-
-  .compose-source__meta {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem 0.875rem;
-    margin-top: 1.25rem;
-    color: #aebad0;
-    font-size: 0.75rem;
-    line-height: 1.5;
-  }
-
-  .compose-source__source {
-    color: #e8edf6;
-    font-weight: 700;
-  }
-
-  .compose-source__meta > span + span {
-    padding-left: 0.875rem;
-    border-left: 1px solid rgb(255 255 255 / 18%);
-  }
-
   .compose-header .uppercase {
     letter-spacing: 0;
     text-transform: none;
@@ -820,11 +720,6 @@ html[data-theme="forest-amber"] {
   }
 
   @media (max-width: 639px) {
-    .compose-source__body {
-      padding-right: 1.25rem;
-      padding-left: 1.5rem;
-    }
-
     .compose-language {
       width: 100%;
       margin-left: 0;
