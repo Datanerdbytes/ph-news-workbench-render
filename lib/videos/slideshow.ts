@@ -14,6 +14,7 @@ import {
   DEFAULT_AVATAR_PLACEMENT,
   type AvatarPlacement,
 } from './composition';
+import { computeNarrationPeaks, drawNarrationWaveform } from './waveform';
 
 const WIDTH = 1920;
 const HEIGHT = 1080;
@@ -24,6 +25,8 @@ export type NarratedSlideshowOptions = {
   narration?: Blob;
   avatarUrl?: string;
   avatarPlacement?: AvatarPlacement;
+  /** Draw the narration waveform pill over the photos (voice-over path only). */
+  showWaveform?: boolean;
   onProgress?: (fraction: number) => void;
 };
 
@@ -121,6 +124,12 @@ export async function bakeNarratedSlideshow(
   }
 
   const avatar = loadedAvatar?.video;
+  // The waveform rides the narration path only (narration and avatar are
+  // mutually exclusive), and bars come from the real decoded TTS audio.
+  const waveformPeaks =
+    options.showWaveform && hasNarration && audioMix.narrationBuffer
+      ? computeNarrationPeaks(audioMix.narrationBuffer)
+      : null;
   let stream: MediaStream;
   try {
     stream = canvas.captureStream(FPS);
@@ -174,6 +183,14 @@ export async function bakeNarratedSlideshow(
         WIDTH,
         HEIGHT,
       );
+    }
+    if (waveformPeaks) {
+      drawNarrationWaveform(context, {
+        box: { w: WIDTH, h: HEIGHT },
+        peaks: waveformPeaks,
+        elapsed: 0,
+        duration: audioMix.duration,
+      });
     }
     recorder.start(250);
     if (hasAvatar) audioMix.startAvatar();
@@ -240,6 +257,14 @@ export async function bakeNarratedSlideshow(
                 WIDTH,
                 HEIGHT,
               );
+            }
+            if (waveformPeaks) {
+              drawNarrationWaveform(context, {
+                box: { w: WIDTH, h: HEIGHT },
+                peaks: waveformPeaks,
+                elapsed,
+                duration: audioMix.duration,
+              });
             }
             options.onProgress?.(Math.min(1, elapsed / audioMix.duration));
           }

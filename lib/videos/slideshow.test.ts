@@ -28,6 +28,8 @@ describe("bakeNarratedSlideshow", () => {
   let frames: FrameRequestCallback[];
   let recorders: FakeRecorder[];
   let drawImage: ReturnType<typeof vi.fn>;
+  let fill: ReturnType<typeof vi.fn>;
+  let roundRect: ReturnType<typeof vi.fn>;
   let narrationStart: ReturnType<typeof vi.fn>;
   let avatar: ReturnType<typeof makeAvatarVideo>;
   let capturedCanvases: HTMLCanvasElement[];
@@ -112,7 +114,11 @@ describe("bakeNarratedSlideshow", () => {
       };
     }
     decodeAudioData() {
-      return Promise.resolve({ duration: audioDuration });
+      return Promise.resolve({
+        duration: audioDuration,
+        getChannelData: () =>
+          Float32Array.from([0.1, 0.8, 0.3, 0.9, 0.2, 0.7, 0.4, 1]),
+      });
     }
     createBufferSource() {
       narrationStart = vi.fn();
@@ -141,6 +147,8 @@ describe("bakeNarratedSlideshow", () => {
     now = 0;
     audioDuration = 2;
     drawImage = vi.fn();
+    fill = vi.fn();
+    roundRect = vi.fn();
     narrationStart = vi.fn();
     avatarDuration = 2;
     avatar = makeAvatarVideo();
@@ -157,9 +165,16 @@ describe("bakeNarratedSlideshow", () => {
     vi.stubGlobal("MediaRecorder", FakeRecorder);
     vi.stubGlobal("AudioContext", FakeAudioContext);
     vi.spyOn(performance, "now").mockImplementation(() => now);
+    fill = vi.fn();
+    roundRect = vi.fn();
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
       clearRect: vi.fn(),
       drawImage,
+      save: vi.fn(),
+      restore: vi.fn(),
+      beginPath: vi.fn(),
+      fill,
+      roundRect,
     } as unknown as CanvasRenderingContext2D);
     originalCaptureStream = (
       HTMLCanvasElement.prototype as unknown as { captureStream?: unknown }
@@ -252,6 +267,50 @@ describe("bakeNarratedSlideshow", () => {
     expect(onProgress).toHaveBeenLastCalledWith(1);
     expect(avatar.pause).toHaveBeenCalled();
     expect(avatar.src).toBe("");
+  });
+
+  it("draws the narration waveform when showWaveform is set", async () => {
+    const bake = bakeNarratedSlideshow({
+      images: ["photo-1", "photo-2"],
+      narration: new Blob(["speech"], { type: "audio/mpeg" }),
+      showWaveform: true,
+    });
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+    expect(narrationStart).toHaveBeenCalledTimes(1);
+    // the pre-recording frame already painted the pill and the bars
+    expect(fill).toHaveBeenCalled();
+    expect(roundRect).toHaveBeenCalled();
+    const fillsAfterFirstFrame = fill.mock.calls.length;
+
+    now = 40;
+    frames.shift()?.(40);
+    expect(fill.mock.calls.length).toBeGreaterThan(fillsAfterFirstFrame);
+
+    now = 1_100;
+    frames.shift()?.(1_100);
+
+    now = 2_100;
+    frames.shift()?.(2_100);
+    await expect(bake).resolves.toBeInstanceOf(Blob);
+  });
+
+  it("does not draw the waveform unless showWaveform is set", async () => {
+    const bake = bakeNarratedSlideshow({
+      images: ["photo-1", "photo-2"],
+      narration: new Blob(["speech"], { type: "audio/mpeg" }),
+    });
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+
+    now = 40;
+    frames.shift()?.(40);
+    now = 1_100;
+    frames.shift()?.(1_100);
+    now = 2_100;
+    frames.shift()?.(2_100);
+
+    expect(fill).not.toHaveBeenCalled();
+    expect(roundRect).not.toHaveBeenCalled();
+    await expect(bake).resolves.toBeInstanceOf(Blob);
   });
 
   it("waits for the avatar ended event after the slideshow timeline expires", async () => {

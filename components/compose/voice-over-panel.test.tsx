@@ -336,3 +336,95 @@ describe("VoiceOverPanel", () => {
     );
   });
 });
+
+describe("VoiceOverPanel waveform overlay", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  class FakeDecodeAudioContext {
+    decodeAudioData() {
+      return Promise.resolve({
+        duration: 3.2,
+        getChannelData: () =>
+          Float32Array.from([
+            0.1, 0.9, 0.2, 0.7, 0.3, 1, 0.15, 0.6, 0.25, 0.8, 0.35, 0.5, 0.2,
+            0.95, 0.1, 0.65,
+          ]),
+      });
+    }
+    close() {
+      return Promise.resolve();
+    }
+  }
+
+  it("offers the photo waveform toggle and live preview when photos are attached", async () => {
+    vi.stubGlobal("AudioContext", FakeDecodeAudioContext);
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn().mockReturnValue({ matches: false }),
+    );
+    const panelProps = props({
+      audio: readyAudio,
+      hasPhotos: true,
+      showWaveform: true,
+    });
+    render(<VoiceOverPanel {...panelProps} />);
+
+    const toggle = screen.getByRole("switch", {
+      name: /Show waveform on photos/,
+    });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    const preview = await screen.findByRole("img", {
+      name: /Preview of the waveform/,
+    });
+    expect(
+      preview.querySelectorAll("[data-bar]").length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByText(/Bakes an animated waveform over the photos/)).toBeTruthy();
+  });
+
+  it("keeps the waveform toggle hidden without photos", () => {
+    render(
+      <VoiceOverPanel
+        {...props({ audio: readyAudio, hasPhotos: false, showWaveform: true })}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("switch", { name: /Show waveform on photos/ }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("img", { name: /Preview of the waveform/ }),
+    ).toBeNull();
+  });
+
+  it("hides the waveform preview when the toggle is off", () => {
+    vi.stubGlobal("AudioContext", FakeDecodeAudioContext);
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn().mockReturnValue({ matches: false }),
+    );
+    const panelProps = props({
+      audio: readyAudio,
+      hasPhotos: true,
+      showWaveform: false,
+      onShowWaveformChange: vi.fn(),
+    });
+    render(<VoiceOverPanel {...panelProps} />);
+
+    const toggle = screen.getByRole("switch", {
+      name: /Show waveform on photos/,
+    });
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    expect(
+      screen.getByText("The photos bake without the waveform indicator."),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("img", { name: /Preview of the waveform/ }),
+    ).toBeNull();
+    fireEvent.click(toggle);
+    expect(panelProps.onShowWaveformChange).toHaveBeenCalledWith(true);
+  });
+});

@@ -241,6 +241,7 @@ function ComposeWorkspace() {
   const animations = attachmentsFromSlots(animSlots, animLoops);
   const [narrationMode, setNarrationMode] = useState<NarrationMode>('off');
   const voiceOverEnabled = narrationMode === 'voice';
+  const [showWaveform, setShowWaveform] = useState(true);
   const [ttsProvider, setTtsProvider] = useState<TtsProviderId>(DEFAULT_TTS_PROVIDER);
   const [ttsConfigured, setTtsConfigured] = useState(false);
   const [ttsSettingsLoading, setTtsSettingsLoading] = useState(true);
@@ -993,6 +994,7 @@ function ComposeWorkspace() {
           finalized = await bakeAndFinalizeNarratedSlideshow({
             images,
             narration: narration.blob,
+            showWaveform,
             onProgress: (pct) => {
               if (ownsBake()) setBakePct(pct);
             },
@@ -1866,6 +1868,9 @@ function ComposeWorkspace() {
                           stale={narrationStale}
                           hasMedia={hasMedia}
                           hasText={Boolean(speechText)}
+                          hasPhotos={images.length > 0}
+                          showWaveform={showWaveform}
+                          onShowWaveformChange={setShowWaveform}
                           disabled={
                             editorLocked ||
                             drafting ||
