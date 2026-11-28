@@ -82,21 +82,47 @@ describe("TalkingAvatarPanel", () => {
     ).toBe(false);
   });
 
-  it("lists every photo avatar and disables real-time-only previews", () => {
-    render(<TalkingAvatarPanel {...props()} />);
+  it("separates full-body and photo avatars and shows only the active selection", () => {
+    const { rerender } = render(<TalkingAvatarPanel {...props()} />);
 
-    const select = screen.getByLabelText("Avatar") as HTMLSelectElement;
-    expect(within(select).getAllByRole("option")).toHaveLength(36);
+    const fullBodySelect = screen.getByLabelText("Full-body avatar") as HTMLSelectElement;
+    const photoSelect = screen.getByLabelText("Photo avatar") as HTMLSelectElement;
+    const fullBodyOptions = Array.from(
+      fullBodySelect.querySelectorAll('option[value]:not([value=""])'),
+    ) as HTMLOptionElement[];
+    const photoOptions = Array.from(
+      photoSelect.querySelectorAll('option[value]:not([value=""])'),
+    ) as HTMLOptionElement[];
+
+    expect(fullBodySelect.value).toBe("meg-formal");
+    expect(photoSelect.value).toBe("");
+    expect(fullBodyOptions).toHaveLength(21);
+    expect(photoOptions).toHaveLength(34);
+    expect(fullBodyOptions.every((option) => !option.disabled)).toBe(true);
     expect(
-      (within(select).getByRole("option", { name: "Adrian" }) as HTMLOptionElement)
+      (within(photoSelect).getByRole("option", { name: "Adrian" }) as HTMLOptionElement)
         .disabled,
     ).toBe(false);
     expect(
-      (within(select).getByRole("option", { name: "Leonie · preview (real-time only)" }) as HTMLOptionElement)
+      (within(photoSelect).getByRole("option", { name: "Leonie · preview (real-time only)" }) as HTMLOptionElement)
         .disabled,
     ).toBe(true);
-    expect(select.querySelectorAll("option:disabled")).toHaveLength(4);
-    expect(screen.getByText(/Preview photo avatars are listed for reference/)).toBeTruthy();
+    expect(photoSelect.querySelectorAll("option:disabled")).toHaveLength(5);
+    expect(
+      within(fullBodySelect).getByRole("option", { name: "Rowan" }),
+    ).toBeTruthy();
+    expect(
+      within(fullBodySelect).getByRole("option", {
+        name: "Lisa · business-sitting · preview",
+      }),
+    ).toBeTruthy();
+    expect(fullBodySelect.textContent).not.toContain("null");
+    expect(photoSelect.textContent).not.toContain("null");
+    expect(screen.getByText(/Preview full-body avatars can be generated/)).toBeTruthy();
+
+    rerender(<TalkingAvatarPanel {...props({ avatarId: "anika" })} />);
+    expect(fullBodySelect.value).toBe("");
+    expect(photoSelect.value).toBe("anika");
   });
 
   it("wires avatar, voice, and speed controls to their callbacks", () => {
@@ -109,7 +135,7 @@ describe("TalkingAvatarPanel", () => {
     expect(
       screen.getByRole("option", { name: "English (US) · Christopher (Male)" }),
     ).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Avatar"), {
+    fireEvent.change(screen.getByLabelText("Photo avatar"), {
       target: { value: "anika" },
     });
     fireEvent.change(screen.getByLabelText("Voice"), {
@@ -132,6 +158,15 @@ describe("TalkingAvatarPanel", () => {
 
     fireEvent.click(screen.getByLabelText("Transparent background"));
     expect(panelProps.onTransparentChange).toHaveBeenCalledWith(true);
+
+    rerender(<TalkingAvatarPanel {...props({ avatarId: "max-casual" })} />);
+    expect(screen.getByLabelText("Transparent background")).toBeTruthy();
+
+    rerender(<TalkingAvatarPanel {...props({ avatarId: "rowan" })} />);
+    expect(screen.queryByLabelText("Transparent background")).toBeNull();
+
+    rerender(<TalkingAvatarPanel {...props({ avatarId: "harry-business" })} />);
+    expect(screen.queryByLabelText("Transparent background")).toBeNull();
 
     rerender(<TalkingAvatarPanel {...props({ avatarId: "anika" })} />);
     expect(screen.queryByLabelText("Transparent background")).toBeNull();

@@ -23,7 +23,6 @@ import {
   RefreshCw,
   Sparkles,
   Trash2,
-  TriangleAlert,
   Upload,
   X,
 } from 'lucide-react';
@@ -45,8 +44,6 @@ import { FacebookMark } from '@/components/facebook-mark';
 import { useFacebookConnection } from '@/components/facebook-connection';
 import { FacebookPreview } from '@/components/facebook-preview';
 import {
-  ComposerCard,
-  FieldLabel,
   FilePicker,
   PageSelector,
   defaultScheduleValue,
@@ -57,7 +54,7 @@ import {
 } from '@/components/publishing/publish-page';
 import { resolveScheduledFor } from '@/lib/publishing/schedule';
 import { useScheduleRetry } from '@/components/publishing/schedule-retry-dialog';
-import { StatusPill, statusMeta } from '@/components/status-pill';
+import { StatusPill } from '@/components/status-pill';
 import { Button } from '@/components/ui/button';
 import { ErrorState } from '@/components/ui/error-state';
 import {
@@ -70,7 +67,12 @@ import {
 } from '@/lib/format';
 import { stageUpload } from '@/lib/stage-client';
 import { deleteStagedBlob } from '@/lib/blob-cleanup';
-import { DEFAULT_AVATAR_ID, getAvatar, type AvatarId } from '@/lib/avatar/avatars';
+import {
+  DEFAULT_AVATAR_ID,
+  getAvatar,
+  supportsAvatarTransparency,
+  type AvatarId,
+} from '@/lib/avatar/avatars';
 import {
   ACTIVE_AVATAR_STATUSES,
   avatarMediaUrl,
@@ -86,6 +88,16 @@ import {
   defaultVoiceForLanguage,
   type TtsVoiceId,
 } from '@/lib/tts/voices';
+import {
+  DEFAULT_TTS_PROVIDER,
+  defaultVoiceForProvider,
+  isTtsProviderId,
+  isVoiceForProvider,
+  providerSupportsLanguage,
+  providerSupportsSpeed,
+  readAssemblyAiVoiceIds,
+  type TtsProviderId,
+} from '@/lib/tts/providers';
 import { fetchQueueItem, fetchQueuePage, type QueueItem } from '@/lib/story-queue';
 import {
   MediaPreviewCard,
@@ -111,7 +123,6 @@ import type {
   VideoSlotSelection,
 } from '@/components/videos/video-animation-picker';
 
-const MAX_MESSAGE_LENGTH = 5000;
 const MAX_IMAGES = 10;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 1024 * 1024 * 1024;
@@ -148,15 +159,13 @@ type DraftStats = {
 
 function WorkspaceSkeleton() {
   return (
-    <div className="animate-pulse space-y-5">
-      <div className="rounded-xl border border-border/80 bg-card p-5">
-        <div className="h-2 w-24 rounded bg-muted" />
-        <div className="mt-4 h-6 w-3/4 rounded bg-muted" />
-        <div className="mt-2 h-6 w-1/2 rounded bg-muted" />
-        <div className="mt-4 h-3 w-full rounded bg-muted" />
-        <div className="mt-2 h-3 w-4/5 rounded bg-muted" />
-      </div>
-      <div className="rounded-xl border border-border/80 bg-card p-5">
+    <div
+      role="status"
+      aria-label="Loading the Compose workspace"
+      className="animate-pulse space-y-5"
+    >
+      <div className="h-44 rounded-[18px] bg-ink/90" />
+      <div className="rounded-[18px] border border-border bg-card p-5">
         <div className="h-3 w-16 rounded bg-muted" />
         <div className="mt-4 h-[220px] w-full rounded bg-muted/60" />
       </div>
@@ -166,19 +175,21 @@ function WorkspaceSkeleton() {
 
 function EmptyWorkspace({ onOpenSources }: { onOpenSources: () => void }) {
   return (
-    <div className="grid min-h-[55vh] place-items-center rounded-xl border border-dashed border-border bg-card/50 p-8 text-center">
+    <div className="compose-empty p-8 text-center">
       <div className="max-w-sm">
-        <span className="mx-auto grid size-11 place-items-center rounded-full bg-secondary">
-          <Newspaper className="size-5 text-faint" aria-hidden />
+        <span className="mx-auto grid size-12 place-items-center rounded-xl bg-[var(--compose-accent-soft)] text-[var(--compose-accent)]">
+          <Newspaper className="size-5" aria-hidden />
         </span>
-        <h2 className="mt-4 font-heading text-2xl">The desk is quiet</h2>
-        <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+        <h2 className="mt-5 font-display text-3xl font-semibold tracking-[-0.04em]">
+          The desk is quiet
+        </h2>
+        <p className="mt-2 text-sm leading-relaxed text-[var(--compose-muted)]">
           Pick a story from Sources to start drafting.
         </p>
         <Button
           variant="brand"
           size="sm"
-          className="mt-4"
+          className="mt-5"
           onClick={onOpenSources}
         >
           <Newspaper className="size-3.5" aria-hidden />
@@ -195,7 +206,7 @@ function ComposeWorkspace() {
   const facebook = useFacebookConnection();
   const pages = useManagedPages();
   const selectedPage = pages.pages.find((page) => page.id === pages.selected[0]);
-  const [items, setItems] = useState<QueueItem[]>([]);
+  const [, setItems] = useState<QueueItem[]>([]);
   const [selected, setSelected] = useState<QueueItem | null>(null);
   const [draft, setDraft] = useState('');
   const [stats, setStats] = useState<DraftStats | null>(null);
@@ -230,7 +241,19 @@ function ComposeWorkspace() {
   const animations = attachmentsFromSlots(animSlots, animLoops);
   const [narrationMode, setNarrationMode] = useState<NarrationMode>('off');
   const voiceOverEnabled = narrationMode === 'voice';
-  const [voiceId, setVoiceId] = useState<TtsVoiceId>('en-PH-RosaNeural');
+  const [ttsProvider, setTtsProvider] = useState<TtsProviderId>(DEFAULT_TTS_PROVIDER);
+  const [ttsConfigured, setTtsConfigured] = useState(false);
+  const [ttsSettingsLoading, setTtsSettingsLoading] = useState(true);
+  const [ttsSettingsRefreshing, setTtsSettingsRefreshing] = useState(false);
+  const [ttsSettingsLoaded, setTtsSettingsLoaded] = useState(false);
+  const ttsSettingsLoadedRef = useRef(false);
+  const ttsSettingsRequestId = useRef(0);
+  const [ttsSettingsError, setTtsSettingsError] = useState('');
+  const [assemblyAiVoiceIds, setAssemblyAiVoiceIds] = useState<string[]>([]);
+  const [voiceOverVoiceId, setVoiceOverVoiceId] = useState(() =>
+    defaultVoiceForProvider(DEFAULT_TTS_PROVIDER, 'en')
+  );
+  const [avatarVoiceId, setAvatarVoiceId] = useState<TtsVoiceId>('en-PH-RosaNeural');
   const [speechSpeed, setSpeechSpeed] = useState(1);
   const [originalVolume, setOriginalVolume] = useState(0.25);
   const [narration, setNarration] = useState<VoiceOverAudio | null>(null);
@@ -239,6 +262,54 @@ function ComposeWorkspace() {
   const ttsSequence = useRef(0);
   const ttsAbortRef = useRef<AbortController | null>(null);
   const narrationUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    async function loadTtsSettings() {
+      const requestId = ++ttsSettingsRequestId.current;
+      if (!ttsSettingsLoadedRef.current) setTtsSettingsLoading(true);
+      else setTtsSettingsRefreshing(true);
+      setTtsSettingsError('');
+      try {
+        const response = await fetch('/api/workspace', { cache: 'no-store' });
+        if (!response.ok) throw new Error('Could not load the saved voice-over provider.');
+        const data = await response.json();
+        if (!active || requestId !== ttsSettingsRequestId.current) return;
+        const nextProvider = isTtsProviderId(data.ttsProvider)
+          ? data.ttsProvider
+          : DEFAULT_TTS_PROVIDER;
+        const nextVoiceIds = readAssemblyAiVoiceIds(data.assemblyAiVoiceIds);
+        setTtsProvider(nextProvider);
+        setTtsConfigured(data.ttsConfigured === true);
+        setAssemblyAiVoiceIds(nextVoiceIds);
+        setVoiceOverVoiceId((current) =>
+          isVoiceForProvider(current, nextProvider, nextVoiceIds)
+            ? current
+            : defaultVoiceForProvider(nextProvider, language)
+        );
+        ttsSettingsLoadedRef.current = true;
+        setTtsSettingsLoaded(true);
+      } catch {
+        if (active && requestId === ttsSettingsRequestId.current) {
+          setTtsSettingsError(
+            'Could not load the saved voice-over provider. Reopen Settings and try again.'
+          );
+        }
+      } finally {
+        if (active && requestId === ttsSettingsRequestId.current) {
+          setTtsSettingsLoading(false);
+          setTtsSettingsRefreshing(false);
+        }
+      }
+    }
+    const refreshOnFocus = () => void loadTtsSettings();
+    void loadTtsSettings();
+    window.addEventListener('focus', refreshOnFocus);
+    return () => {
+      active = false;
+      window.removeEventListener('focus', refreshOnFocus);
+    };
+  }, [language]);
   const [avatarId, setAvatarId] = useState<AvatarId>(DEFAULT_AVATAR_ID);
   const [avatarTransparent, setAvatarTransparent] = useState(false);
   const [transparencySupported, setTransparencySupported] = useState(true);
@@ -289,6 +360,8 @@ function ComposeWorkspace() {
   const [deleting, setDeleting] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
+  const scheduleButtonRef = useRef<HTMLButtonElement>(null);
+  const scheduleInputRef = useRef<HTMLInputElement>(null);
   const [scheduleError, setScheduleError] = useState('');
   const [scheduledFor, setScheduledFor] = useState(defaultScheduleValue);
   const [scheduling, setScheduling] = useState(false);
@@ -309,6 +382,11 @@ function ComposeWorkspace() {
   useEffect(() => {
     scheduledForRef.current = scheduledFor;
   }, [scheduledFor]);
+  useEffect(() => {
+    if (!scheduleOpen) return;
+    const frame = requestAnimationFrame(() => scheduleInputRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [scheduleOpen]);
   // Closing the picker bumps this so a bake in progress stops before it
   // prompts for a new time or posts against an abandoned schedule.
   const scheduleAttempt = useRef(0);
@@ -377,7 +455,8 @@ function ComposeWorkspace() {
 
   function changeLanguage(value: 'en' | 'tl') {
     setLanguage(value);
-    setVoiceId(defaultVoiceForLanguage(value));
+    setVoiceOverVoiceId(defaultVoiceForProvider(ttsProvider, value));
+    setAvatarVoiceId(defaultVoiceForLanguage(value));
   }
 
   async function generateVoiceOver() {
@@ -386,6 +465,12 @@ function ComposeWorkspace() {
       !text ||
       !voiceOverEnabled ||
       (!videoFile && !images.length) ||
+      !ttsSettingsLoaded ||
+      ttsSettingsLoading ||
+      ttsSettingsRefreshing ||
+      Boolean(ttsSettingsError) ||
+      !ttsConfigured ||
+      !providerSupportsLanguage(ttsProvider, language) ||
       ttsGenerating ||
       editorLocked ||
       drafting ||
@@ -395,6 +480,9 @@ function ComposeWorkspace() {
     ) {
       return;
     }
+    const requestProvider = ttsProvider;
+    const requestVoiceId = voiceOverVoiceId;
+    const requestSpeed = providerSupportsSpeed(ttsProvider) ? speechSpeed : 1;
     const requestId = ++ttsSequence.current;
     ttsAbortRef.current?.abort();
     const controller = new AbortController();
@@ -405,7 +493,12 @@ function ComposeWorkspace() {
       const response = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, voiceId, speed: speechSpeed }),
+        body: JSON.stringify({
+          text,
+          voiceId: requestVoiceId,
+          speed: requestSpeed,
+          language,
+        }),
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -426,8 +519,10 @@ function ComposeWorkspace() {
         blob,
         url,
         text,
-        voiceId,
-        speed: speechSpeed,
+        voiceId: requestVoiceId,
+        provider: requestProvider,
+        language,
+        speed: requestSpeed,
         duration: 0,
       });
     } catch (error) {
@@ -507,7 +602,9 @@ function ComposeWorkspace() {
 
   function changeAvatar(nextAvatarId: AvatarId) {
     setAvatarId(nextAvatarId);
-    if (getAvatar(nextAvatarId).kind !== 'video') setAvatarTransparent(false);
+    if (!supportsAvatarTransparency(getAvatar(nextAvatarId))) {
+      setAvatarTransparent(false);
+    }
   }
 
   async function generateAvatar() {
@@ -553,7 +650,7 @@ function ComposeWorkspace() {
         body: JSON.stringify({
           text,
           avatarId,
-          voiceId,
+          voiceId: avatarVoiceId,
           speed: speechSpeed,
           transparent: avatarTransparent,
         }),
@@ -1449,17 +1546,29 @@ function ComposeWorkspace() {
     }
   }
 
-  const selectedMeta = selected ? statusMeta(selected.status) : null;
   const words = wordCount(draft);
   const speechText = normalizeSpeechText(draft);
+  const voiceOverSpeed = providerSupportsSpeed(ttsProvider) ? speechSpeed : 1;
+  const voiceOverAvailable =
+    ttsSettingsLoaded &&
+    !ttsSettingsLoading &&
+    !ttsSettingsError &&
+    ttsConfigured &&
+    providerSupportsLanguage(ttsProvider, language);
   const narrationStale = Boolean(
     narration &&
       (narration.text !== speechText ||
-        narration.voiceId !== voiceId ||
-        narration.speed !== speechSpeed)
+        narration.provider !== ttsProvider ||
+        narration.voiceId !== voiceOverVoiceId ||
+        narration.language !== language ||
+        narration.speed !== voiceOverSpeed)
   );
   const voiceOverReady = Boolean(
-    voiceOverEnabled && narration && !narrationStale && !ttsGenerating
+    voiceOverEnabled &&
+    narration &&
+    voiceOverAvailable &&
+    !narrationStale &&
+    !ttsGenerating
   );
   const hasMedia = Boolean(videoFile || images.length);
   const avatarActive = isAvatarJobActive(avatarJob);
@@ -1467,7 +1576,7 @@ function ComposeWorkspace() {
     avatarJob &&
       (avatarJob.text !== speechText ||
         avatarJob.avatarId !== avatarId ||
-        avatarJob.voiceId !== voiceId ||
+        avatarJob.voiceId !== avatarVoiceId ||
         avatarJob.speed !== speechSpeed ||
         avatarJob.hasAlpha !== avatarTransparent),
   );
@@ -1498,6 +1607,18 @@ function ComposeWorkspace() {
           : 'This avatar video is already being published or has been published';
     else if (avatarJob.status !== 'completed' || !avatarJob.videoUrl)
       narrationUnavailableReason = 'Generate a ready avatar video before publishing';
+  } else if (voiceOverEnabled && !ttsSettingsLoaded) {
+    narrationUnavailableReason = 'Loading the saved voice-over provider';
+  } else if (voiceOverEnabled && ttsSettingsError) {
+    narrationUnavailableReason = ttsSettingsError;
+  } else if (voiceOverEnabled && !ttsConfigured) {
+    narrationUnavailableReason = 'Configure the voice-over provider in Settings';
+  } else if (
+    voiceOverEnabled &&
+    !providerSupportsLanguage(ttsProvider, language)
+  ) {
+    narrationUnavailableReason =
+      'AssemblyAI supports English only; choose Azure Speech for Filipino or Tagalog';
   } else if (voiceOverEnabled && !hasMedia) {
     narrationUnavailableReason = 'Attach a photo or video for the voice-over';
   } else if (voiceOverEnabled && ttsGenerating) {
@@ -1542,30 +1663,46 @@ function ComposeWorkspace() {
       : 'Wait for the video to finish uploading';
   }
 
+  function closeSchedulePanel() {
+    if (dispatchingRef.current || publishingRef.current) return;
+    scheduleAttempt.current += 1;
+    scheduleRetry.cancel();
+    // The render API cannot be cancelled, so detach its progress and release
+    // the composer while the abandoned bake drains in the background.
+    bakeSequence.current += 1;
+    setBaking(false);
+    setBakePct(null);
+    setScheduleOpen(false);
+    setEditorLocked(false);
+    setScheduling(false);
+    scheduleButtonRef.current?.focus();
+  }
+
   return (
     <AppFrame fill>
-      <div className="flex min-h-0 flex-1 flex-col">
-        <header className="flex shrink-0 items-center gap-3 border-b border-border/70 px-4 py-3 sm:px-6">
+      <div className="compose-page flex min-h-0 flex-1 flex-col">
+        <header className="compose-header flex shrink-0 items-center gap-3 px-4 py-3 sm:px-6">
           <Link
             href="/sources"
             aria-label="Back to Sources"
-            className="flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-border bg-card px-2 text-faint transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            className="compose-back shrink-0"
           >
-            <ArrowLeft className="size-3.5" aria-hidden />
-            <span className="hidden text-[11.5px] font-medium sm:inline">
-              Sources
-            </span>
+            <ArrowLeft className="size-4" aria-hidden />
+            <span className="hidden sm:inline">Sources</span>
           </Link>
           <div className="min-w-0">
-            <p className="eyebrow text-brand">Compose</p>
-            <h1 className="truncate text-sm font-semibold">
+            <h1 className="compose-title">Compose</h1>
+            <p className="compose-subtitle">
               {selected ? selected.title : 'Select a story to begin'}
-            </h1>
+            </p>
           </div>
+          {selected ? (
+            <StatusPill status={selected.status} className="ml-auto shrink-0" />
+          ) : null}
         </header>
 
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-          <div className="mx-auto w-full max-w-[1180px] p-4 sm:p-6">
+        <div className="compose-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain">
+          <div className="mx-auto w-full max-w-[1280px] p-4 sm:p-6 xl:p-8">
             {itemsLoading ? (
               <WorkspaceSkeleton />
             ) : loadError ? (
@@ -1577,114 +1714,120 @@ function ComposeWorkspace() {
             ) : !selected ? (
               <EmptyWorkspace onOpenSources={() => router.push('/sources')} />
             ) : (
-              <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px] xl:items-start">
-                <ComposerCard
-                  className="xl:col-start-1 xl:row-start-1"
-                  icon={<Newspaper className="size-4" />}
-                  title="Source story"
-                  headerRight={
-                    <>
-                      <StatusPill status={selected.status} />
-                      <a
-                        href={selected.link}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-                      >
-                        Read original
-                        <ArrowUpRight className="size-3.5" aria-hidden />
-                      </a>
-                    </>
-                  }
+              <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px] xl:items-start">
+                <section
+                  className="compose-source xl:col-start-1 xl:row-start-1"
+                  aria-labelledby="source-story-title"
                 >
-                  <h2 className="text-balance font-heading text-[24px] leading-[1.2] tracking-[-0.015em]">
-                    {selected.title}
-                  </h2>
-                  {selected.summary && (
-                    <p className="max-w-3xl text-sm leading-relaxed text-muted-foreground">
-                      {selected.summary}
-                    </p>
-                  )}
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-                    <span className="font-medium text-foreground/70">
-                      {selected.feed_title?.trim() || formatDomain(selected.link)}
+                  <div className="compose-source__top">
+                    <span className="compose-source__label">
+                      <Newspaper className="size-4" aria-hidden />
+                      Source story
                     </span>
-                    <span aria-hidden>·</span>
-                    <span>
-                      {selected.created_at
-                        ? `Ingested ${timeAgo(selected.created_at)}`
-                        : 'Latest ingest'}
-                    </span>
-                    {selectedMeta && (
-                      <>
-                        <span aria-hidden>·</span>
-                        <span>{selectedMeta.label}</span>
-                      </>
-                    )}
+                    <a
+                      href={selected.link}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="compose-source__link"
+                    >
+                      Read original
+                      <ArrowUpRight className="size-4" aria-hidden />
+                    </a>
                   </div>
-                </ComposerCard>
-
-                <section className="overflow-hidden rounded-xl border border-border/80 bg-card paper-shadow-sm xl:col-start-1 xl:row-start-2">
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-5 py-3">
-                    <div className="flex items-center gap-2">
-                      <PenLine className="size-4 text-brand" aria-hidden />
-                      <span className="text-sm font-semibold">Draft</span>
-                      <div
-                        className="inline-flex items-center rounded-lg border border-border/80 bg-card p-0.5 shadow-paper-sm"
-                        role="group"
-                        aria-label="Draft language"
-                      >
-                        {(['en', 'tl'] as const).map((value) => (
-                          <button
-                            key={value}
-                            type="button"
-                            onClick={() => changeLanguage(value)}
-                            aria-pressed={language === value}
-                            title={value === 'en' ? 'English' : 'Tagalog'}
-                            className={cn(
-                              'rounded-md px-2.5 py-1.5 text-xs font-semibold transition-colors',
-                              language === value
-                                ? 'bg-ink text-paper'
-                                : 'text-muted-foreground hover:text-foreground'
-                            )}
-                          >
-                            {value.toUpperCase()}
-                          </button>
-                        ))}
-                      </div>
+                  <div className="compose-source__body">
+                    <h2 id="source-story-title" className="compose-source__title">
+                      {selected.title}
+                    </h2>
+                    {selected.summary && (
+                      <p className="compose-source__summary">{selected.summary}</p>
+                    )}
+                    <div className="compose-source__meta">
+                      <span className="compose-source__source">
+                        {selected.feed_title?.trim() || formatDomain(selected.link)}
+                      </span>
+                      <span>
+                        {selected.created_at
+                          ? `Ingested ${timeAgo(selected.created_at)}`
+                          : 'Latest ingest'}
+                      </span>
                     </div>
-                    <div className="flex items-center gap-3 text-[11px] tabular-nums text-muted-foreground">
+                  </div>
+                </section>
+
+                <section
+                  className="compose-proof xl:col-start-1 xl:row-start-2"
+                  aria-labelledby="draft-heading"
+                >
+                  <div className="compose-proof__header">
+                    <h2 id="draft-heading" className="compose-proof__heading">
+                      <span className="compose-proof__mark">
+                        <PenLine className="size-4" aria-hidden />
+                      </span>
+                      Draft
+                    </h2>
+                    <div
+                      className="compose-language"
+                      role="group"
+                      aria-label="Draft language"
+                    >
+                      {(['en', 'tl'] as const).map((value) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => changeLanguage(value)}
+                          aria-pressed={language === value}
+                          disabled={
+                            editorLocked ||
+                            drafting ||
+                            publishing ||
+                            scheduling ||
+                            deleting
+                          }
+                        >
+                          {value === 'en' ? 'English' : 'Tagalog'}
+                        </button>
+                      ))}
+                    </div>
+                    <div
+                      id="draft-count"
+                      className="compose-counts flex items-center gap-3"
+                    >
                       <span>{words} words</span>
                       <span>{draft.length} chars</span>
                     </div>
                   </div>
 
                   {drafting && (
-                    <div className="h-0.5 w-full overflow-hidden bg-brand/15">
-                      <div className="h-full w-1/3 animate-pulse rounded-full bg-brand" />
+                    <div className="compose-proof__progress" aria-hidden>
+                      <span />
                     </div>
                   )}
 
-                  <div className="p-5">
+                  <div className="compose-proof__body">
                     {draftLoadFailed && !draft && (
                       <p
                         role="status"
-                        className="mb-3 flex items-center gap-2 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-[11px] text-destructive"
+                        className="mb-3 flex items-center gap-2 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive"
                       >
                         Couldn&apos;t load your saved draft — the editor
                         started empty. Select the story again to retry.
                       </p>
                     )}
-                    <textarea
-                      value={draft}
-                      onChange={(event) => setDraft(event.target.value)}
-                      readOnly={editorLocked}
-                      aria-busy={editorLocked}
-                      placeholder="Generate a draft from the source story, or start writing here…"
-                      aria-label="Facebook post draft"
-                      className="min-h-[260px] w-full resize-y bg-transparent text-[15px] leading-7 text-foreground outline-none placeholder:text-muted-foreground"
-                    />
-                    <div className="mt-4 space-y-3">
+                    <div className="compose-proof__writing">
+                      <textarea
+                        value={draft}
+                        onChange={(event) => setDraft(event.target.value)}
+                        readOnly={editorLocked}
+                        aria-busy={editorLocked}
+                        aria-labelledby="draft-heading"
+                        aria-describedby="draft-count"
+                        placeholder="Generate a draft from the source story, or start writing here…"
+                        className="min-h-[300px] w-full resize-y bg-transparent text-base leading-7 text-foreground outline-none placeholder:text-muted-foreground sm:min-h-[340px]"
+                      />
+                    </div>
+                    <div className="compose-production">
+                      <h3 className="compose-production__label">Narration & voice</h3>
+                      <div className="space-y-3">
                       <NarrationModeSelector
                         mode={narrationMode}
                         onModeChange={changeNarrationMode}
@@ -1703,9 +1846,16 @@ function ComposeWorkspace() {
                           onEnabledChange={(enabled) =>
                             changeNarrationMode(enabled ? 'voice' : 'off')
                           }
-                          voiceId={voiceId}
-                          onVoiceChange={setVoiceId}
-                          speed={speechSpeed}
+                          provider={ttsProvider}
+                          providerConfigured={ttsConfigured}
+                          providerLoading={ttsSettingsLoading}
+                          providerRefreshing={ttsSettingsRefreshing}
+                          providerLoadError={ttsSettingsError}
+                          clonedVoiceIds={assemblyAiVoiceIds}
+                          language={language}
+                          voiceId={voiceOverVoiceId}
+                          onVoiceChange={setVoiceOverVoiceId}
+                          speed={voiceOverSpeed}
                           onSpeedChange={setSpeechSpeed}
                           originalVolume={originalVolume}
                           onOriginalVolumeChange={setOriginalVolume}
@@ -1736,8 +1886,8 @@ function ComposeWorkspace() {
                         <TalkingAvatarPanel
                           avatarId={avatarId}
                           onAvatarChange={changeAvatar}
-                          voiceId={voiceId}
-                          onVoiceChange={setVoiceId}
+                          voiceId={avatarVoiceId}
+                          onVoiceChange={setAvatarVoiceId}
                           speed={speechSpeed}
                           onSpeedChange={setSpeechSpeed}
                           transparent={avatarTransparent}
@@ -1785,10 +1935,17 @@ function ComposeWorkspace() {
                           }
                         />
                       ) : null}
+                      </div>
                     </div>
                   </div>
 
-                  <div className="border-t border-border/60 px-5 py-3">
+                  <div className="compose-media">
+                    <div className="compose-media__header">
+                      <h3>Attachments</h3>
+                      <span>
+                        {videoFile ? '1 video' : `${images.length}/${MAX_IMAGES} images`}
+                      </span>
+                    </div>
                     {videoFile ? (
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background/60 px-2 py-1 text-[11px] font-medium">
@@ -1802,11 +1959,15 @@ function ComposeWorkspace() {
                           onClick={() => applyVideoFile(null)}
                           disabled={editorLocked}
                           aria-label="Remove video"
-                          className="tap-target grid size-6 place-items-center rounded-full border border-border bg-card text-faint shadow-sm transition-colors hover:border-destructive/40 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
+                          className="compose-remove tap-target grid size-6 place-items-center rounded-full border border-border bg-card text-faint shadow-sm transition-colors hover:border-destructive/40 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           <X className="size-3" aria-hidden />
                         </button>
-                        <span className="ml-auto inline-flex items-center gap-1.5 text-[10px] tabular-nums text-muted-foreground">
+                        <span
+                          role="status"
+                          aria-live="polite"
+                          className="compose-hint ml-auto inline-flex items-center gap-1.5 tabular-nums"
+                        >
                           {videoStaging ? (
                             <>
                               <Loader2
@@ -1857,7 +2018,7 @@ function ComposeWorkspace() {
                               onClick={() => removeImage(index)}
                               disabled={editorLocked}
                               aria-label={`Remove attachment ${index + 1}`}
-                              className="tap-target absolute -right-1.5 -top-1.5 grid size-6 place-items-center rounded-full border border-border bg-card text-faint shadow-sm transition-colors hover:border-destructive/40 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
+                              className="compose-remove tap-target absolute -right-1.5 -top-1.5 grid size-6 place-items-center rounded-full border border-border bg-card text-faint shadow-sm transition-colors hover:border-destructive/40 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
                             >
                               <X className="size-3" aria-hidden />
                             </button>
@@ -1941,8 +2102,8 @@ function ComposeWorkspace() {
                     )}
                   </div>
 
-                  <div className="flex flex-wrap items-end justify-between gap-3 border-t border-border/60 bg-muted/30 px-5 py-3">
-                    <div className="w-full -mb-1">
+                  <div className="compose-actions">
+                    <div className="w-full">
                       <PageSelector
                         pages={pages.pages}
                         selected={pages.selected}
@@ -1951,7 +2112,7 @@ function ComposeWorkspace() {
                         disabled={editorLocked}
                       />
                     </div>
-                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] tabular-nums text-muted-foreground">
+                    <div className="compose-hint mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 tabular-nums">
                       {stats ? (
                         <>
                           <span>Input {stats.inputTokens} tokens</span>
@@ -1963,8 +2124,8 @@ function ComposeWorkspace() {
                       ) : null}
                     </div>
 
-                    <div className="flex flex-col items-end gap-1">
-                      <div className="flex flex-wrap items-center justify-end gap-2">
+                    <div className="flex w-full flex-col items-end gap-2">
+                      <div className="compose-actions__buttons w-full">
                         {draft ? (
                           <Button
                             variant="outline"
@@ -2032,22 +2193,18 @@ function ComposeWorkspace() {
                           {publishButtonLabel(baking, bakePct, publishing)}
                         </Button>
                         <Button
+                          ref={scheduleButtonRef}
                           variant="outline"
                           size="sm"
-                          onClick={() => {
-                            // Closing the picker abandons any bake still
-                            // running for it.
-                            if (scheduleOpen) {
-                              scheduleAttempt.current += 1;
-                              scheduleRetry.cancel();
-                            }
-                            setScheduleOpen((open) => !open);
-                          }}
+                          onClick={() =>
+                            scheduleOpen ? closeSchedulePanel() : setScheduleOpen(true)
+                          }
                           disabled={
                             !draft ||
                             !facebook.connected ||
                             !pages.selected.length ||
                             scheduling ||
+                            publishing ||
                             baking ||
                             imagesBusy ||
                             videoStaging ||
@@ -2055,7 +2212,15 @@ function ComposeWorkspace() {
                             Boolean(narrationUnavailableReason) ||
                             selected?.status === 'published'
                           }
+                          title={
+                            publishUnavailableReason ??
+                            'Choose when this post should be published'
+                          }
+                          aria-describedby={
+                            publishUnavailableReason ? 'publish-hint' : undefined
+                          }
                           aria-expanded={scheduleOpen}
+                          aria-controls={scheduleOpen ? 'schedule-panel' : undefined}
                         >
                           <CalendarClock className="size-3.5" aria-hidden />
                           Schedule
@@ -2099,14 +2264,26 @@ function ComposeWorkspace() {
                         ) : null}
                       </div>
                       {scheduleOpen && (
-                        <div className="mt-1 flex flex-wrap items-center justify-end gap-2 rounded-lg border border-border bg-card p-2 shadow-sm">
+                        <div
+                          id="schedule-panel"
+                          role="group"
+                          aria-label="Schedule post"
+                          onKeyDown={(event) => {
+                            if (event.key === 'Escape') {
+                              event.preventDefault();
+                              closeSchedulePanel();
+                            }
+                          }}
+                          className="compose-schedule flex flex-wrap items-center justify-end gap-2"
+                        >
                           <label
                             htmlFor="scheduled-for"
-                            className="text-[10.5px] font-medium text-muted-foreground"
+                            className="compose-hint font-semibold"
                           >
                             Publish at
                           </label>
                           <input
+                            ref={scheduleInputRef}
                             id="scheduled-for"
                             type="datetime-local"
                             aria-label="Publish date and time"
@@ -2123,13 +2300,13 @@ function ComposeWorkspace() {
                               setScheduledFor(event.target.value);
                               setScheduleError('');
                             }}
-                            className="h-8 rounded-md border border-input bg-background px-2 text-[11.5px] text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                            className="h-11 rounded-md border border-input bg-background px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                           />
                           {(scheduleError || scheduleProblem) && (
                             <p
                               id="schedule-error"
                               role="alert"
-                              className="w-full text-right text-[11px] text-destructive"
+                              className="w-full text-left text-xs text-destructive"
                             >
                               {scheduleError ?? scheduleProblem}
                             </p>
@@ -2164,27 +2341,8 @@ function ComposeWorkspace() {
                           <Button
                             size="sm"
                             variant="ghost"
-                            onClick={() => {
-                              // Abandons a bake still in progress instead of
-                              // leaving it to prompt or post after Cancel.
-                              scheduleAttempt.current += 1;
-                              scheduleRetry.cancel();
-                              // The render API cannot be cancelled, so detach
-                              // the running bake instead: bumping the sequence
-                              // silences its progress and finally, and the
-                              // flags come back now rather than when the
-                              // recording happens to end.
-                              bakeSequence.current += 1;
-                              setBaking(false);
-                              setBakePct(null);
-                              setScheduleOpen(false);
-                              // Hand the controls back now; the abandoned bake
-                              // unwinds in the background and its finally will
-                              // not touch this attempt's state.
-                              setEditorLocked(false);
-                              setScheduling(false);
-                            }}
-                            disabled={dispatching}
+                            onClick={closeSchedulePanel}
+                            disabled={dispatching || publishing}
                           >
                             {dispatching ? 'Sending…' : 'Cancel'}
                           </Button>
@@ -2193,7 +2351,7 @@ function ComposeWorkspace() {
                       <p
                         id="publish-hint"
                         role="status"
-                        className="text-right text-[11px] text-muted-foreground empty:sr-only"
+                        className="compose-hint text-right empty:sr-only"
                       >
                         {publishUnavailableReason}
                       </p>
@@ -2201,7 +2359,14 @@ function ComposeWorkspace() {
                   </div>
                 </section>
 
-                <div className="xl:col-start-2 xl:row-span-2 xl:sticky xl:top-5">
+                <aside
+                  className="compose-preview xl:col-start-2 xl:row-span-2"
+                  aria-label="Publication preview"
+                >
+                  <div className="compose-preview__heading">
+                    <h2>Publication proof</h2>
+                    <span>Facebook</span>
+                  </div>
                   {videoFile && videoPreviewUrl && !videoPreviewFailed ? (
                     <MediaPreviewCard
                       statusLabel={videoUrl ? 'Ready to publish' : 'Staging…'}
@@ -2243,7 +2408,7 @@ function ComposeWorkspace() {
                       pagePicture={selectedPage?.picture}
                     />
                   )}
-                </div>
+                </aside>
 
               </div>
             )}

@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { headers } from "next/headers";
-import { Geist_Mono, Manrope } from "next/font/google";
+import { Bricolage_Grotesque, Geist_Mono, Manrope } from "next/font/google";
 import "./globals.css";
 import { auth } from "@/lib/auth";
 import { sql } from "@/lib/db";
@@ -15,6 +15,11 @@ import { DEFAULT_THEME, getTheme, isThemeId } from "@/lib/themes";
 const manrope = Manrope({
   subsets: ["latin"],
   variable: "--font-manrope",
+  display: "swap",
+});
+const bricolage = Bricolage_Grotesque({
+  subsets: ["latin"],
+  variable: "--font-bricolage",
   display: "swap",
 });
 const geistMono = Geist_Mono({
@@ -65,7 +70,7 @@ export default async function RootLayout({
     <html
       lang="en"
       data-theme={theme.id}
-      className={`${manrope.variable} ${geistMono.variable}`}
+      className={`${manrope.variable} ${bricolage.variable} ${geistMono.variable}`}
     >
       <body className="min-h-dvh font-sans antialiased">
         <SessionProvider>

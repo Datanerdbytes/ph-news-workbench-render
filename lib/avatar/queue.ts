@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "@/lib/db";
 import type { TtsVoiceId } from "@/lib/tts/voices";
-import { getAvatar, type AvatarId } from "./avatars";
+import {
+  getAvatar,
+  supportsAvatarTransparency,
+  type AvatarId,
+} from "./avatars";
 import { avatarLimits, estimateAvatarSeconds } from "./config";
 import {
   ACTIVE_AVATAR_STATUSES,
@@ -42,7 +46,8 @@ export async function enqueueAvatarJob(input: EnqueueInput): Promise<AvatarJobRo
   const avatar = getAvatar(input.avatarId);
   const estimatedSeconds = estimateAvatarSeconds(input.text, input.speed);
   const limits = avatarLimits();
-  const hasAlpha = input.transparent === true && avatar.kind === "video";
+  const hasAlpha =
+    input.transparent === true && supportsAvatarTransparency(avatar);
   const outputFormat = hasAlpha ? "webm" : "mp4";
   const results = await sql.transaction(
     [

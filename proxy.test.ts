@@ -64,6 +64,11 @@ describe("proxy matcher", () => {
     expect(isProxied("/api/stories")).toBe(false);
   });
 
+  it("keeps development HMR sockets out of the auth redirect", () => {
+    expect(isProxied("/_next/hmr")).toBe(false);
+    expect(isProxied("/_next/webpack-hmr")).toBe(false);
+  });
+
   it("still proxies the pages and the other API routes", () => {
     expect(isProxied("/reels")).toBe(true);
     expect(isProxied("/downloads")).toBe(true);

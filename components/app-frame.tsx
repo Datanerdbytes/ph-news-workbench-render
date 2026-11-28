@@ -384,7 +384,7 @@ export function AppFrame({
           // positions during document scroll; only `fill` pages (app-like
           // panes that manage their own internal scrolling) keep the chain.
           "lg:grid lg:grid-cols-[250px_minmax(0,1fr)]",
-          fill ? "h-full" : "min-h-dvh"
+          fill ? "h-full grid-rows-[minmax(0,1fr)]" : "min-h-dvh"
         )}
       >
         <aside
@@ -648,7 +648,7 @@ export function AppFrame({
           />
         )}
 
-        <div className={cn("flex min-h-0 min-w-0 flex-col", fill && "lg:h-full")}>
+        <div className={cn("flex min-h-0 min-w-0 flex-col", fill && "h-full")}>
           <header className="sticky top-0 z-30 flex h-[58px] shrink-0 items-center gap-3 border-b border-border bg-card/90 px-4 backdrop-blur-md sm:px-6">
             <button
               type="button"

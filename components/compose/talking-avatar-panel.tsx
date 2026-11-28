@@ -12,6 +12,7 @@ import {
 import { Button } from "@/components/ui/button";
 import {
   AVATARS,
+  supportsAvatarTransparency,
   type AvatarId,
 } from "@/lib/avatar/avatars";
 import {
@@ -81,7 +82,11 @@ export function TalkingAvatarPanel({
   const reusable = !job || job.publishState === "ready";
   const controlsDisabled = disabled || busy || active;
   const selectedAvatar = AVATARS.find((avatar) => avatar.id === avatarId);
-  const canRemoveBackground = selectedAvatar?.kind === "video";
+  const fullBodyAvatars = AVATARS.filter((avatar) => avatar.kind === "video");
+  const photoAvatars = AVATARS.filter((avatar) => avatar.kind === "photo");
+  const fullBodyAvatarId = selectedAvatar?.kind === "video" ? avatarId : "";
+  const photoAvatarId = selectedAvatar?.kind === "photo" ? avatarId : "";
+  const canRemoveBackground = supportsAvatarTransparency(selectedAvatar);
   const transparentPreview = Boolean(job?.hasAlpha);
   const status = busy
     ? "Starting the avatar job…"
@@ -146,51 +151,67 @@ export function TalkingAvatarPanel({
 
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="space-y-1.5 text-xs font-medium">
-            Avatar
+            Full-body avatar
             <select
-              value={avatarId}
+              value={fullBodyAvatarId}
               onChange={(event) => onAvatarChange(event.target.value as AvatarId)}
               disabled={controlsDisabled}
               className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
-              <optgroup label="Full body">
-                {AVATARS.filter((avatar) => avatar.kind === "video").map((avatar) => (
-                  <option key={avatar.id} value={avatar.id}>
-                    {avatar.name} · {avatar.style}
-                  </option>
-                ))}
-              </optgroup>
-              <optgroup label="Photo">
-                {AVATARS.filter((avatar) => avatar.kind === "photo").map((avatar) => (
-                  <option key={avatar.id} value={avatar.id} disabled={avatar.preview}>
-                    {avatar.name}
-                    {avatar.preview ? " · preview (real-time only)" : ""}
-                  </option>
-                ))}
-              </optgroup>
+              <option value="" disabled>
+                Choose a full-body avatar
+              </option>
+              {fullBodyAvatars.map((avatar) => (
+                <option key={avatar.id} value={avatar.id}>
+                  {avatar.name}
+                  {avatar.style ? ` · ${avatar.style}` : ""}
+                  {avatar.preview ? " · preview" : ""}
+                </option>
+              ))}
             </select>
           </label>
 
           <label className="space-y-1.5 text-xs font-medium">
-            Voice
+            Photo avatar
             <select
-              value={voiceId}
-              onChange={(event) => onVoiceChange(event.target.value as TtsVoiceId)}
+              value={photoAvatarId}
+              onChange={(event) => onAvatarChange(event.target.value as AvatarId)}
               disabled={controlsDisabled}
               className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
-              {TTS_VOICES.map((voice) => (
-                <option key={voice.id} value={voice.id}>
-                  {voice.label} · {voice.name} ({voice.gender})
+              <option value="" disabled>
+                Choose a photo avatar
+              </option>
+              {photoAvatars.map((avatar) => (
+                <option key={avatar.id} value={avatar.id} disabled={avatar.preview}>
+                  {avatar.name}
+                  {avatar.preview ? " · preview (real-time only)" : ""}
                 </option>
               ))}
             </select>
           </label>
         </div>
 
+        <label className="block space-y-1.5 text-xs font-medium">
+          Voice
+          <select
+            value={voiceId}
+            onChange={(event) => onVoiceChange(event.target.value as TtsVoiceId)}
+            disabled={controlsDisabled}
+            className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {TTS_VOICES.map((voice) => (
+              <option key={voice.id} value={voice.id}>
+                {voice.label} · {voice.name} ({voice.gender})
+              </option>
+            ))}
+          </select>
+        </label>
+
         <p className="-mt-1 text-xs leading-5 text-muted-foreground">
           Preview photo avatars are listed for reference, but currently require Azure
-          real-time synthesis and can&apos;t be used for generated videos.
+          real-time synthesis and can&apos;t be used for generated videos. Preview full-body
+          avatars can be generated with batch synthesis.
         </p>
 
         {canRemoveBackground ? (

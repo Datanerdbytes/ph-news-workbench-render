@@ -2,7 +2,10 @@ CREATE TABLE IF NOT EXISTS workspaces (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   owner_id TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  tts_provider TEXT NOT NULL DEFAULT 'azure' CHECK (tts_provider IN ('azure', 'assemblyai')),
+  assemblyai_api_key_encrypted TEXT,
+  assemblyai_voice_ids JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(assemblyai_voice_ids) = 'array')
 );
 
 CREATE TABLE IF NOT EXISTS user_preferences (

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import {
   AlertTriangle,
   AudioLines,
@@ -9,18 +10,22 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
-  MAX_TTS_SPEED,
-  MIN_TTS_SPEED,
-  TTS_VOICES,
-  type TtsVoiceId,
-} from "@/lib/tts/voices";
+  providerSupportsLanguage,
+  providerSupportsSpeed,
+  ttsProviderLabel,
+  voicesForProvider,
+  type TtsProviderId,
+} from "@/lib/tts/providers";
+import { MAX_TTS_SPEED, MIN_TTS_SPEED } from "@/lib/tts/voices";
 import { cn } from "@/lib/utils";
 
 export type VoiceOverAudio = {
   blob: Blob;
   url: string;
   text: string;
-  voiceId: TtsVoiceId;
+  voiceId: string;
+  provider: TtsProviderId;
+  language: "en" | "tl";
   speed: number;
   duration: number;
 };
@@ -29,8 +34,15 @@ type VoiceOverPanelProps = {
   enabled: boolean;
   onEnabledChange: (enabled: boolean) => void;
   showToggle?: boolean;
-  voiceId: TtsVoiceId;
-  onVoiceChange: (voiceId: TtsVoiceId) => void;
+  provider: TtsProviderId;
+  providerConfigured: boolean;
+  providerLoading: boolean;
+  providerRefreshing: boolean;
+  providerLoadError: string;
+  clonedVoiceIds: readonly string[];
+  language: "en" | "tl";
+  voiceId: string;
+  onVoiceChange: (voiceId: string) => void;
   speed: number;
   onSpeedChange: (speed: number) => void;
   originalVolume: number;
@@ -52,6 +64,13 @@ export function VoiceOverPanel({
   enabled,
   onEnabledChange,
   showToggle = true,
+  provider,
+  providerConfigured,
+  providerLoading,
+  providerRefreshing,
+  providerLoadError,
+  clonedVoiceIds,
+  language,
   voiceId,
   onVoiceChange,
   speed,
@@ -70,17 +89,33 @@ export function VoiceOverPanel({
   onRemove,
   onDurationChange,
 }: VoiceOverPanelProps) {
+  const voices = voicesForProvider(provider, clonedVoiceIds);
+  const languageSupported = providerSupportsLanguage(provider, language);
+  let blockedReason: string | undefined;
+  if (providerLoading) {
+    blockedReason = "Loading the saved voice-over provider…";
+  } else if (providerLoadError) {
+    blockedReason = providerLoadError;
+  } else if (!providerConfigured) {
+    blockedReason = `${ttsProviderLabel(provider)} is not configured. Update the voice-over provider or credentials in Settings.`;
+  } else if (!languageSupported) {
+    blockedReason = "AssemblyAI supports English voice-over only. Switch the draft to English or choose Azure Speech in Settings for Filipino or Tagalog.";
+  }
   const status = generating
     ? "Generating voice-over…"
-    : error
-      ? error
-      : stale
-        ? "The draft or voice settings changed. Regenerate the voice-over before publishing."
-        : audio
-          ? "Voice-over ready."
-          : enabled
-            ? "Generate a voice-over from the current draft."
-            : "Voice-over is off.";
+    : blockedReason
+      ? blockedReason
+      : error
+        ? error
+        : stale
+          ? "The draft, provider, or voice settings changed. Regenerate the voice-over before publishing."
+          : audio
+            ? "Voice-over ready."
+            : providerRefreshing
+              ? "Refreshing the saved voice-over provider…"
+              : enabled
+                ? "Generate a voice-over from the current draft."
+                : "Voice-over is off.";
 
   return (
     <div
@@ -140,43 +175,66 @@ export function VoiceOverPanel({
 
       {enabled ? (
         <div className="mt-3 space-y-4 border-t border-border/60 pt-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <p className="text-muted-foreground">
+              Provider: <strong className="font-semibold text-foreground">{ttsProviderLabel(provider)}</strong>
+            </p>
+            <Link
+              href="/settings#text-to-speech"
+              className="inline-flex min-h-11 items-center font-medium text-primary underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              Change in Settings
+            </Link>
+          </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="space-y-1.5 text-xs font-medium">
               Voice
               <select
                 value={voiceId}
-                onChange={(event) =>
-                  onVoiceChange(event.target.value as TtsVoiceId)
-                }
-                disabled={disabled || generating}
-                className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onChange={(event) => onVoiceChange(event.target.value)}
+                disabled={disabled || generating || providerLoading || providerRefreshing || Boolean(providerLoadError) || !providerConfigured || !languageSupported}
+                className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
               >
-                {TTS_VOICES.map((voice) => (
+                {voices.map((voice) => (
                   <option key={voice.id} value={voice.id}>
-                    {voice.label} · {voice.name} ({voice.gender})
+                    {voice.cloned
+                      ? `Cloned · ${voice.name}`
+                      : `${voice.label} · ${voice.name} (${voice.gender})`}
                   </option>
                 ))}
               </select>
             </label>
 
-            <label className="space-y-1.5 text-xs font-medium">
-              <span className="flex items-center justify-between gap-2">
-                Speaking speed
-                <span className="font-normal text-muted-foreground">
-                  {speed.toFixed(2)}×
+            {providerSupportsSpeed(provider) ? (
+              <label className="space-y-1.5 text-xs font-medium">
+                <span className="flex items-center justify-between gap-2">
+                  Speaking speed
+                  <span className="font-normal text-muted-foreground">
+                    {speed.toFixed(2)}×
+                  </span>
                 </span>
-              </span>
-              <input
-                type="range"
-                min={MIN_TTS_SPEED}
-                max={MAX_TTS_SPEED}
-                step={0.05}
-                value={speed}
-                onChange={(event) => onSpeedChange(Number(event.target.value))}
-                disabled={disabled || generating}
-                className="mt-4 h-2 w-full cursor-pointer accent-primary"
-              />
-            </label>
+                <input
+                  type="range"
+                  min={MIN_TTS_SPEED}
+                  max={MAX_TTS_SPEED}
+                  step={0.05}
+                  value={speed}
+                  onChange={(event) => onSpeedChange(Number(event.target.value))}
+                  disabled={disabled || generating || providerLoading || providerRefreshing || Boolean(providerLoadError) || !providerConfigured}
+                  className="mt-4 h-2 w-full cursor-pointer accent-primary disabled:opacity-60"
+                />
+              </label>
+            ) : (
+              <div className="space-y-1.5 text-xs font-medium">
+                <p>Speaking speed</p>
+                <div className="flex h-11 items-center rounded-md border border-input bg-muted/30 px-3 text-sm">
+                  Natural (1.00×)
+                </div>
+                <p className="text-[11px] font-normal leading-relaxed text-muted-foreground">
+                  AssemblyAI uses a fixed natural speaking speed.
+                </p>
+              </div>
+            )}
           </div>
 
           {showOriginalVolume ? (
@@ -218,7 +276,15 @@ export function VoiceOverPanel({
               size="sm"
               onClick={onGenerate}
               disabled={
-                disabled || generating || !hasMedia || !hasText
+                disabled ||
+                generating ||
+                providerLoading ||
+                providerRefreshing ||
+                Boolean(providerLoadError) ||
+                !providerConfigured ||
+                !languageSupported ||
+                !hasMedia ||
+                !hasText
               }
               className="min-h-11"
             >

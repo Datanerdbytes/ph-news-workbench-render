@@ -1,4 +1,8 @@
-import { sql } from "@/lib/db";
+import {
+  reserveTtsQuota,
+  TtsError,
+  type TtsSynthesisResult,
+} from "./shared";
 import {
   ANGELO_NEWS_VOICE_ID,
   buildAngeloNewsSSML,
@@ -10,33 +14,14 @@ import {
   type TtsVoiceId,
 } from "./voices";
 
+export { TtsError } from "./shared";
+export type { TtsSynthesisResult } from "./shared";
+
 const TIMEOUT_MS = 60_000;
 // The news-anchor voice gets the broadcast bitrate; every other voice keeps
 // the original high-fidelity format.
 const BROADCAST_OUTPUT_FORMAT = "audio-24khz-96kbitrate-mono-mp3";
 const DEFAULT_OUTPUT_FORMAT = "audio-48khz-192kbitrate-mono-mp3";
-
-export class TtsError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly code: string,
-    message: string,
-  ) {
-    super(message);
-    this.name = "TtsError";
-  }
-}
-
-export type TtsSynthesisResult = {
-  audio: ArrayBuffer;
-  voiceId: TtsVoiceId;
-  characters: number;
-};
-
-function positiveInteger(name: string, fallback: number): number {
-  const value = Number(process.env[name]);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
-}
 
 function speechEndpoint(): { key: string; url: string } {
   const key = process.env.AZURE_SPEECH_KEY?.trim();
@@ -88,43 +73,6 @@ export function buildTtsSsml(
   const rate = Math.round((speed - 1) * 100);
   const rateValue = `${rate >= 0 ? "+" : ""}${rate}%`;
   return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="${voice.locale}"><voice name="${voice.id}"><prosody rate="${rateValue}">${escapeXml(text)}</prosody></voice></speak>`;
-}
-
-async function reserveQuota(
-  workspaceId: string,
-  characters: number,
-): Promise<void> {
-  const requestCap = positiveInteger("TTS_DAILY_REQUEST_CAP", 25);
-  const characterCap = positiveInteger("TTS_DAILY_CHARACTER_CAP", 100_000);
-  if (characters > characterCap) {
-    throw new TtsError(
-      429,
-      "quota_exceeded",
-      "This voice-over exceeds the daily character allowance. Try a shorter draft.",
-    );
-  }
-
-  const day = new Date().toISOString().slice(0, 10);
-  const rows = (await sql`
-    INSERT INTO tts_usage_daily (day, workspace_id, requests, characters)
-    VALUES (${day}, ${workspaceId}, 1, ${characters})
-    ON CONFLICT (day, workspace_id) DO UPDATE
-    SET requests = tts_usage_daily.requests + 1,
-        characters = tts_usage_daily.characters + ${characters}
-    WHERE tts_usage_daily.requests < ${requestCap}
-      AND tts_usage_daily.characters + ${characters} <= ${characterCap}
-    RETURNING requests, characters`) as unknown as Array<{
-    requests: number;
-    characters: number;
-  }>;
-
-  if (!rows.length) {
-    throw new TtsError(
-      429,
-      "quota_exceeded",
-      "The daily voice-over allowance is used up. Try again tomorrow.",
-    );
-  }
 }
 
 function providerError(status: number): TtsError {
@@ -181,7 +129,7 @@ export async function synthesizeSpeech(input: {
   const outputFormat = isNewsAnchor
     ? BROADCAST_OUTPUT_FORMAT
     : DEFAULT_OUTPUT_FORMAT;
-  await reserveQuota(input.workspaceId, input.text.length);
+  await reserveTtsQuota(input.workspaceId, input.text.length);
 
   let response: Response;
   try {

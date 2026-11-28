@@ -73,7 +73,12 @@ describe("synthesizeSpeech", () => {
     expect(body).toContain('<voice name="en-PH-RosaNeural">');
     expect(body).not.toContain("fil-PH-AngeloNeural");
     expect(body).not.toContain("<break");
-    expect(sqlMock.mock.calls[0][0].join("?")).toContain("tts_usage_daily");
+    const quotaCall = sqlMock.mock.calls[0];
+    expect(quotaCall[0].join("?")).toContain("tts_usage_daily");
+    expect(quotaCall[0].join("?")).toContain("VALUES (?, ?, 1, ?)");
+    expect(quotaCall[1]).toEqual(expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
+    expect(quotaCall[2]).toBe("ws1");
+    expect(quotaCall.slice(1)).toContain(12);
   });
 
   it("applies the news-anchor SSML and broadcast format to fil-PH-AngeloNeural", async () => {

@@ -173,6 +173,8 @@ describe("POST /api/avatar/syntheses", () => {
 
   it.each([
     [{ ...VALID_BODY, avatarId: "anika", transparent: true }, "transparency_unavailable"],
+    [{ ...VALID_BODY, avatarId: "rowan", transparent: true }, "transparency_unavailable"],
+    [{ ...VALID_BODY, avatarId: "harry-business", transparent: true }, "transparency_unavailable"],
     [{ ...VALID_BODY, transparent: "yes" }, "invalid_transparency"],
   ])("rejects unsupported transparency requests", async (body, code) => {
     const response = await post(body);
@@ -246,6 +248,26 @@ describe("POST /api/avatar/syntheses", () => {
       expect.objectContaining({ avatarId: "adrian" }),
     );
   });
+
+  it.each(["rowan", "lisa-business-sitting"] as const)(
+    "accepts the batch-supported full-body avatar %s",
+    async (avatarId) => {
+      enqueueAvatarJobMock.mockResolvedValue(
+        row({
+          avatar_id: avatarId,
+          avatar_kind: "video",
+          avatar_style: avatarId === "rowan" ? null : "business-sitting",
+        }),
+      );
+
+      const response = await post({ ...VALID_BODY, avatarId });
+
+      expect(response.status).toBe(202);
+      expect(enqueueAvatarJobMock).toHaveBeenCalledWith(
+        expect.objectContaining({ avatarId }),
+      );
+    },
+  );
 
   it("rejects malformed JSON", async () => {
     const response = await POST(
