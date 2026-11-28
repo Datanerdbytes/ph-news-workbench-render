@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   SECRET_INFOS,
+  decryptAssemblyAiKey,
   decryptSecret,
+  decryptToken,
+  encryptAssemblyAiKey,
   encryptSecret,
   encryptToken,
 } from "./facebook-token";
@@ -26,6 +29,28 @@ describe("encryptSecret / decryptSecret round-trip", () => {
     expect(first.startsWith("v1.")).toBe(true);
     expect(first).not.toBe(second); // fresh IV every time
     expect(first.split(".")).toHaveLength(4);
+  });
+});
+
+describe("AssemblyAI API key encryption", () => {
+  it("round-trips a key without exposing it in the ciphertext", () => {
+    vi.stubEnv("BETTER_AUTH_SECRET", "test-secret-123");
+    const key = "assemblyai-secret-key";
+    const payload = encryptAssemblyAiKey(key);
+
+    expect(payload.startsWith("v1.")).toBe(true);
+    expect(payload).not.toContain(key);
+    expect(decryptAssemblyAiKey(payload)).toBe(key);
+  });
+
+  it("uses a different derivation from Facebook page tokens", () => {
+    vi.stubEnv("BETTER_AUTH_SECRET", "test-secret-123");
+    const assemblyAiPayload = encryptAssemblyAiKey("shared-secret");
+    const facebookPayload = encryptToken("shared-secret");
+
+    expect(assemblyAiPayload).not.toBe(facebookPayload);
+    expect(() => decryptToken(assemblyAiPayload)).toThrow();
+    expect(() => decryptAssemblyAiKey(facebookPayload)).toThrow();
   });
 });
 

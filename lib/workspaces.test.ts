@@ -31,6 +31,9 @@ describe("getWorkspaceForUser", () => {
         owner_id: "u1",
         role: "editor",
         ai_model: "google/gemma-4-31b-it:free",
+        tts_provider: null,
+        assemblyai_key_configured: false,
+        assemblyai_voice_ids: [],
       },
     ]);
 
@@ -40,9 +43,79 @@ describe("getWorkspaceForUser", () => {
       role: "editor",
       ownerId: "u1",
       aiModel: "google/gemma-4-31b-it:free",
+      ttsProvider: "azure",
+      assemblyAiKeyConfigured: false,
+      assemblyAiVoiceIds: [],
     });
 
     expect(sqlMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps a saved AssemblyAI provider and key-configured flag", async () => {
+    useDb([
+      {
+        id: "ws1",
+        name: "Newsroom",
+        owner_id: "u1",
+        role: "owner",
+        ai_model: null,
+        tts_provider: "assemblyai",
+        assemblyai_key_configured: true,
+        assemblyai_voice_ids: ["cloned-voice-id"],
+      },
+    ]);
+
+    await expect(getWorkspaceForUser({ id: "u1" })).resolves.toMatchObject({
+      ttsProvider: "assemblyai",
+      assemblyAiKeyConfigured: true,
+      assemblyAiVoiceIds: ["cloned-voice-id"],
+    });
+    expect(callText(sqlMock.mock.calls[0])).toContain(
+      "(w.assemblyai_api_key_encrypted IS NOT NULL) AS assemblyai_key_configured",
+    );
+    expect(callText(sqlMock.mock.calls[0])).toContain(
+      "w.assemblyai_voice_ids",
+    );
+  });
+
+  it("ignores malformed stored cloned voice IDs", async () => {
+    useDb([
+      {
+        id: "ws1",
+        name: "Newsroom",
+        owner_id: "u1",
+        role: "owner",
+        ai_model: null,
+        tts_provider: "assemblyai",
+        assemblyai_key_configured: true,
+        assemblyai_voice_ids: ["bad id"],
+      },
+    ]);
+
+    await expect(getWorkspaceForUser({ id: "u1" })).resolves.toMatchObject({
+      assemblyAiVoiceIds: [],
+    });
+  });
+
+  it("falls back to Azure for an unknown stored provider", async () => {
+    useDb([
+      {
+        id: "ws1",
+        name: "Newsroom",
+        owner_id: "u1",
+        role: "owner",
+        ai_model: null,
+        tts_provider: "unsupported",
+        assemblyai_key_configured: true,
+        assemblyai_voice_ids: ["cloned-voice-id"],
+      },
+    ]);
+
+    await expect(getWorkspaceForUser({ id: "u1" })).resolves.toMatchObject({
+      ttsProvider: "azure",
+      assemblyAiKeyConfigured: true,
+      assemblyAiVoiceIds: ["cloned-voice-id"],
+    });
   });
 
   it("bootstraps a personal workspace for members-less users", async () => {
@@ -54,6 +127,9 @@ describe("getWorkspaceForUser", () => {
       role: "owner",
       ownerId: "u9",
       aiModel: null,
+      ttsProvider: "azure",
+      assemblyAiKeyConfigured: false,
+      assemblyAiVoiceIds: [],
     });
 
     const inserts = sqlMock.mock.calls.map(callText);

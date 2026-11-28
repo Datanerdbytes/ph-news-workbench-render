@@ -17,6 +17,15 @@ import { authClient } from "@/lib/auth-client";
 import { validateNewPassword } from "@/lib/password";
 import { isTextModel, textModelLabel, TEXT_MODELS } from "@/lib/models";
 import { isThemeId, THEMES, type ThemeId } from "@/lib/themes";
+import {
+  DEFAULT_TTS_PROVIDER,
+  isTtsProviderId,
+  MAX_ASSEMBLYAI_CLONED_VOICES,
+  MAX_ASSEMBLYAI_VOICE_ID_LENGTH,
+  normalizeAssemblyAiVoiceIds,
+  TTS_PROVIDERS,
+  type TtsProviderId,
+} from "@/lib/tts/providers";
 
 type WorkspaceInfo = {
   id: string;
@@ -25,6 +34,10 @@ type WorkspaceInfo = {
   memberCount: number;
   aiModel: string | null;
   defaultModel: string;
+  ttsProvider: TtsProviderId;
+  ttsConfigured: boolean;
+  assemblyAiKeyConfigured: boolean;
+  assemblyAiVoiceIds: string[];
 };
 
 /**
@@ -101,6 +114,10 @@ export default function SettingsPage() {
   const [model, setModel] = useState("");
   const [saving, setSaving] = useState(false);
   const [savingModel, setSavingModel] = useState(false);
+  const [assemblyAiKey, setAssemblyAiKey] = useState("");
+  const [assemblyAiVoiceIdsText, setAssemblyAiVoiceIdsText] = useState("");
+  const [savingTts, setSavingTts] = useState(false);
+  const [ttsError, setTtsError] = useState("");
   const [theme, setTheme] = useState<ThemeId>("ink-white");
   // The <html> data-theme attribute derives from the saved preference state —
   // one writer, covering initial load, optimistic switches, and reverts.
@@ -125,6 +142,12 @@ export default function SettingsPage() {
           return;
         }
         setWorkspace(data);
+        setAssemblyAiVoiceIdsText(
+          Array.isArray(data.assemblyAiVoiceIds)
+            ? data.assemblyAiVoiceIds.join("\n")
+            : "",
+        );
+        setTtsError("");
         setName(data.name ?? "");
         // A workspace saved under the old NIM catalog can still carry a model
         // id this build does not know. Show the model drafts actually use.
@@ -239,6 +262,179 @@ export default function SettingsPage() {
       });
     } finally {
       setSavingModel(false);
+    }
+  }
+
+  async function changeTtsProvider(next: TtsProviderId) {
+    if (
+      !workspace ||
+      workspace.role !== "owner" ||
+      savingTts ||
+      next === workspace.ttsProvider
+    ) {
+      return;
+    }
+    if (next === "assemblyai" && !workspace.assemblyAiKeyConfigured) {
+      setTtsError("Save an AssemblyAI API key below before switching providers.");
+      return;
+    }
+
+    setSavingTts(true);
+    setTtsError("");
+    try {
+      const res = await fetch("/api/workspace", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ttsProvider: next }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Could not change the provider.");
+      setWorkspace((current) =>
+        current
+          ? {
+              ...current,
+              ttsProvider: next,
+              ttsConfigured: Boolean(data.ttsConfigured),
+              assemblyAiKeyConfigured: Boolean(data.assemblyAiKeyConfigured),
+            }
+          : current,
+      );
+      toast.success("Voice-over provider updated", {
+        description: `Compose will use ${TTS_PROVIDERS.find((provider) => provider.id === next)?.label}.`,
+      });
+    } catch (error) {
+      setTtsError(
+        error instanceof Error ? error.message : "Could not change the provider.",
+      );
+    } finally {
+      setSavingTts(false);
+    }
+  }
+
+  async function saveAssemblyAiKey(event: React.FormEvent) {
+    event.preventDefault();
+    const key = assemblyAiKey.trim();
+    if (!workspace || workspace.role !== "owner" || !key || savingTts) return;
+
+    setSavingTts(true);
+    setTtsError("");
+    try {
+      const res = await fetch("/api/workspace", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ assemblyaiApiKey: key }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Could not save the API key.");
+      setAssemblyAiKey("");
+      setWorkspace((current) =>
+        current
+          ? {
+              ...current,
+              assemblyAiKeyConfigured: Boolean(data.assemblyAiKeyConfigured),
+              ttsConfigured: Boolean(data.ttsConfigured),
+            }
+          : current,
+      );
+      toast.success("AssemblyAI API key saved", {
+        description: "The key is encrypted and is never shown again.",
+      });
+    } catch (error) {
+      setTtsError(
+        error instanceof Error ? error.message : "Could not save the API key.",
+      );
+    } finally {
+      setSavingTts(false);
+    }
+  }
+
+  async function removeAssemblyAiKey() {
+    if (!workspace || workspace.role !== "owner" || savingTts) return;
+    setSavingTts(true);
+    setTtsError("");
+    try {
+      const res = await fetch("/api/workspace", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          assemblyaiApiKey: null,
+          ...(workspace.ttsProvider === "assemblyai"
+            ? { ttsProvider: "azure" }
+            : {}),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Could not remove the API key.");
+      setAssemblyAiKey("");
+      setWorkspace((current) =>
+        current
+          ? {
+              ...current,
+              ttsProvider: isTtsProviderId(data.ttsProvider)
+                ? data.ttsProvider
+                : current.ttsProvider,
+              ttsConfigured: Boolean(data.ttsConfigured),
+              assemblyAiKeyConfigured: false,
+            }
+          : current,
+      );
+      toast.success("AssemblyAI API key removed");
+    } catch (error) {
+      setTtsError(
+        error instanceof Error ? error.message : "Could not remove the API key.",
+      );
+    } finally {
+      setSavingTts(false);
+    }
+  }
+
+  async function saveAssemblyAiVoiceIds(event: React.FormEvent) {
+    event.preventDefault();
+    const voiceIds = normalizeAssemblyAiVoiceIds(
+      assemblyAiVoiceIdsText
+        .split(/\r?\n/)
+        .map((voiceId) => voiceId.trim())
+        .filter(Boolean),
+    );
+    if (!workspace || workspace.role !== "owner" || savingTts) return;
+    if (!voiceIds) {
+      setTtsError(
+        `Enter up to ${MAX_ASSEMBLYAI_CLONED_VOICES} valid AssemblyAI voice IDs, each no longer than ${MAX_ASSEMBLYAI_VOICE_ID_LENGTH} characters.`,
+      );
+      return;
+    }
+
+    setSavingTts(true);
+    setTtsError("");
+    try {
+      const res = await fetch("/api/workspace", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ assemblyaiVoiceIds: voiceIds }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Could not save the voice IDs.");
+      const savedVoiceIds = Array.isArray(data.assemblyAiVoiceIds)
+        ? data.assemblyAiVoiceIds
+        : voiceIds;
+      setAssemblyAiVoiceIdsText(savedVoiceIds.join("\n"));
+      setWorkspace((current) =>
+        current ? { ...current, assemblyAiVoiceIds: savedVoiceIds } : current,
+      );
+      toast.success(
+        savedVoiceIds.length ? "AssemblyAI cloned voices saved" : "AssemblyAI cloned voices removed",
+        {
+          description: savedVoiceIds.length
+            ? "These voices are now available in Compose."
+            : "Compose will use the built-in AssemblyAI voices.",
+        },
+      );
+    } catch (error) {
+      setTtsError(
+        error instanceof Error ? error.message : "Could not save the voice IDs.",
+      );
+    } finally {
+      setSavingTts(false);
     }
   }
 
@@ -516,6 +712,172 @@ export default function SettingsPage() {
           <p className="mt-2 text-[10.5px] text-muted-foreground">
             {TEXT_MODELS.find((option) => option.id === model)?.detail ??
               "Served through OpenRouter's free tier."}
+          </p>
+        </section>
+
+        <section id="text-to-speech" className="mt-3 scroll-mt-6 rounded-xl border border-border bg-card p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-[13px] font-semibold">Text-to-speech</h2>
+            {savingTts && (
+              <span className="text-[10.5px] text-muted-foreground">Saving…</span>
+            )}
+          </div>
+          <p className="mt-0.5 text-[10.5px] text-muted-foreground">
+            {isOwner
+              ? "Choose the voice-over provider used by every composer in this workspace."
+              : "Only workspace owners can change the voice-over provider."}
+          </p>
+          <div
+            className="mt-3 grid gap-2 sm:grid-cols-2"
+            role="radiogroup"
+            aria-label="Text-to-speech provider"
+          >
+            {TTS_PROVIDERS.map((provider) => {
+              const selected = provider.id === (workspace?.ttsProvider ?? DEFAULT_TTS_PROVIDER);
+              return (
+                <button
+                  key={provider.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  disabled={!isOwner || savingTts}
+                  onClick={() => void changeTtsProvider(provider.id)}
+                  className={cn(
+                    "flex min-h-11 items-start gap-2.5 rounded-lg border px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60",
+                    selected
+                      ? "border-ring bg-brand-soft/60 ring-2 ring-ring/30"
+                      : "border-border hover:bg-surface-2",
+                  )}
+                >
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[12px] font-semibold">{provider.label}</span>
+                    <span className="mt-0.5 block text-[10.5px] leading-relaxed text-muted-foreground">
+                      {provider.detail}
+                    </span>
+                  </span>
+                  {selected && (
+                    <Check className="size-4 shrink-0 text-brand-accent" aria-hidden />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          <p className="mt-2 text-[10.5px] leading-relaxed text-muted-foreground">
+            {!workspace
+              ? "Loading the saved provider…"
+              : workspace.ttsConfigured
+                ? `${TTS_PROVIDERS.find((provider) => provider.id === workspace.ttsProvider)?.label} is ready for voice-over generation.`
+                : workspace.ttsProvider === "azure"
+                  ? "Azure Speech is selected. Add AZURE_SPEECH_KEY and AZURE_SPEECH_REGION to the server environment to enable it."
+                  : "AssemblyAI is selected but no API key is saved."}
+          </p>
+          <p className="mt-1 text-[10.5px] leading-relaxed text-muted-foreground">
+            Provider changes apply to the next voice-over. Regenerate existing narration afterward. Talking avatars always use Azure Speech.
+          </p>
+
+          <form
+            onSubmit={saveAssemblyAiKey}
+            className="mt-4 space-y-2 border-t border-border/60 pt-4"
+          >
+            <label htmlFor="assemblyai-api-key" className="block text-[11px] font-semibold">
+              AssemblyAI API key
+            </label>
+            <p id="assemblyai-key-help" className="text-[10.5px] leading-relaxed text-muted-foreground">
+              Save your key before selecting AssemblyAI. It is encrypted at rest and never returned to the browser.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <input
+                id="assemblyai-api-key"
+                type="password"
+                autoComplete="off"
+                value={assemblyAiKey}
+                onChange={(event) => setAssemblyAiKey(event.target.value)}
+                disabled={!isOwner || savingTts}
+                aria-describedby="assemblyai-key-help tts-settings-error"
+                maxLength={4096}
+                placeholder={
+                  workspace?.assemblyAiKeyConfigured
+                    ? "Enter a new key to replace the saved key"
+                    : "Paste your AssemblyAI API key"
+                }
+                className="h-11 min-w-0 flex-1 rounded-lg border border-border bg-background px-3 text-[12.5px] outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60"
+              />
+              <Button
+                type="submit"
+                disabled={!isOwner || savingTts || !assemblyAiKey.trim()}
+                className="h-11"
+              >
+                {savingTts ? "Saving…" : "Save key"}
+              </Button>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[10.5px] text-muted-foreground">
+                {workspace?.assemblyAiKeyConfigured
+                  ? "API key saved."
+                  : "No AssemblyAI API key saved."}
+              </span>
+              {workspace?.assemblyAiKeyConfigured ? (
+                <ConfirmButton
+                  variant="ghost"
+                  className="h-11"
+                  onConfirm={removeAssemblyAiKey}
+                  disabled={!isOwner || savingTts}
+                  confirmLabel="Confirm removal"
+                  busyLabel="Removing…"
+                >
+                  Remove key
+                </ConfirmButton>
+              ) : null}
+            </div>
+            <p className="text-[10.5px] leading-relaxed text-muted-foreground">
+              Removing the key switches an active AssemblyAI workspace back to Azure Speech.
+            </p>
+          </form>
+          <form
+            onSubmit={saveAssemblyAiVoiceIds}
+            className="mt-4 space-y-2 border-t border-border/60 pt-4"
+          >
+            <label htmlFor="assemblyai-voice-ids" className="block text-[11px] font-semibold">
+              AssemblyAI cloned voice IDs
+            </label>
+            <p id="assemblyai-voices-help" className="text-[10.5px] leading-relaxed text-muted-foreground">
+              Paste one cloned voice ID per line from AssemblyAI. Saved IDs appear in Compose when AssemblyAI is selected and work with English voice-over only.
+            </p>
+            <textarea
+              id="assemblyai-voice-ids"
+              value={assemblyAiVoiceIdsText}
+              onChange={(event) => setAssemblyAiVoiceIdsText(event.target.value)}
+              disabled={!isOwner || savingTts}
+              aria-describedby="assemblyai-voices-help tts-settings-error"
+              rows={4}
+              maxLength={MAX_ASSEMBLYAI_CLONED_VOICES * (MAX_ASSEMBLYAI_VOICE_ID_LENGTH + 1)}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder={"cloned-voice-id-or-uuid\nanother-cloned-voice-id"}
+              className="min-h-11 w-full resize-y rounded-lg border border-border bg-background px-3 py-2 text-[12.5px] outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60"
+            />
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[10.5px] text-muted-foreground">
+                {workspace?.assemblyAiVoiceIds?.length ?? 0} cloned voice{workspace?.assemblyAiVoiceIds?.length === 1 ? "" : "s"} saved.
+              </span>
+              <Button
+                type="submit"
+                disabled={!isOwner || savingTts}
+                className="h-11"
+              >
+                {savingTts ? "Saving…" : "Save voice IDs"}
+              </Button>
+            </div>
+          </form>
+          <p
+            id="tts-settings-error"
+            role="alert"
+            className={cn(
+              "mt-2 text-[11px] text-destructive",
+              !ttsError && "hidden",
+            )}
+          >
+            {ttsError}
           </p>
         </section>
 

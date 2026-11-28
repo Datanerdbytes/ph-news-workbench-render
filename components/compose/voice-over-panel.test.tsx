@@ -1,16 +1,33 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import type { ComponentProps } from "react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   VoiceOverPanel,
   type VoiceOverAudio,
 } from "./voice-over-panel";
 
-function props(overrides: Record<string, unknown> = {}) {
+function props(
+  overrides: Partial<ComponentProps<typeof VoiceOverPanel>> = {},
+): ComponentProps<typeof VoiceOverPanel> {
   return {
     enabled: true,
     onEnabledChange: vi.fn(),
-    voiceId: "en-PH-RosaNeural" as const,
+    showToggle: true,
+    provider: "azure",
+    providerConfigured: true,
+    providerLoading: false,
+    providerRefreshing: false,
+    providerLoadError: "",
+    clonedVoiceIds: [],
+    language: "en",
+    voiceId: "en-PH-RosaNeural",
     onVoiceChange: vi.fn(),
     speed: 1,
     onSpeedChange: vi.fn(),
@@ -36,6 +53,8 @@ const readyAudio: VoiceOverAudio = {
   url: "blob:narration",
   text: "A ready draft",
   voiceId: "en-PH-RosaNeural",
+  provider: "azure",
+  language: "en",
   speed: 1,
   duration: 3.2,
 };
@@ -81,7 +100,7 @@ describe("VoiceOverPanel", () => {
     ).toBe(false);
   });
 
-  it("lists U.S. English voices and wires narration controls", () => {
+  it("lists Azure voices and wires narration controls", () => {
     const panelProps = props({ showOriginalVolume: true });
     render(<VoiceOverPanel {...panelProps} />);
 
@@ -107,6 +126,174 @@ describe("VoiceOverPanel", () => {
     );
     expect(panelProps.onSpeedChange).toHaveBeenCalledWith(1.25);
     expect(panelProps.onOriginalVolumeChange).toHaveBeenCalledWith(0.5);
+  });
+
+  it("renders AssemblyAI voices with a fixed natural speaking speed", () => {
+    const panelProps = props({
+      provider: "assemblyai",
+      voiceId: "aai-kyla",
+      speed: 1.25,
+    });
+    render(<VoiceOverPanel {...panelProps} />);
+
+    const voice = screen.getByLabelText("Voice");
+    expect(within(voice).getAllByRole("option")).toHaveLength(4);
+    expect(
+      screen.getByRole("option", { name: "English (US) · Kyla (Female)" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("option", { name: "English (US) · Titus (Male)" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("option", { name: /English \(PH\) · Rosa/ }),
+    ).toBeNull();
+    expect(screen.getByText("Natural (1.00×)")).toBeTruthy();
+    expect(
+      screen.getByText("AssemblyAI uses a fixed natural speaking speed."),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("slider", { name: /Speaking speed/ }),
+    ).toBeNull();
+
+    fireEvent.change(voice, { target: { value: "aai-peter" } });
+    expect(panelProps.onVoiceChange).toHaveBeenCalledWith("aai-peter");
+    expect(panelProps.onSpeedChange).not.toHaveBeenCalled();
+  });
+
+  it("lists configured AssemblyAI cloned voices by ID", () => {
+    const panelProps = props({
+      provider: "assemblyai",
+      voiceId: "cloned-voice-id",
+      clonedVoiceIds: ["cloned-voice-id"],
+    });
+    render(<VoiceOverPanel {...panelProps} />);
+
+    expect(
+      screen.getByRole("option", { name: "Cloned · cloned-voice-id" }),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Voice"), {
+      target: { value: "cloned-voice-id" },
+    });
+    expect(panelProps.onVoiceChange).toHaveBeenCalledWith("cloned-voice-id");
+  });
+
+  it("shows the provider as read-only and links to its Settings section", () => {
+    render(
+      <VoiceOverPanel
+        {...props({ provider: "assemblyai", voiceId: "aai-kyla" })}
+      />,
+    );
+
+    expect(screen.getByText("Provider:").parentElement).toHaveTextContent(
+      "Provider: AssemblyAI",
+    );
+    expect(
+      screen.queryByRole("combobox", { name: /provider/i }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("radiogroup", { name: /provider/i }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("link", { name: "Change in Settings" }),
+    ).toHaveAttribute("href", "/settings#text-to-speech");
+  });
+
+  it("blocks AssemblyAI for Filipino/Tagalog and explains how to enable it", () => {
+    const panelProps = props({
+      provider: "assemblyai",
+      voiceId: "aai-kyla",
+      language: "tl",
+    });
+    const { rerender } = render(<VoiceOverPanel {...panelProps} />);
+
+    const generate = screen.getByRole("button", {
+      name: "Generate voice-over",
+    }) as HTMLButtonElement;
+    expect(generate).toBeDisabled();
+    expect(screen.getByLabelText("Voice")).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "AssemblyAI supports English voice-over only. Switch the draft to English or choose Azure Speech in Settings for Filipino or Tagalog.",
+    );
+    fireEvent.click(generate);
+    expect(panelProps.onGenerate).not.toHaveBeenCalled();
+
+    rerender(
+      <VoiceOverPanel
+        {...props({
+          language: "tl",
+          voiceId: "fil-PH-BlessicaNeural",
+        })}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Generate voice-over" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("option", { name: "Filipino · Blessica (Female)" }),
+    ).toBeTruthy();
+  });
+
+  it.each([
+    {
+      name: "unconfigured",
+      overrides: { providerConfigured: false },
+      message:
+        "AssemblyAI is not configured. Update the voice-over provider or credentials in Settings.",
+    },
+    {
+      name: "loading",
+      overrides: { providerConfigured: false, providerLoading: true },
+      message: "Loading the saved voice-over provider…",
+    },
+    {
+      name: "failed to load",
+      overrides: {
+        providerConfigured: false,
+        providerLoadError: "Could not load the saved voice-over provider.",
+      },
+      message: "Could not load the saved voice-over provider.",
+    },
+  ])("disables generation when the provider is $name", ({ overrides, message }) => {
+    const panelProps = props({
+      provider: "assemblyai",
+      voiceId: "aai-kyla",
+      ...overrides,
+    });
+    render(<VoiceOverPanel {...panelProps} />);
+
+    const generate = screen.getByRole("button", {
+      name: "Generate voice-over",
+    }) as HTMLButtonElement;
+    expect(generate).toBeDisabled();
+    expect(screen.getByLabelText("Voice")).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent(message);
+    fireEvent.click(generate);
+    expect(panelProps.onGenerate).not.toHaveBeenCalled();
+  });
+
+  it("blocks regeneration during a settings refresh without hiding ready audio", () => {
+    const panelProps = props({
+      audio: readyAudio,
+      providerRefreshing: true,
+    });
+    const { rerender } = render(<VoiceOverPanel {...panelProps} />);
+
+    const regenerate = screen.getByRole("button", {
+      name: "Regenerate voice-over",
+    }) as HTMLButtonElement;
+    expect(regenerate).toBeDisabled();
+    expect(screen.getByLabelText("Voice")).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Voice-over ready.");
+    fireEvent.click(regenerate);
+    expect(panelProps.onGenerate).not.toHaveBeenCalled();
+
+    rerender(<VoiceOverPanel {...props({ providerRefreshing: true })} />);
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Refreshing the saved voice-over provider",
+    );
+    expect(
+      screen.getByRole("button", { name: "Generate voice-over" }),
+    ).toBeDisabled();
   });
 
   it("shows the generated preview and lets the user remove it", () => {

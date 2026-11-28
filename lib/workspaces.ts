@@ -1,11 +1,21 @@
 import { sql } from "@/lib/db";
 
+import {
+  DEFAULT_TTS_PROVIDER,
+  isTtsProviderId,
+  readAssemblyAiVoiceIds,
+  type TtsProviderId,
+} from "@/lib/tts/providers";
+
 export type Workspace = {
   id: string;
   name: string;
   role: string;
   ownerId: string;
   aiModel: string | null;
+  ttsProvider: TtsProviderId;
+  assemblyAiKeyConfigured: boolean;
+  assemblyAiVoiceIds: string[];
 };
 
 type Row = {
@@ -14,6 +24,9 @@ type Row = {
   owner_id: string;
   role: string;
   ai_model: string | null;
+  tts_provider: string | null;
+  assemblyai_key_configured: boolean;
+  assemblyai_voice_ids: unknown;
 };
 
 export async function getWorkspaceForUser(user: {
@@ -21,7 +34,9 @@ export async function getWorkspaceForUser(user: {
   name?: string | null;
 }): Promise<Workspace> {
   const rows = (await sql`
-    SELECT w.id, w.name, w.owner_id, m.role, w.ai_model
+    SELECT w.id, w.name, w.owner_id, m.role, w.ai_model, w.tts_provider,
+           w.assemblyai_voice_ids,
+           (w.assemblyai_api_key_encrypted IS NOT NULL) AS assemblyai_key_configured
     FROM workspace_members m
     JOIN workspaces w ON w.id = m.workspace_id
     WHERE m.user_id = ${user.id}
@@ -36,6 +51,11 @@ export async function getWorkspaceForUser(user: {
       role: row.role,
       ownerId: row.owner_id,
       aiModel: row.ai_model,
+      ttsProvider: isTtsProviderId(row.tts_provider)
+        ? row.tts_provider
+        : DEFAULT_TTS_PROVIDER,
+      assemblyAiKeyConfigured: row.assemblyai_key_configured === true,
+      assemblyAiVoiceIds: readAssemblyAiVoiceIds(row.assemblyai_voice_ids),
     };
   }
 
@@ -53,5 +73,14 @@ export async function getWorkspaceForUser(user: {
     VALUES (${id}, ${user.id}, 'owner')
     ON CONFLICT DO NOTHING`;
 
-  return { id, name, role: "owner", ownerId: user.id, aiModel: null };
+  return {
+    id,
+    name,
+    role: "owner",
+    ownerId: user.id,
+    aiModel: null,
+    ttsProvider: DEFAULT_TTS_PROVIDER,
+    assemblyAiKeyConfigured: false,
+    assemblyAiVoiceIds: [],
+  };
 }

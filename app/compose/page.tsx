@@ -88,6 +88,16 @@ import {
   defaultVoiceForLanguage,
   type TtsVoiceId,
 } from '@/lib/tts/voices';
+import {
+  DEFAULT_TTS_PROVIDER,
+  defaultVoiceForProvider,
+  isTtsProviderId,
+  isVoiceForProvider,
+  providerSupportsLanguage,
+  providerSupportsSpeed,
+  readAssemblyAiVoiceIds,
+  type TtsProviderId,
+} from '@/lib/tts/providers';
 import { fetchQueueItem, fetchQueuePage, type QueueItem } from '@/lib/story-queue';
 import {
   MediaPreviewCard,
@@ -231,7 +241,19 @@ function ComposeWorkspace() {
   const animations = attachmentsFromSlots(animSlots, animLoops);
   const [narrationMode, setNarrationMode] = useState<NarrationMode>('off');
   const voiceOverEnabled = narrationMode === 'voice';
-  const [voiceId, setVoiceId] = useState<TtsVoiceId>('en-PH-RosaNeural');
+  const [ttsProvider, setTtsProvider] = useState<TtsProviderId>(DEFAULT_TTS_PROVIDER);
+  const [ttsConfigured, setTtsConfigured] = useState(false);
+  const [ttsSettingsLoading, setTtsSettingsLoading] = useState(true);
+  const [ttsSettingsRefreshing, setTtsSettingsRefreshing] = useState(false);
+  const [ttsSettingsLoaded, setTtsSettingsLoaded] = useState(false);
+  const ttsSettingsLoadedRef = useRef(false);
+  const ttsSettingsRequestId = useRef(0);
+  const [ttsSettingsError, setTtsSettingsError] = useState('');
+  const [assemblyAiVoiceIds, setAssemblyAiVoiceIds] = useState<string[]>([]);
+  const [voiceOverVoiceId, setVoiceOverVoiceId] = useState(() =>
+    defaultVoiceForProvider(DEFAULT_TTS_PROVIDER, 'en')
+  );
+  const [avatarVoiceId, setAvatarVoiceId] = useState<TtsVoiceId>('en-PH-RosaNeural');
   const [speechSpeed, setSpeechSpeed] = useState(1);
   const [originalVolume, setOriginalVolume] = useState(0.25);
   const [narration, setNarration] = useState<VoiceOverAudio | null>(null);
@@ -240,6 +262,54 @@ function ComposeWorkspace() {
   const ttsSequence = useRef(0);
   const ttsAbortRef = useRef<AbortController | null>(null);
   const narrationUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    async function loadTtsSettings() {
+      const requestId = ++ttsSettingsRequestId.current;
+      if (!ttsSettingsLoadedRef.current) setTtsSettingsLoading(true);
+      else setTtsSettingsRefreshing(true);
+      setTtsSettingsError('');
+      try {
+        const response = await fetch('/api/workspace', { cache: 'no-store' });
+        if (!response.ok) throw new Error('Could not load the saved voice-over provider.');
+        const data = await response.json();
+        if (!active || requestId !== ttsSettingsRequestId.current) return;
+        const nextProvider = isTtsProviderId(data.ttsProvider)
+          ? data.ttsProvider
+          : DEFAULT_TTS_PROVIDER;
+        const nextVoiceIds = readAssemblyAiVoiceIds(data.assemblyAiVoiceIds);
+        setTtsProvider(nextProvider);
+        setTtsConfigured(data.ttsConfigured === true);
+        setAssemblyAiVoiceIds(nextVoiceIds);
+        setVoiceOverVoiceId((current) =>
+          isVoiceForProvider(current, nextProvider, nextVoiceIds)
+            ? current
+            : defaultVoiceForProvider(nextProvider, language)
+        );
+        ttsSettingsLoadedRef.current = true;
+        setTtsSettingsLoaded(true);
+      } catch {
+        if (active && requestId === ttsSettingsRequestId.current) {
+          setTtsSettingsError(
+            'Could not load the saved voice-over provider. Reopen Settings and try again.'
+          );
+        }
+      } finally {
+        if (active && requestId === ttsSettingsRequestId.current) {
+          setTtsSettingsLoading(false);
+          setTtsSettingsRefreshing(false);
+        }
+      }
+    }
+    const refreshOnFocus = () => void loadTtsSettings();
+    void loadTtsSettings();
+    window.addEventListener('focus', refreshOnFocus);
+    return () => {
+      active = false;
+      window.removeEventListener('focus', refreshOnFocus);
+    };
+  }, [language]);
   const [avatarId, setAvatarId] = useState<AvatarId>(DEFAULT_AVATAR_ID);
   const [avatarTransparent, setAvatarTransparent] = useState(false);
   const [transparencySupported, setTransparencySupported] = useState(true);
@@ -385,7 +455,8 @@ function ComposeWorkspace() {
 
   function changeLanguage(value: 'en' | 'tl') {
     setLanguage(value);
-    setVoiceId(defaultVoiceForLanguage(value));
+    setVoiceOverVoiceId(defaultVoiceForProvider(ttsProvider, value));
+    setAvatarVoiceId(defaultVoiceForLanguage(value));
   }
 
   async function generateVoiceOver() {
@@ -394,6 +465,12 @@ function ComposeWorkspace() {
       !text ||
       !voiceOverEnabled ||
       (!videoFile && !images.length) ||
+      !ttsSettingsLoaded ||
+      ttsSettingsLoading ||
+      ttsSettingsRefreshing ||
+      Boolean(ttsSettingsError) ||
+      !ttsConfigured ||
+      !providerSupportsLanguage(ttsProvider, language) ||
       ttsGenerating ||
       editorLocked ||
       drafting ||
@@ -403,6 +480,9 @@ function ComposeWorkspace() {
     ) {
       return;
     }
+    const requestProvider = ttsProvider;
+    const requestVoiceId = voiceOverVoiceId;
+    const requestSpeed = providerSupportsSpeed(ttsProvider) ? speechSpeed : 1;
     const requestId = ++ttsSequence.current;
     ttsAbortRef.current?.abort();
     const controller = new AbortController();
@@ -413,7 +493,12 @@ function ComposeWorkspace() {
       const response = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, voiceId, speed: speechSpeed }),
+        body: JSON.stringify({
+          text,
+          voiceId: requestVoiceId,
+          speed: requestSpeed,
+          language,
+        }),
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -434,8 +519,10 @@ function ComposeWorkspace() {
         blob,
         url,
         text,
-        voiceId,
-        speed: speechSpeed,
+        voiceId: requestVoiceId,
+        provider: requestProvider,
+        language,
+        speed: requestSpeed,
         duration: 0,
       });
     } catch (error) {
@@ -563,7 +650,7 @@ function ComposeWorkspace() {
         body: JSON.stringify({
           text,
           avatarId,
-          voiceId,
+          voiceId: avatarVoiceId,
           speed: speechSpeed,
           transparent: avatarTransparent,
         }),
@@ -1461,14 +1548,27 @@ function ComposeWorkspace() {
 
   const words = wordCount(draft);
   const speechText = normalizeSpeechText(draft);
+  const voiceOverSpeed = providerSupportsSpeed(ttsProvider) ? speechSpeed : 1;
+  const voiceOverAvailable =
+    ttsSettingsLoaded &&
+    !ttsSettingsLoading &&
+    !ttsSettingsError &&
+    ttsConfigured &&
+    providerSupportsLanguage(ttsProvider, language);
   const narrationStale = Boolean(
     narration &&
       (narration.text !== speechText ||
-        narration.voiceId !== voiceId ||
-        narration.speed !== speechSpeed)
+        narration.provider !== ttsProvider ||
+        narration.voiceId !== voiceOverVoiceId ||
+        narration.language !== language ||
+        narration.speed !== voiceOverSpeed)
   );
   const voiceOverReady = Boolean(
-    voiceOverEnabled && narration && !narrationStale && !ttsGenerating
+    voiceOverEnabled &&
+    narration &&
+    voiceOverAvailable &&
+    !narrationStale &&
+    !ttsGenerating
   );
   const hasMedia = Boolean(videoFile || images.length);
   const avatarActive = isAvatarJobActive(avatarJob);
@@ -1476,7 +1576,7 @@ function ComposeWorkspace() {
     avatarJob &&
       (avatarJob.text !== speechText ||
         avatarJob.avatarId !== avatarId ||
-        avatarJob.voiceId !== voiceId ||
+        avatarJob.voiceId !== avatarVoiceId ||
         avatarJob.speed !== speechSpeed ||
         avatarJob.hasAlpha !== avatarTransparent),
   );
@@ -1507,6 +1607,18 @@ function ComposeWorkspace() {
           : 'This avatar video is already being published or has been published';
     else if (avatarJob.status !== 'completed' || !avatarJob.videoUrl)
       narrationUnavailableReason = 'Generate a ready avatar video before publishing';
+  } else if (voiceOverEnabled && !ttsSettingsLoaded) {
+    narrationUnavailableReason = 'Loading the saved voice-over provider';
+  } else if (voiceOverEnabled && ttsSettingsError) {
+    narrationUnavailableReason = ttsSettingsError;
+  } else if (voiceOverEnabled && !ttsConfigured) {
+    narrationUnavailableReason = 'Configure the voice-over provider in Settings';
+  } else if (
+    voiceOverEnabled &&
+    !providerSupportsLanguage(ttsProvider, language)
+  ) {
+    narrationUnavailableReason =
+      'AssemblyAI supports English only; choose Azure Speech for Filipino or Tagalog';
   } else if (voiceOverEnabled && !hasMedia) {
     narrationUnavailableReason = 'Attach a photo or video for the voice-over';
   } else if (voiceOverEnabled && ttsGenerating) {
@@ -1734,9 +1846,16 @@ function ComposeWorkspace() {
                           onEnabledChange={(enabled) =>
                             changeNarrationMode(enabled ? 'voice' : 'off')
                           }
-                          voiceId={voiceId}
-                          onVoiceChange={setVoiceId}
-                          speed={speechSpeed}
+                          provider={ttsProvider}
+                          providerConfigured={ttsConfigured}
+                          providerLoading={ttsSettingsLoading}
+                          providerRefreshing={ttsSettingsRefreshing}
+                          providerLoadError={ttsSettingsError}
+                          clonedVoiceIds={assemblyAiVoiceIds}
+                          language={language}
+                          voiceId={voiceOverVoiceId}
+                          onVoiceChange={setVoiceOverVoiceId}
+                          speed={voiceOverSpeed}
                           onSpeedChange={setSpeechSpeed}
                           originalVolume={originalVolume}
                           onOriginalVolumeChange={setOriginalVolume}
@@ -1767,8 +1886,8 @@ function ComposeWorkspace() {
                         <TalkingAvatarPanel
                           avatarId={avatarId}
                           onAvatarChange={changeAvatar}
-                          voiceId={voiceId}
-                          onVoiceChange={setVoiceId}
+                          voiceId={avatarVoiceId}
+                          onVoiceChange={setAvatarVoiceId}
                           speed={speechSpeed}
                           onSpeedChange={setSpeechSpeed}
                           transparent={avatarTransparent}

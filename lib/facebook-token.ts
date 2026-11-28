@@ -9,6 +9,7 @@ const TAG_BYTES = 16;
 // key derivation with another.
 export const SECRET_INFOS = {
   facebookPageToken: 'facebook-page-token',
+  assemblyAiApiKey: 'assemblyai-api-key',
   llmProviderKey: 'llm-provider-key',
   youtubeToken: 'youtube-token',
   tiktokToken: 'tiktok-token',
@@ -70,6 +71,14 @@ export function encryptToken(token: string): string {
 
 export function decryptToken(payload: string): string {
   return decryptSecret(payload, SECRET_INFOS.facebookPageToken);
+}
+
+export function encryptAssemblyAiKey(key: string): string {
+  return encryptSecret(key, SECRET_INFOS.assemblyAiApiKey);
+}
+
+export function decryptAssemblyAiKey(payload: string): string {
+  return decryptSecret(payload, SECRET_INFOS.assemblyAiApiKey);
 }
 
 export function encryptYouTubeSecret(token: string): string {
