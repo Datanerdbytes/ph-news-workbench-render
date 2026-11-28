@@ -39,6 +39,7 @@ import {
 } from '@/components/compose/narration-mode-selector';
 import { TalkingAvatarPanel } from '@/components/compose/talking-avatar-panel';
 import { AvatarOverlayEditor } from '@/components/compose/avatar-overlay-editor';
+import { SlideshowStylePicker } from '@/components/compose/slideshow-style-picker';
 import { FacebookMark } from '@/components/facebook-mark';
 import { useFacebookConnection } from '@/components/facebook-connection';
 import { FacebookPreview } from '@/components/facebook-preview';
@@ -105,6 +106,7 @@ import { VideoAnimationOverlay } from '@/components/videos/video-animation-overl
 import { bakeAndFinalizeVideo } from '@/lib/videos/bake';
 import { flattenTransparentAvatar } from '@/lib/videos/avatar-video';
 import { bakeAndFinalizeNarratedSlideshow } from '@/lib/videos/slideshow';
+import { DEFAULT_SLIDESHOW_PRESET_ID } from '@/lib/videos/slideshow-presets';
 import {
   DEFAULT_AVATAR_PLACEMENT,
   type AvatarPlacement,
@@ -239,6 +241,10 @@ function ComposeWorkspace() {
   const [narrationMode, setNarrationMode] = useState<NarrationMode>('off');
   const voiceOverEnabled = narrationMode === 'voice';
   const [showWaveform, setShowWaveform] = useState(true);
+  // Photo-motion preset for the narrated slideshow (straight cuts by default).
+  const [slideshowPresetId, setSlideshowPresetId] = useState<string>(
+    DEFAULT_SLIDESHOW_PRESET_ID
+  );
   const [ttsProvider, setTtsProvider] = useState<TtsProviderId>(DEFAULT_TTS_PROVIDER);
   const [ttsConfigured, setTtsConfigured] = useState(false);
   const [ttsSettingsLoading, setTtsSettingsLoading] = useState(true);
@@ -992,6 +998,7 @@ function ComposeWorkspace() {
             images,
             narration: narration.blob,
             showWaveform,
+            presetId: slideshowPresetId,
             onProgress: (pct) => {
               if (ownsBake()) setBakePct(pct);
             },
@@ -1072,6 +1079,7 @@ function ComposeWorkspace() {
             images,
             avatarUrl: avatarMediaUrl(avatarJob.id),
             avatarPlacement,
+            presetId: slideshowPresetId,
             onProgress: (pct) => {
               if (ownsBake()) setBakePct(pct);
             },
@@ -2045,6 +2053,15 @@ function ComposeWorkspace() {
                           }
                         />
                       </div>
+                    )}
+                    {!videoFile && images.length >= 2 && narrationMode !== 'off' && (
+                      <SlideshowStylePicker
+                        className="mt-3"
+                        presetId={slideshowPresetId}
+                        images={images}
+                        disabled={imagesBusy || baking || editorLocked}
+                        onSelect={setSlideshowPresetId}
+                      />
                     )}
                     {videoFile && videoPreviewUrl && !videoPreviewFailed && (
                       <VideoAnimationPicker

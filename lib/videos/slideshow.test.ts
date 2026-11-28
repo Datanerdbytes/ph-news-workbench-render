@@ -30,6 +30,7 @@ describe("bakeNarratedSlideshow", () => {
   let drawImage: ReturnType<typeof vi.fn>;
   let fill: ReturnType<typeof vi.fn>;
   let roundRect: ReturnType<typeof vi.fn>;
+  let translate: ReturnType<typeof vi.fn>;
   let narrationStart: ReturnType<typeof vi.fn>;
   let avatar: ReturnType<typeof makeAvatarVideo>;
   let capturedCanvases: HTMLCanvasElement[];
@@ -149,6 +150,7 @@ describe("bakeNarratedSlideshow", () => {
     drawImage = vi.fn();
     fill = vi.fn();
     roundRect = vi.fn();
+    translate = vi.fn();
     narrationStart = vi.fn();
     avatarDuration = 2;
     avatar = makeAvatarVideo();
@@ -175,6 +177,11 @@ describe("bakeNarratedSlideshow", () => {
       beginPath: vi.fn(),
       fill,
       roundRect,
+      fillRect: vi.fn(),
+      translate,
+      rotate: vi.fn(),
+      scale: vi.fn(),
+      createRadialGradient: vi.fn(() => ({ addColorStop: vi.fn() })),
     } as unknown as CanvasRenderingContext2D);
     originalCaptureStream = (
       HTMLCanvasElement.prototype as unknown as { captureStream?: unknown }
@@ -311,6 +318,26 @@ describe("bakeNarratedSlideshow", () => {
     expect(fill).not.toHaveBeenCalled();
     expect(roundRect).not.toHaveBeenCalled();
     await expect(bake).resolves.toBeInstanceOf(Blob);
+  });
+
+  it("animates photos with the carousel preset when one is set", async () => {
+    const bake = bakeNarratedSlideshow({
+      images: ["photo-1", "photo-2"],
+      narration: new Blob(["speech"], { type: "audio/mpeg" }),
+      presetId: "carousel",
+    });
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+    now = 40;
+    frames.shift()?.(40);
+    now = 1_100;
+    frames.shift()?.(1_100);
+    now = 2_100;
+    frames.shift()?.(2_100);
+    await expect(bake).resolves.toBeInstanceOf(Blob);
+    // Coverflow paints a backdrop and transformed cards instead of the bare
+    // full-frame photos of straight cuts (2 cards per frame here).
+    expect(translate).toHaveBeenCalled();
+    expect(drawImage.mock.calls.length).toBeGreaterThan(4);
   });
 
   it("waits for the avatar ended event after the slideshow timeline expires", async () => {
